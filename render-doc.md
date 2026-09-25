@@ -1,0 +1,57 @@
+# render-doc.py
+
+Build tool that renders `fetchconfig-web-documentation.html` (the HTML manual)
+from `README.md`. It is a development/build helper -- it is **not** needed at
+runtime by fetchconfig-web itself.
+
+## Usage
+
+```sh
+python3 render-doc.py [input-readme] [output-html]
+```
+
+Both arguments are optional and default to:
+
+- input:  `README.md`
+- output: `fetchconfig-web-documentation.html`
+
+Run it from the project directory after editing `README.md` to regenerate the
+manual:
+
+```sh
+python3 render-doc.py
+```
+
+## Requirements
+
+- Python 3 or Python 2.7 (standard library only -- `sys`, `re`, `io`, and
+  `html`/`cgi`; no third-party packages).
+- Runs unchanged on both Python 3 and Python 2.7.18.
+  packages).
+
+## What it does
+
+It converts the README's Markdown into a single, self-contained HTML page in
+the same visual style as the upstream `fetchconfig-documentation.html`:
+
+- Top-level `##` headings become numbered sections; `###`/`####` become
+  sub-headings.
+- GitHub-style pipe tables, fenced code blocks, ordered/unordered lists
+  (including wrapped continuation lines), blockquote callouts, and inline
+  code / bold / italic / links are all rendered.
+- The output has a sticky sidebar with scroll-spy navigation, a hero with
+  stat tiles, section "kickers", callouts and styled tables.
+
+The stylesheet is embedded in the script, so the generated HTML has no
+external assets other than Google Fonts, and the script needs no companion
+files.
+
+## Notes
+
+- The version shown in the sidebar pill and hero is set by the `v1.NN` /
+  `1.NN` literals in the page template inside the script; bump them on each
+  release.
+- The generator expects the README's structure (the section headings and
+  Markdown constructs listed above). If you add unusual Markdown, check the
+  generated HTML.
+- Output is 7-bit ASCII; any typography is emitted as HTML entities.

@@ -1,0 +1,358 @@
+#
+# CHANGES -- fetchconfig-web
+#
+# fetchconfig-web is a web front-end for the fetchconfig network device
+# configuration backup tool. Newest changes first.
+#
+
+1.12
+====
+* Minimum required fetchconfig version bumped from 9.57 to 9.60.
+* Device-table editor: numeric time fields now show their unit -- "s" for
+  timeout/fetch_timeout/banner_timeout, "ms" for prompt_settle_ms/type_delay.
++ New model "mediant-sbc" (AudioCodes Mediant SBC / gateway, Cisco-style CLI):
+  user/pass/enable mandatory; optional transport (ssh|telnet|auto), show_cmd,
+  debug, banner_timeout, prompt_settle_ms. Adds an "enum_transport" editor
+  field type and a dedicated highlighter for AudioCodes' parameter-value
+  config syntax.
++ Tools scan tools now run device checks concurrently, controlled by a new
+  MAX_PARALLEL_SCAN config option (default 1 = serial; allowed range 1..5; an
+  out-of-range value is a configuration error). The scan driver uses a
+  client-side worker pool, and the progress line shows how many scan processes
+  are currently running (e.g. "120 of 252 -- 4 of 4 scan processes in use").
+* Fixed intermittent, device-varying scan failures that appeared once
+  MAX_PARALLEL_SCAN > 1 was used. The main cause was the session idle-timeout
+  rewrite: it used a truncating open('>') before locking, so a concurrent
+  request could read the session file mid-truncate, be treated as logged out,
+  and receive the login page instead of JSON. Session files are now rewritten
+  atomically (temp file + rename). Also hardened along the way: interrupted
+  reads (EINTR) are retried instead of truncating output; the child exit
+  status is only trusted when waitpid actually reaped our process; and the
+  JSON error-detail is escaped to pure ASCII so a non-ASCII byte in a device's
+  error message cannot corrupt the response.
+* The scan tools now show why a device could not be checked (the fetchconfig
+  exit/stderr detail) next to the device name.
+* The single-backup config view now uses the full browser width (5% side
+  margins) instead of a fixed 900px, so wide config lines fit without
+  scrolling; the config box also keeps clear of the floating Top/Bottom nav.
++ New model "nexus-ssh" (Cisco Nexus / NX-OS over SSH; same options as
+  aruba-cx-ssh), with a dedicated NX-OS syntax highlighter (IOS-family token
+  rules plus operator-chosen banner delimiters and inline password/key blob
+  handling).
+* Minimum required fetchconfig version bumped from 9.56 to 9.57.
++ Tools: new "Empty Directory Cleanup" (like Orphaned Configuration Cleanup):
+  check (fetchconfig.pl -e) and delete (fetchconfig.pl -e -D) empty repository
+  directories. `-e` exits 0 = none, 1 = found; `-e -D` exits 0 on success.
+* Minimum required fetchconfig version bumped from 9.55 to 9.56.
+* All fetchconfig-transcript pages (Backup Now, empty/suffix backup checks,
+  orphaned-backup check and delete) are now ~30% wider so the output box needs
+  less horizontal scrolling, and their status lines are consistently coloured
+  (green on success, red on failure).
+* Documentation HTML now uses the available screen width: the layout is
+  wider and tables/code blocks fill the content area, so the CLI reference
+  table no longer needs a horizontal scrollbar on wide screens (prose keeps a
+  readable measure).
+* Documentation: added a "How fetchconfig.pl is invoked" reference (every CLI
+  invocation, its arguments, parsed output, and exit codes); restructured the
+  security section into a "Security model" with grouped subsections; reviewed
+  the README against the current code (nav row, embedded images, feature list,
+  Setup/Tools gating); and removed the "Testing performed" section from the
+  deliverables.
++ Minimum required fetchconfig version bumped from 9.54 to 9.55.
++ The page footer now shows the installed fetchconfig version, e.g.
+  "fetchconfig-web v1.12 using fetchconfig v9.54 -- <copyright>" (omitted if
+  the version cannot be determined).
++ Tools: new "Check devices for consistent backup suffixes" scan (like the
+  empty-backup scan) that lists devices with a backup-suffix problem, using
+  fetchconfig.pl -s (exit 0 = consistent; 1 = suffixes inconsistent;
+  2 = consistent but does not match the configured filename_append_suffix).
+  Adds a matching "Check backup suffixes" button on each device's backup list
+  showing the full fetchconfig.pl -s output and which case applies.
++ Empty-backup check now also recognises fetchconfig's newer info: "wrote
+  listing of N zero-byte backup(s) ... to check.out" message.
++ Backup-filename parsing now tolerates fetchconfig's filename_append_suffix:
+  the Devices backup list still shows the correct date/time, and "Download
+  latest configuration" keeps a dotted suffix (e.g. ".txt") in the download
+  name, falling back to ".cfg" when there is none.
+* Fixed: the coriant-8600 model wrongly required an "enable" password in the
+  device-table editor; per fetchconfig it uses user/pass only, so the enable
+  field is no longer shown for it.
++ render-doc.py now runs on both Python 3 and Python 2.7.18 (standard library
+  only).
++ Requires fetchconfig 9.54+ (MIN_FETCHCONFIG_VERSION constant). The installed
+  version is read from <FETCHCONFIG_PATH>/fetchconfig/Constants.pm (cached,
+  refreshed when that file changes) and a warning banner is shown on every
+  page after login if it is older, or cannot be determined.
++ Config: the fetchconfig executable is now given as two keys,
+  FETCHCONFIG_PATH (install directory, also used to find Constants.pm) and
+  FETCHCONFIG_BIN (executable name); it is run as PATH/BIN. The old single
+  full-path FETCHCONFIG_BIN form is no longer accepted -- update old configs.
++ Tools / Restore device table: new "Delete backups older than days" bulk
+  cleanup (days >= 1, default 30; POST + CSRF + confirm). Deletes
+  device-table backups older than the given age by their filename timestamp,
+  but ALWAYS keeps the single newest backup even if it is older. The control
+  is only shown when at least two backups exist.
++ The app version is now a built-in APP_VERSION constant in
+  fetchconfig-web.cgi; the config file's APP_VERSION key optionally
+  overrides it (previously the footer was empty without the key).
++ Licensed under the GNU GPL v3 (or later): GPL headers added to both Perl
+  programs, a LICENSE file with the full GPLv3 text shipped, and a License
+  section added to the README.
+* Security hardening (review of 2026-09-17):
+  - Device ids and usernames now reject a leading "-" (regex
+    ^[\w.][\w.\-]*$ via a central valid_id()), so an id can no longer be
+    mistaken for a fetchconfig.pl option (e.g. "-D") when passed as a
+    positional argument.
+  - Removed acceptance of unsalted {SHA} password hashes; $apr1$, $1$,
+    $5$/$6$ and DES crypt remain supported.
+  - Session cookie now sets SameSite=Lax (defence-in-depth with CSRF).
+  - Failed logins are delayed by 2 seconds (uniformly, to avoid leaking
+    whether the user or the password was wrong).
+  - The Backup Now cleartext-credential temp file is now auto-removed on
+    process exit (File::Temp UNLINK), even if the request dies.
+  - SESSION_TTL is now an idle timeout: the expiry slides forward on every
+    request instead of being fixed at login.
+  - Numeric/boolean config keys (SESSION_TTL, DEVICE_ID_FIELD,
+    USE_SUDO_FOR_BACKUP_NOW) are validated and fall back to their defaults
+    on invalid values.
+* Removed a duplicate .btn-small CSS rule.
++ Device-table editor, Email notification tab: added the optional "port"
+  option (SMTP server TCP port; overrides a port given in smtp=host:port,
+  else the TLS-mode default is used).
++ Device-table editor, Email notification tab: added the optional "tls"
+  option -- a drop-down for the SMTP transport security (off | starttls | ssl).
+  The drop-down now appears both when the option is already present and when
+  it is added via "+ add option" (added enum/debug/int options render with
+  their proper control instead of a plain text field).
++ Device-table editor: the aruba-cx-ssh model gained the optional
+  prompt_settle_ms option (milliseconds to wait for output to go idle before
+  matching the prompt; default 150, 0 disables).
+
+1.11
+====
++ The web UI config file default path is now /etc/fetchconfig-web.cfg (was
+  /etc/fetchconfig.cfg); rename the file on upgrade. The path is defined once
+  per script and all messages/generated output derive from it.
++ Backup list: new "Download latest configuration" button (beside "Check for
+  empty backups") downloads the newest backup's config -- normal devices as
+  "<Device-ID>-YYMMDD-HHMMSS.cfg" (timestamp from the backup file), web-binary
+  models as their decoded config file.
+* Renamed "Check Empty Backups" to "Check for empty backups", and made all
+  button labels sentence case app-wide (Backup now, Compare selected, Side by
+  side selected, Clear filter).
++ New "Status" page (nav, between Devices and Setup): a table of every
+  device's last-run status read from the per-device .status files -- Device-ID
+  (clickable), start/end date+time, duration, state and changed. State is
+  coloured (success=green, failed=red, skipped=blue) and changed
+  (changed/forced=blue, unknown=red, unchanged=normal); devices with no status file show
+  N/A. State and Changed have dropdown filters (incl. N/A), plus the same
+  sorting, All/10/25/50/100 paging and First/Prev/Next/Last controls as the
+  device list, and a "Status table load time" line below the table. Opening a
+  device from Status makes the backup page's breadcrumb return to Status.
++ Tools: new "View fetchconfig log" section with a "Display log" button that
+  opens the scheduled (cron) fetchconfig.pl output on its own page
+  (?action=view_log; path set via the new FETCHCONFIG_LOG config key).
+  The log is split into collapsible sections at each -----[NAME]----- header,
+  with the name in bold and coloured green (ok) or red (failed, i.e. body
+  contains error:/failed); failed sections start expanded, plus Expand all /
+  Collapse all buttons. At most LOG_MAX_DEVICES sections (default 1000) are
+  shown, with a warning if the log has more. A "Log table load time" line
+  (ms/s) is shown below the output. Config: FETCHCONFIG_LOG moved
+  under "# --- fetchconfig paths ---" and the binary path is now under
+  "# --- fetchconfig binary paths ---".
++ Devices page: the statistics panel now shows "Device table load time"
+  (in milliseconds under 1s, otherwise seconds; same small font as the
+  footer) as feedback on how long reading and parsing the device table took.
++ Backup Now spinner: if a per-device status file exists (fetchconfig
+  >= 9.52 writes "<repository>/<device-id>.status"), the overlay also shows,
+  below the runtime counter, the last run's "Last runtime: Ns", "Last backup
+  state" (success=green/failed=red/skipped=black) and "Last backup changed"
+  (unchanged=green/changed,forced=blue/unknown=black). The repository is
+  resolved from the device's repository= option, else its model's default:
+  repository=.
++ Backup Now: while the (blocking) backup runs, a full-screen overlay shows
+  a spinner and the elapsed runtime in a large font; after 10 seconds it adds
+  a note that backing up a device can take a while.
++ Device-table editor, Email notification tab: added the optional "footer"
+  option (the copyright/attribution text shown in the summary e-mail's
+  footer).
+* Fixed: with more than one email: line (fetchconfig allows the line to be
+  repeated), the editor wrongly warned that from/to/smtp were missing when
+  they were split across lines (e.g. from/to/smtp on one line and footer on
+  another). The mandatory-option check now considers the merged set of all
+  email: lines.
+* email: option values are no longer double-quoted just for containing
+  spaces (the email: line is comma-separated, so spaces don't need quoting).
+  In particular footer="..." is written bare, e.g. footer=(c) 2026 Acme.
+  Values containing a comma are still quoted.
+
+1.10
+====
++ New device model "procurve-snmp" (HP ProCurve ProVision incl. 4000M/8000M,
+  backed up over SNMP+TFTP). No user/pass -- the mandatory secret is the SNMP
+  read-write "community"; also repository/keep mandatory and timeout,
+  snmp_version, oid, remote_file, changes_only, on_fetch_run, on_fetch_cat,
+  timezone, filename_append_suffix, debug optional. Its backup is text, so it
+  uses the normal content view and Compare / Side by Side diffs (no
+  highlighting). The community= value is now masked wherever config is shown.
+* Fixed: the Copy button on a config view could put non-ASCII text (e.g.
+  umlauts) on the clipboard in the wrong encoding over plain HTTP, where the
+  async Clipboard API isn't available. The legacy fallback now sets the
+  clipboard data as UTF-8 text/plain explicitly.
+* Fixed: non-ASCII characters (e.g. German umlauts) in a backup showed as
+  mojibake in the config/compare views -- the fetched config bytes are now
+  decoded from UTF-8 before output, so they display correctly.
++ Devices page and the device-table editor's Devices tab: the pager gained
+  First and Last buttons (in addition to Prev/Next) to jump straight to the
+  first or last page of a long list.
++ Devices page: added a Hostname column (between Device-ID and Comment) with
+  its own filter box (cookie-persisted like the others). Sorting the Hostname
+  column puts IPv4 addresses first in numeric IP order, then hostnames/FQDNs
+  alphabetically (IPv6 sorts with the names).
++ Device-table editor: the "+ Add model defaults" button (Defaults tab) now
+  adds the new entry at the top of the list (like "+ Add device"), so it's
+  visible without scrolling.
++ New device model "aruba-cx-ssh" (Aruba CX / AOS-CX over SSH). user/pass
+  mandatory (no enable -- AOS-CX has none); show_cmd, debug and banner_timeout
+  optional. Includes a dedicated AOS-CX syntax highlighter (! comments, a
+  "!"-delimited banner, "ciphertext" credential blobs left plain, 1/1/1 and
+  lag/vlan interfaces, IPv4/CIDR, single-quoted descriptions; no, user,
+  loop-protect and ntp are coloured as command keywords like interface).
++ New device model "planet-ssh" (PLANET managed switches, Cisco-IOS-like CLI
+  over SSH). user/pass mandatory; enable, show_cmd, debug, banner_timeout and
+  type_delay (ms between typed characters) optional. Reuses the Cisco IOS
+  syntax highlighter.
++ New device model "procurve-web-1700" (HP ProCurve 1700 series; web-managed,
+  no CLI). Same binary/uuencoded web-UI handling as tplink-web-sg105e --
+  Compare actions hidden, config view offers a Download of the transparently
+  uudecoded binary ("<Device-ID>-switch.cfg"). The switch has only a manager
+  password, so its "user" option is optional (ignored).
++ New device model "tplink-web-sg105e" (TP-Link Easy Smart switches, e.g.
+  TL-SG105E). These have no CLI; fetchconfig scrapes the web GUI over HTTP.
+  Options: user/pass/repository/keep/timeout mandatory, plus fetch_timeout,
+  changes_only, on_fetch_run, on_fetch_cat, timezone, filename_append_suffix
+  and debug=on|off optional.
++ Their backups are opaque binary files stored uuencoded, so for this model
+  the web UI: (a) hides the Compare Selected / Side by Side Selected actions
+  and the backup checkboxes (a line diff isn't meaningful), and (b) replaces
+  the config text view with a page offering a Download button that
+  transparently uudecodes the stored backup to the real binary, named
+  "<Device-ID>-config.cfg" (what the switch's Config Restore page expects).
+
+1.9
+===
++ New device model "zyxel" in the editor catalog (user/pass/repository/keep/
+  timeout mandatory; enable, show_cmd and debug=on|off optional), with a
+  dedicated IOS-like syntax highlighter (handles the spaced
+  "GigabitEthernet 1/1" unit and leaves the "password encrypted" blob
+  un-tokenised).
+
+1.8
+===
++ Bulk Edit (Setup page, admin only): a plain-text editor for the device
+  lines. Loads the complete device list (passwords in plain text); saving
+  replaces the entire DEVICES SECTION, with all-or-nothing validation, the
+  mtime guard, and a timestamped backup -- the default:/email: sections are
+  left untouched.
++ Tools: "Devices without backups" and "Check devices for empty backups"
+  scans -- check every Device-ID (via fetchconfig.pl -l and -z respectively)
+  and list the flagged devices, with a live progress bar and a Start/Cancel
+  button (client-driven, one read-only JSON request per device; admin only).
+  Devices that can't be checked are listed by name.
+* Fixed: "Check devices for empty backups" missed devices that actually had
+  empty backups and reported them as errors -- the -z result was misparsed
+  (a single-device -z line is "<num>\t<size>\t<path>", no dev-id) and -z's
+  exit status 1 ("empties found") was treated as a failure.
++ Restore device table (Tools page, admin only): lists the timestamped
+  backups in $BACKUP_DEVICE_TABLE with View / Restore / Delete. Restore
+  backs up the current table first (so it's undoable); Restore and Delete
+  each confirm. Backup names are strictly validated (no path traversal).
+  A "current" row (the live table) and per-row checkboxes allow comparing
+  any two configurations, via "Compare Selected" (unified diff, showing only
+  changed lines) or "Side by Side Selected" (two-column). The newer config
+  is always green, the older red (current = newest, else later timestamp),
+  regardless of tick order; whitespace outside quotes is ignored
+  (quote-aware). View and Compare mask passwords by default, with a "Mask
+  passwords" checkbox to reveal them (the whole section is admin-only).
+* Fixed: the unified "Compare Selected" diff legend said
+  "added/removed/changed" but that view only colours old (red) vs new
+  (green) -- the legend now reads "red = old, green = new". The Side by Side
+  legend (added/removed/changed) is unchanged.
++ Device-table editor: the Devices tab gained Device-ID and comment filter
+  boxes (substring, AND-combined, matched against live field values),
+  remembered in a cookie; pagination now works over the filtered set.
++ Device-table editor (Setup -> Edit device table): a structured, three-tab
+  editor (Devices / Defaults / Email) driven by a per-model option catalog,
+  replacing hand-editing of the raw table. Masked-secret fields with a
+  keep-on-save placeholder, per-model "+ add option" menus, host validation
+  (IPv4/IPv6/FQDN), duplicate-Device-ID checks, a "Preview raw table" step
+  (Save or Back from the preview), a modification-time concurrency guard,
+  and a timestamped backup written to $BACKUP_DEVICE_TABLE before each save.
+  New devices are added at the top; the Devices tab paginates at 100 per
+  page. Option parsing/serialisation matches fetchconfig V9.38 exactly
+  (Text::ParseWords, keep=1) including comment= and quoted values.
++ "admin_function" per-user right: a user with it is a full admin,
+  equivalent to the built-in "admin" account (user management, Tools,
+  Setup/editor). Managed from the User page's new "Admin functions" column
+  and an Add-user checkbox; the built-in "admin" stays undeletable and
+  always-on. New "admin_function" column in the users table (see README for
+  the manual upgrade SQL).
++ Tools page (admins only): "Check for orphaned backups" (fetchconfig -o,
+  read-only) and "Delete orphaned backups" (fetchconfig -o -D, confirmed
+  first). Output shown like a Backup Now run.
++ Config syntax highlighting on the backup content view for cisco-ios and
+  cisco-ios-ssh, via an extensible per-model highlighter registry.
+  Certificate/key hex dumps and banner blocks are left un-highlighted.
+  Highlighting is cosmetic only -- same escaping/secret-masking as the plain
+  view; the Copy button still copies plain text.
++ New device model "hirschmann" in the editor catalog (user/pass/repository/
+  keep/timeout mandatory; enable and show_cmd optional).
++ Device view: model filter is now a dropdown of the models in use; filter
+  choices persist in a cookie across navigation; statistics panel moved to
+  the upper-right and gained a live "devices filtered" count.
++ Floating "Top"/"Bottom" navigation buttons (bottom-right, clear of the
+  Log out link) on the long views: device list, Setup, device-table editor,
+  backup content view, and side-by-side diff.
++ Editor action buttons (Preview / Save without preview / Cancel) moved to
+  the top of the editor.
++ User page: the "Change your password", "Users", and "Add user" areas are
+  now visually separated boxes.
++ Device-table editor writes the table in a fixed section layout
+  (DEFAULT OPTIONS SECTION / DEVICES SECTION), preserving option order and
+  keeping unknown directives under a "# Unknown" heading, with a blank line
+  between default groups of different models.
++ Editor backups now go to a configurable directory, BACKUP_DEVICE_TABLE
+  (default /usr/local/fetchconfig/backup); the table is overwritten in
+  place so only the file and the backup directory need to be web-writable.
+* Fixed: the read-only "Compare" form is now submitted with the correct
+  urlencoded enctype (was emitting multipart/form-data with method=GET,
+  which Firefox warned about).
+
+1.7
+===
++ Intermediate development version introducing the first structured
+  device-table editor; superseded by the consolidated 1.8 above.
+
+1.6
+===
++ User accounts moved from the htpasswd file to a PostgreSQL database
+  (DBI/DBD::Pg). Standalone setup script fetchconfig-web-dbsetup.pl creates
+  the database/table, can import existing htpasswd accounts, and can write
+  /etc/fetchconfig.cfg. New-password hashing is pure-Perl Apache MD5
+  ($apr1$), so the htpasswd binary and its sudo rule are no longer needed.
++ Per-user "edit_device_table" right (grantable from the User page) that
+  also grants read access to the Setup page.
++ Default-password login warning until an account changes away from the
+  default password.
++ All configuration moved to an external file, /etc/fetchconfig.cfg
+  (key = value); only the config-file path, app title, and cookie name stay
+  hard-coded.
+
+1.5 and earlier
+===============
++ Login, device list with live filter and sortable Model/Device-ID columns,
+  per-device backup list with Date/Time columns, backup content view with
+  copy-to-clipboard, unified "Compare" and "Side by Side" diff views,
+  "Backup Now" and "Check Empty Backups", the read-only Setup page, in-UI
+  user management, and the Help page. CSRF protection and server-side
+  session store throughout.
