@@ -5,9 +5,9 @@ title bar and logo shown on every page, and a Devices / Status / User / Help
 menu (plus a Setup item for accounts with the edit or admin right) in the
 title bar's nav row:
 
-> **Requires fetchconfig 9.60 or newer.** fetchconfig-web reads the installed
+> **Requires fetchconfig 9.64 or newer.** fetchconfig-web reads the installed
 > version from `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and shows a
-> warning banner (on every page, after login) if it is older than 9.60 or
+> warning banner (on every page, after login) if it is older than 9.64 or
 > cannot be determined. The minimum is set by the `MIN_FETCHCONFIG_VERSION`
 > constant in `fetchconfig-web.cgi`.
 
@@ -149,6 +149,8 @@ REPOSITORY              = /usr/local/fetchconfig/config
 FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
 LOG_MAX_DEVICES         = 1000
 MAX_PARALLEL_SCAN       = 1
+FONT_BASE_URL           = /fetchconfig-web/fonts
+IMAGE_BASE_URL          = /fetchconfig-web/images
 FETCHCONFIG_PATH        = /usr/local/fetchconfig
 FETCHCONFIG_BIN         = fetchconfig.pl
 BACKUP_DEVICE_TABLE     = /usr/local/fetchconfig/backup
@@ -166,7 +168,7 @@ PROTECTED_USER          = admin
 MIN_PASSWORD_LENGTH     = 8
 DEFAULT_PASSWORD        = fetchconfig
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
-APP_VERSION             = 1.12
+APP_VERSION             = 1.14
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 
@@ -352,6 +354,24 @@ chmod 755 /www/cgi-bin/fetchconfig-web.cgi
 ```
 
 Point your browser at `https://yourhost/cgi-bin/fetchconfig-web.cgi`.
+
+**Login backdrop and static assets.** `FONT_BASE_URL` (default
+`/fetchconfig-web/fonts`) and `IMAGE_BASE_URL` (default `/fetchconfig-web/images`)
+are the **URL paths** (not filesystem paths) under which the web server serves
+the optional fonts and images. The login page shows a full-page backdrop
+image loaded from `<IMAGE_BASE_URL>/back.jpg`; the title bar, login box and
+the (bottom-centred) copyright footer stay legible on top of it. Copy the
+`back.jpg` shipped in the `images/` directory of this package to wherever the
+server serves `IMAGE_BASE_URL`, e.g.:
+
+```sh
+mkdir -p /www/pub/fetchconfig-web/images
+cp images/back.jpg /www/pub/fetchconfig-web/images/
+```
+
+and set `IMAGE_BASE_URL` to the matching URL path (e.g. `/pub/fetchconfig-web/images`).
+If the file is absent the login page simply shows a plain background. Only the
+login page uses the backdrop; the logged-in pages do not.
 
 **Create the device-table backup directory at install time.** If you use the
 device-table editor, the app needs `$BACKUP_DEVICE_TABLE` (default
@@ -784,11 +804,14 @@ point, and the save reports its path in that case.
 
 The editor's option catalog is easy to extend: each model maps to a set of
 `{option => {type, mandatory}}` entries in `%MODEL_CATALOG`, built from a
-shared common set. Models fetchconfig registers but the README doesn't
-document (e.g. `procurve-ssh`, `comware-ssh`) use the common set, with
-ProCurve models additionally offering `debug`. The catalog covers all
+shared common set (`timeout` is optional everywhere -- fetchconfig defaults it
+to 30 seconds). `procurve` and `procurve-ssh` use the common set plus an
+optional `enable` (manager/enable password) and `debug=on|off`; `comware-ssh`
+uses the common set plus `debug`; `cisco-sg300` adds optional `enable` and
+`show_cmd`; `dell` adds optional `show_cmd`; `mikrotik` is user/pass only (no
+`enable`). The catalog covers all
 registered models, including `hirschmann` and `zyxel`
-(user/pass/repository/keep/timeout mandatory; `enable` and `show_cmd`
+(user/pass/repository/keep mandatory; `enable` and `show_cmd`
 optional), with `zyxel` also accepting `debug=on|off`, `planet-ssh` (PLANET
 managed switches, Cisco-IOS-like over SSH -- user/pass mandatory; `enable`,
 `show_cmd`, `debug`, `banner_timeout` and `type_delay` optional), `aruba-cx-ssh` (Aruba CX / AOS-CX over SSH -- user/pass mandatory,
@@ -799,7 +822,9 @@ optional), `nexus-ssh` (Cisco Nexus / NX-OS over SSH -- same option set as
 Mediant SBC / gateway, current Cisco-style CLI -- user/pass/`enable`
 mandatory; optional `transport`=`ssh`|`telnet`|`auto` (default `ssh`;
 `auto` falls back to telnet only when no SSH service answers), plus
-`show_cmd`, `debug`, `banner_timeout` and `prompt_settle_ms`), and the
+`pager_cmd`, `show_cmd`, `debug`, `banner_timeout` and `prompt_settle_ms`), the
+template-driven `generic` model (see "The generic (template-driven) model"
+above), and the
 web-managed binary-backup models `tplink-web-sg105e` and `procurve-web-1700`
 (common set + `debug=on|off`, no `enable`/`show_cmd` since they have no CLI;
 `procurve-web-1700` also makes `user` optional, as the switch has only a
@@ -815,6 +840,36 @@ Its backup is an ordinary text config, so it uses the normal content view
 and the Compare / Side by Side diffs (no syntax highlighter). The
 `community=` option value is masked (as `?***?`) wherever config text is
 shown, like `pass=`/`enable=`.
+
+### The generic (template-driven) model
+
+`generic` is fetchconfig's template-driven model: its device interaction is
+described by a template file rather than built into the module. In the device
+table it is selected with the model name `generic` and a `model=<template>`
+option that names the template (e.g. `model=cisco-ios` loads
+`templates/cisco-ios.tmpl`). Mandatory options are `user`, `pass`,
+`repository`, `keep` and `model`; optional ones include `transport`
+(`ssh`/`telnet`), `enable`, `changes_only`, `timeout`, `fetch_timeout`,
+`banner_timeout`, `fetch_delay`, `prompt_settle`, `max_visits`, `strip_ansi`,
+`prompt_head`, `prompt_tail`, `ssh_extra_opts`, `template_dir`, `debug`,
+`show_cmd`, `on_fetch_run`, `on_fetch_cat`, `timezone` and
+`filename_append_suffix` (most of the timing/prompt options may also be set in
+the template file).
+
+In the editor the `model=` option is rendered as a **drop-down of the
+available templates** rather than a free-text field. The list comes from
+`fetchconfig.pl -devices=<table> -t`, which prints the templates found in the
+default `templates/` directory and any `template_dir=` a loaded device (or a
+`default: generic` line) configures, one numbered name per line; the editor
+runs it once per Setup page, strips the leading number, and sorts the names
+alphabetically. If `-t` finds no templates (or cannot run) the field falls
+back to a plain text box.
+
+`model=` may be set on a `default: generic` line so all generic devices
+sharing one template need not repeat it; a device line can still override it.
+Accordingly the editor requires `model=` on a generic **device** line only
+when no `default: generic` line supplies it -- otherwise the device inherits
+the default. The dropdown appears on both the `default:` and device forms.
 
 ### Bulk edit
 

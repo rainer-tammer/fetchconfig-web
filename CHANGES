@@ -5,8 +5,33 @@
 # configuration backup tool. Newest changes first.
 #
 
+1.14
+====
++ New template-driven "generic" model. In the device table it is selected with
+  model=generic plus a model=<template> option naming the template; the editor
+  renders model= as a drop-down of the templates reported by
+  "fetchconfig.pl -t" (run once per Setup page, id number stripped, sorted;
+  falls back to a text field if none are found). The dropdown appears on both
+  the default: and device forms. model= is required on a generic device line
+  only when no "default: generic" line supplies it.
+* Model-option audit against the fetchconfig README: timeout is now optional
+  on every model (fetchconfig defaults it to 30s); added optional enable +
+  show_cmd to cisco-sg300, optional enable to procurve/procurve-ssh, optional
+  show_cmd to dell, optional debug to comware-ssh, optional pager_cmd to
+  mediant-sbc; removed an erroneous mandatory enable from mikrotik.
+* Minimum required fetchconfig version bumped to 9.64.
+* fetchconfig-web version bumped to 1.14.
+
 1.12
 ====
+* fetchconfig-web-dbsetup.pl now writes the FONT_BASE_URL and IMAGE_BASE_URL
+  keys into the generated config (in the "# --- fetchconfig paths ---" section).
+* Login page now shows a full-page backdrop image (IMAGE_BASE_URL/back.jpg)
+  behind the title bar, login box and a bottom-centred copyright footer, all of
+  which stay legible. Added two config keys, FONT_BASE_URL (default
+  /fetchconfig-web/fonts) and IMAGE_BASE_URL (default /fetchconfig/images), for
+  the URL paths of the fonts and images directories. Only the login page uses
+  the backdrop.
 * Minimum required fetchconfig version bumped from 9.57 to 9.60.
 * Device-table editor: numeric time fields now show their unit -- "s" for
   timeout/fetch_timeout/banner_timeout, "ms" for prompt_settle_ms/type_delay.

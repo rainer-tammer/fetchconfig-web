@@ -395,6 +395,8 @@ sub cfg_body {
 DEVICE_TABLE            = /usr/local/fetchconfig/device_table
 REPOSITORY              = /usr/local/fetchconfig/config
 FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
+FONT_BASE_URL           = /fetchconfig-web/fonts
+IMAGE_BASE_URL          = /fetchconfig-web/images
 
 # --- fetchconfig binary paths ---
 FETCHCONFIG_PATH        = /usr/local/fetchconfig

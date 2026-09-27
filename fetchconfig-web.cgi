@@ -59,11 +59,11 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.12';
+use constant APP_VERSION => '1.14';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.60';
+use constant MIN_FETCHCONFIG_VERSION => '9.64';
 
 my $CONFIG_FILE = '/etc/fetchconfig-web.cfg';
 my $APP_TITLE   = 'fetchconfig-web';
@@ -79,7 +79,8 @@ my ($DEVICE_TABLE, $REPOSITORY, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFI
     $DBinst, $DBuser, $DBpass, $DBhost,
     $PROTECTED_USER, $MIN_PASSWORD_LENGTH, $DEFAULT_PASSWORD,
     $HELP_FILE, $APP_VERSION, $COPYRIGHT,
-    $FETCHCONFIG_LOG, $LOG_MAX_DEVICES, $MAX_PARALLEL_SCAN);
+    $FETCHCONFIG_LOG, $LOG_MAX_DEVICES, $MAX_PARALLEL_SCAN,
+    $FONT_BASE_URL, $IMAGE_BASE_URL);
 
 # Parse $CONFIG_FILE (key = value, '#' comments and blank lines ignored,
 # optional surrounding quotes on the value) into a hashref, or (undef,
@@ -173,6 +174,16 @@ sub read_config {
         return "$CONFIG_FILE: MAX_PARALLEL_SCAN must be an integer between 1 and 5"
              . " (got '$kv->{MAX_PARALLEL_SCAN}')";
     }
+
+    # URL paths (not filesystem paths) under which the web server serves the
+    # optional fonts and images. Trailing slashes are trimmed. IMAGE_BASE_URL
+    # is where the login backdrop (back.jpg) is loaded from.
+    $FONT_BASE_URL  = (defined $kv->{FONT_BASE_URL}  && $kv->{FONT_BASE_URL}  ne '')
+                      ? $kv->{FONT_BASE_URL}  : '/fetchconfig-web/fonts';
+    $IMAGE_BASE_URL = (defined $kv->{IMAGE_BASE_URL} && $kv->{IMAGE_BASE_URL} ne '')
+                      ? $kv->{IMAGE_BASE_URL} : '/fetchconfig-web/images';
+    $FONT_BASE_URL  =~ s{/+$}{};
+    $IMAGE_BASE_URL =~ s{/+$}{};
 
     return undef;
 }
@@ -5368,7 +5379,7 @@ my %COMMON_OPTS = (
     pass                   => { type => 'secret', mandatory => 1 },
     repository             => { type => 'path',   mandatory => 1 },
     keep                   => { type => 'int',    mandatory => 1 },
-    timeout                => { type => 'int',    mandatory => 1 },
+    timeout                => { type => 'int',    mandatory => 0 },
     fetch_timeout          => { type => 'int',    mandatory => 0 },
     changes_only           => { type => 'bool',   mandatory => 0 },
     on_fetch_run           => { type => 'path',   mandatory => 0 },
@@ -5396,6 +5407,30 @@ my %MODEL_CATALOG = do {
     my $hirsch    = { enable   => { type => 'secret', mandatory => 0 },
                       show_cmd => { type => 'text',   mandatory => 0 } };
     (
+        # Generic (template-driven) model. Its device interaction is described
+        # by a template file selected with model=<name>; the available
+        # templates come from `fetchconfig.pl -t` (see list_templates), so the
+        # 'model' option renders as a dropdown (enum_template). model is
+        # mandatory on a device line UNLESS a "default: generic" line supplies
+        # it (enforced in the editor's mandatory check, not here). user/pass/
+        # repository/keep mandatory; the many timing/prompt options are optional
+        # and may also be set in the template file.
+        'generic'         => _model_opts(
+                                 model            => { type => 'enum_template', mandatory => 1 },
+                                 transport        => { type => 'enum_transport', mandatory => 0 },
+                                 enable           => { type => 'secret', mandatory => 0 },
+                                 banner_timeout   => { type => 'int',  mandatory => 0 },
+                                 fetch_delay      => { type => 'int',  mandatory => 0 },
+                                 prompt_settle    => { type => 'int',  mandatory => 0 },
+                                 max_visits       => { type => 'int',  mandatory => 0 },
+                                 strip_ansi       => { type => 'bool', mandatory => 0 },
+                                 prompt_head      => { type => 'text', mandatory => 0 },
+                                 prompt_tail      => { type => 'text', mandatory => 0 },
+                                 ssh_extra_opts   => { type => 'text', mandatory => 0 },
+                                 template_dir     => { type => 'path', mandatory => 0 },
+                                 debug            => { type => 'debug', mandatory => 0 },
+                                 show_cmd         => { type => 'text', mandatory => 0 }),
+
         # Group A -- user/pass/enable (+ common)
         'cisco-ios'       => _model_opts(%$ios_extra),
         'cisco-ios-ssh'   => _model_opts(%$ios_extra),
@@ -5406,7 +5441,6 @@ my %MODEL_CATALOG = do {
         'riverstone'      => _model_opts(%$enable),
         'terayon-os'      => _model_opts(%$enable),
         '3com-msr'        => _model_opts(%$enable),
-        'mikrotik'        => _model_opts(%$enable),
         'tellabs-msr'     => _model_opts(%$enable),
         # coriant-8600 has no enable step (user/pass only), per fetchconfig.
         'coriant-8600'    => _model_opts(),
@@ -5418,6 +5452,12 @@ my %MODEL_CATALOG = do {
         'nec-univerge-ix' => _model_opts(),
         'cisco-iosxr'     => _model_opts(),
         'dmswitch'        => _model_opts(),
+        'mikrotik'        => _model_opts(),
+        # dell: user/pass only + optional show_cmd.
+        'dell'            => _model_opts(show_cmd => { type => 'text', mandatory => 0 }),
+        # cisco-sg300: user/pass mandatory; optional enable + show_cmd.
+        'cisco-sg300'     => _model_opts(enable   => { type => 'secret', mandatory => 0 },
+                                         show_cmd => { type => 'text',   mandatory => 0 }),
         'acme'            => _model_opts(user => { type => 'text', mandatory => 0 }),
 
         # Hirschmann / Zyxel -- user/pass mandatory, enable + show_cmd
@@ -5458,6 +5498,7 @@ my %MODEL_CATALOG = do {
         # (ssh|telnet|auto), show_cmd, debug, banner_timeout, prompt_settle_ms.
         'mediant-sbc'     => _model_opts(%$enable, %$procurve,
                                          transport        => { type => 'enum_transport', mandatory => 0 },
+                                         pager_cmd        => { type => 'text', mandatory => 0 },
                                          show_cmd         => { type => 'text', mandatory => 0 },
                                          banner_timeout   => { type => 'int',  mandatory => 0 },
                                          prompt_settle_ms => { type => 'int',  mandatory => 0 }),
@@ -5465,12 +5506,13 @@ my %MODEL_CATALOG = do {
         # Group C -- parks (+ banner_timeout)
         'parks'           => _model_opts(banner_timeout => { type => 'int', mandatory => 0 }),
 
-        # debug=on|off session-log option.
-        'procurve'        => _model_opts(%$procurve),
-        'procurve-ssh'    => _model_opts(%$procurve),
-        'comware-ssh'     => _model_opts(),
-        'dell'            => _model_opts(),
-        'cisco-sg300'     => _model_opts(),
+        # procurve / procurve-ssh: user/pass mandatory; optional enable
+        # (manager/enable password) + debug=on|off session log.
+        'procurve'        => _model_opts(%$procurve, enable => { type => 'secret', mandatory => 0 }),
+        'procurve-ssh'    => _model_opts(%$procurve, enable => { type => 'secret', mandatory => 0 }),
+        # comware-ssh: user/pass only + debug=on|off session log.
+        'comware-ssh'     => _model_opts(%$procurve),
+        # (dell and cisco-sg300 are defined in Group B above.)
 
         # TP-Link Easy Smart (web-GUI scrape, no CLI). Common set + the
         # debug=on|off HTTP-transcript option. Its backups are opaque binary
@@ -5850,6 +5892,31 @@ sub render_option_field {
                  . qq{<option value="ssh"$sel{ssh}>ssh</option>}
                  . qq{<option value="telnet"$sel{telnet}>telnet</option>}
                  . qq{<option value="auto"$sel{auto}>auto</option></select>};
+    } elsif ($type eq 'enum_template') {
+        # Generic-model template selector. Options come from fetchconfig -t
+        # (list_templates), sorted alphabetically. The current value is always
+        # offered even if it's not in the discovered list (e.g. a template in a
+        # dir the web user can't scan), so an existing setting is never lost. If
+        # no templates are discovered, fall back to a plain text field so the
+        # editor still works.
+        my $templates = list_templates();
+        my $v = defined $val ? $val : '';
+        if (@$templates) {
+            my %have = map { $_ => 1 } @$templates;
+            my @opts = @$templates;
+            unshift @opts, $v if $v ne '' && !$have{$v};
+            my $sel_empty = ($v eq '') ? ' selected' : '';
+            $control = qq{<select name="} . esc($name) . qq{">}
+                     . qq{<option value=""$sel_empty>(choose template)</option>};
+            for my $t (@opts) {
+                my $sel = ($v eq $t) ? ' selected' : '';
+                $control .= qq{<option value="} . esc($t) . qq{"$sel>} . esc($t) . qq{</option>};
+            }
+            $control .= qq{</select>};
+        } else {
+            $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="20">}
+                     . qq{ <span class="opt-unit">no templates found (fetchconfig -t)</span>};
+        }
     } elsif ($type eq 'int') {
         # Append a unit hint for the time-based options: milliseconds for the
         # *_ms / type_delay options, seconds for the *timeout options.
@@ -6182,6 +6249,21 @@ sub validate_records {
     my ($records) = @_;
     my (@errors, %seen_id);
 
+    # For the generic (template-driven) model, model=<template> is mandatory on
+    # a device line UNLESS a "default: generic" line supplies it. Precompute
+    # whether the defaults section provides model= for generic devices.
+    my $default_generic_has_model = 0;
+    for my $r (@$records) {
+        next unless $r->{kind} eq 'default';
+        my $m = defined $r->{model} ? lc($r->{model}) : '';
+        next unless $m eq 'generic';
+        for my $pair (@{ $r->{opts} || [] }) {
+            my ($k, $v) = @$pair;
+            $default_generic_has_model = 1
+                if defined $k && lc($k) eq 'model' && defined $v && $v ne '';
+        }
+    }
+
     # No field written into the device table may contain a control
     # character (newline, carriage return, tab, etc.). Without this an
     # authorized editor could smuggle a newline into a model / host / option
@@ -6235,6 +6317,19 @@ sub validate_records {
                         . "(must be an IPv4/IPv6 address or a hostname/FQDN).";
         }
         if ($seen_id{$r->{id}}++) { push @errors, "Duplicate Device-ID '$r->{id}'."; }
+
+        # Generic model: model=<template> is required on the device line unless
+        # a "default: generic" line supplies it.
+        if (defined $r->{model} && lc($r->{model}) eq 'generic' && !$default_generic_has_model) {
+            my $has_model = 0;
+            for my $pair (@{ $r->{opts} || [] }) {
+                my ($k, $v) = @$pair;
+                $has_model = 1 if defined $k && lc($k) eq 'model' && defined $v && $v ne '';
+            }
+            push @errors, "Generic device '$r->{id}' needs a model= (template); "
+                        . "set it on the device or on a 'default: generic' line."
+                unless $has_model;
+        }
     }
     return \@errors;
 }
@@ -6834,9 +6929,20 @@ sub read_help_file {
 # simple. All option controls are named "<rk>_opt_<key>", so adding an
 # option just appends a new field with that name.
 sub edit_table_script {
-    return <<'JS';
+    # Build a JS array literal of the discovered generic-model templates so the
+    # client-side "+ add option" handler can render the enum_template dropdown
+    # (fetchconfig -t cannot be run in the browser). Emitted in its own small
+    # interpolated <script> so the main script below stays a non-interpolating
+    # heredoc (it contains JS regexes / $ that must not be touched by Perl).
+    my $templates = list_templates();
+    my $tmpl_js = '[' . join(',', map {
+        my $t = $_; $t =~ s/(["\\])/\\$1/g; qq{"$t"};
+    } @$templates) . ']';
+    my $out = qq{<script>window.FCWEB_TEMPLATES = $tmpl_js;</script>\n};
+    $out .= <<'JS';
 <script>
 (function () {
+  var TEMPLATES = window.FCWEB_TEMPLATES || [];
   var form = document.getElementById('edit-form');
   if (!form) return;
 
@@ -6913,6 +7019,17 @@ sub edit_table_script {
         '<option value="ssh">ssh</option>' +
         '<option value="telnet">telnet</option>' +
         '<option value="auto">auto</option></select>';
+    } else if (type === 'enum_template') {
+      if (TEMPLATES.length) {
+        var o = '<select name="' + name + '"><option value="">(choose template)</option>';
+        for (var ti = 0; ti < TEMPLATES.length; ti++) {
+          o += '<option value="' + TEMPLATES[ti] + '">' + TEMPLATES[ti] + '</option>';
+        }
+        control = o + '</select>';
+      } else {
+        control = '<input type="text" name="' + name + '" value="" size="20"> ' +
+          '<span class="opt-unit">no templates found (fetchconfig -t)</span>';
+      }
     } else if (type === 'debug') {
       control = '<select name="' + name + '">' +
         '<option value="on">on</option>' +
@@ -7151,6 +7268,7 @@ sub edit_table_script {
 })();
 </script>
 JS
+    return $out;
 }
 
 sub default_help_html {
@@ -7735,6 +7853,32 @@ sub run_orphan_check {
     return (collapse_model_registration($combined), $status, undef);
 }
 
+# List the generic-model templates available to the loaded devices via
+# `fetchconfig.pl -devices=<table> -t`. Output lines look like "1 cisco",
+# "2 cisco-ios" (id number then name); "#"-prefixed summary lines are skipped.
+# Returns an arrayref of template names, sorted alphabetically, id stripped.
+# Called at most once per request (result cached in $_template_cache); returns
+# an empty arrayref on any failure so the caller can fall back to a text field.
+my $_template_cache;
+sub list_templates {
+    return $_template_cache if defined $_template_cache;
+    $_template_cache = [];
+    my ($out, $err, $status, $fork_err) =
+        run_fetchconfig('-devices=' . $DEVICE_TABLE, '-t');
+    return $_template_cache if $fork_err;
+    my %seen;
+    for my $line (split /\n/, (defined $out ? $out : '')) {
+        next if $line =~ /^\s*#/;                 # skip the summary trailer
+        # "<id> <name>" -- strip the leading id number and any whitespace.
+        if ($line =~ /^\s*\d+\s+(\S+)\s*$/) {
+            my $name = $1;
+            $seen{$name} = 1;
+        }
+    }
+    $_template_cache = [ sort keys %seen ];
+    return $_template_cache;
+}
+
 # Empty-directory check: `fetchconfig.pl -devices=<table> -e`. Read-only; lists
 # empty date/device directories in the repository. Like -o, it exits 0 when
 # none are found and 1 when some are (an expected result, not an error).
@@ -8130,6 +8274,18 @@ sub page_head {
         $warn_banner .= fetchconfig_version_warning();
     }
 
+    # The login / config-error page (no $user) gets a full-page backdrop image
+    # behind everything, loaded from IMAGE_BASE_URL/back.jpg. The title bar,
+    # login box and footer stay opaque/legible on top of it. Logged-in pages
+    # have no backdrop.
+    my $body_class = defined $user ? 'app-body' : 'login-body';
+    my $backdrop_css = defined $user ? '' : qq{
+  body.login-body { background: #23303d url('$IMAGE_BASE_URL/back.jpg') center center / cover no-repeat fixed; }
+  body.login-body main { min-height: calc(100vh - 3.2em); }
+  body.login-body header.app-titlebar { background: #fff; }
+  body.login-body footer.app-footer { position: fixed; left: 0; right: 0; bottom: 0; text-align: center;
+                         background: rgba(0,0,0,0.55); color: #fff; padding: 0.7em 1em; margin: 0; }
+};
     return <<"HTML";
 <!DOCTYPE html>
 <html lang="en">
@@ -8137,6 +8293,7 @@ sub page_head {
 <meta charset="UTF-8">
 <title>$t</title>
 <style>
+$backdrop_css
   body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
          margin: 0; background: #f4f5f7; color: #222; }
   header.app-titlebar { display: flex; align-items: center; gap: 1.4em;
@@ -8437,7 +8594,7 @@ sub page_head {
   .row-actions { display: flex; gap: 0.5em; align-items: center; }
 </style>
 </head>
-<body>
+<body class="$body_class">
 <header class="app-titlebar">
 <div class="app-titlebar-brand">
 <img src="data:image/png;base64,$LOGO_BASE64" alt="$APP_TITLE logo">

@@ -760,7 +760,7 @@ page = (u"""<!DOCTYPE html>
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v1.12</span>
+      <span class="pill">v1.14</span>
       <span class="pill">GPL&#8209;2.0+</span>
     </div>
 
@@ -776,13 +776,13 @@ page = (u"""<!DOCTYPE html>
       <h1>fetchconfig-web</h1>
       <p class="lede">{lede}</p>
       <div class="callout warn" style="margin-top:1rem">
-        <p><strong>Requires fetchconfig 9.60 or newer.</strong> The installed
+        <p><strong>Requires fetchconfig 9.64 or newer.</strong> The installed
         version is read from <code>&lt;FETCHCONFIG_PATH&gt;/fetchconfig/Constants.pm</code>;
         a warning banner is shown on every page (after login) if it is older
-        than 9.60 or cannot be determined.</p>
+        than 9.64 or cannot be determined.</p>
       </div>
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">1.12</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">1.14</span><span class="label">version</span></div>
         <div class="hero-stat"><span class="num">Perl CGI</span><span class="label">single file</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
