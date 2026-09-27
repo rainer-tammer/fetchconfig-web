@@ -7,6 +7,16 @@
 
 1.14
 ====
+* Replaced the browser's native confirmation dialogs with a custom modal styled
+  like the Backup-Now spinner box (centred card on a dark overlay). Destructive
+  actions (deletes, "permanently") get a red Confirm button; benign ones a blue
+  one, and a red warning-triangle icon (danger) or green check icon (normal)
+  beside the message. Applies to all confirmations: orphan/empty-dir/backup/
+  old-backup/user deletes, restore, bulk replace, delete-entry and Backup Now.
+* The unified-diff "Compare selected" page now uses the full screen width, like
+  the single-config view. The backup list, the fetchconfig-log viewer and the
+  device-table backup view were widened the same way; the Help page now uses
+  80% of the screen width.
 + New template-driven "generic" model. In the device table it is selected with
   model=generic plus a model=<template> option naming the template; the editor
   renders model= as a drop-down of the templates reported by

@@ -1893,7 +1893,7 @@ sub show_backup_list {
     my $is_tplink = is_web_binary_model($model);
     my $show_compare = $show_table && !$is_tplink;
 
-    print page_head("Backups: $dev", $user);
+    print page_head("Backups: $dev", $user, 'full');
     # Breadcrumb: return to the Status page when we arrived from there
     # (?from=status), otherwise to the Devices list.
     my $from = $cgi->param('from') // '';
@@ -2030,42 +2030,40 @@ JS2a
   var dev = devInput ? devInput.value : '';
 
   form.addEventListener('submit', function (e) {
-    // Confirm first; if declined, cancel the submit.
-    if (!window.confirm('Run a live backup for ' + dev + ' now?')) {
-      e.preventDefault();
-      return;
-    }
-    // Without fetch, fall back to a normal (navigating) submit.
-    if (!ov || typeof window.fetch !== 'function') return;
-
-    // Handle the request ourselves so THIS page (with the overlay) stays on
-    // screen. A normal submit navigates away immediately and the browser
-    // stops painting the just-shown overlay -- so we cancel it and POST via
-    // fetch(), keeping the spinner + timer visible until the reply arrives.
+    // Always intercept; the custom confirm is asynchronous.
     e.preventDefault();
+    var proceed = function () {
+      // Without fetch, fall back to a normal (navigating) submit.
+      if (!ov || typeof window.fetch !== 'function') { form.submit(); return; }
+      // Handle the request ourselves so THIS page (with the overlay) stays on
+      // screen. A normal submit navigates away immediately and the browser
+      // stops painting the just-shown overlay -- so we POST via fetch(),
+      // keeping the spinner + timer visible until the reply arrives.
+      ov.style.display = 'flex';
+      var start = Date.now();
+      setInterval(function () {
+        var s = Math.floor((Date.now() - start) / 1000);
+        if (nEl) nEl.textContent = s;
+        if (pat && s >= 10) pat.style.display = '';
+      }, 250);
 
-    ov.style.display = 'flex';
-    var start = Date.now();
-    setInterval(function () {
-      var s = Math.floor((Date.now() - start) / 1000);
-      if (nEl) nEl.textContent = s;
-      if (pat && s >= 10) pat.style.display = '';
-    }, 250);
-
-    fetch(form.getAttribute('action'), {
-      method: 'POST',
-      body: new FormData(form),
-      credentials: 'same-origin'
-    }).then(function (resp) {
-      return resp.text();
-    }).then(function (html) {
-      document.open();
-      document.write(html);
-      document.close();
-    }).catch(function () {
-      ov.style.display = 'none';
-      alert('The backup request could not be completed (network error). Please try again.');
-    });
+      fetch(form.getAttribute('action'), {
+        method: 'POST',
+        body: new FormData(form),
+        credentials: 'same-origin'
+      }).then(function (resp) {
+        return resp.text();
+      }).then(function (html) {
+        document.open();
+        document.write(html);
+        document.close();
+      }).catch(function () {
+        ov.style.display = 'none';
+        alert('The backup request could not be completed (network error). Please try again.');
+      });
+    };
+    if (window.fcConfirm) window.fcConfirm('Run a live backup for ' + dev + ' now?', proceed);
+    else if (window.confirm('Run a live backup for ' + dev + ' now?')) proceed();
   });
 })();
 </script>
@@ -3116,7 +3114,7 @@ sub show_compare {
         return;
     }
 
-    print page_head("Compare: $dev", $user);
+    print page_head("Compare: $dev", $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url()) . qq{">&larr; Devices</a>}
         . qq{<span class="sep">/</span>}
         . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
@@ -3607,7 +3605,8 @@ sub show_tools {
     print qq{<p class="muted">Permanently deletes the orphaned backups found }
         . qq{above (<code>fetchconfig.pl -o -D</code>). This cannot be undone.</p>\n};
     print $cgi->start_form(-method => 'POST', -action => script_url(),
-        -onsubmit => "return confirm('Permanently DELETE all orphaned backups? This cannot be undone.');");
+        -data_confirm => 'Permanently DELETE all orphaned backups? This cannot be undone.',
+        -data_confirm_danger => 'y');
     print qq{<input type="hidden" name="action" value="orphan_delete">\n};
     print csrf_field();
     print qq{<p><button type="submit" class="btn btn-danger">Delete orphaned backups</button></p>\n};
@@ -3634,7 +3633,8 @@ sub show_tools {
     print qq{<p class="muted">Permanently removes the empty directories found }
         . qq{above (<code>fetchconfig.pl -e -D</code>). This cannot be undone.</p>\n};
     print $cgi->start_form(-method => 'POST', -action => script_url(),
-        -onsubmit => "return confirm('Permanently DELETE all empty directories? This cannot be undone.');");
+        -data_confirm => 'Permanently DELETE all empty directories? This cannot be undone.',
+        -data_confirm_danger => 'y');
     print qq{<input type="hidden" name="action" value="empty_delete">\n};
     print csrf_field();
     print qq{<p><button type="submit" class="btn btn-danger">Delete empty directories</button></p>\n};
@@ -3696,8 +3696,8 @@ sub show_tools {
                 . qq{">View</a>\n};
             # Restore (POST + CSRF + confirm)
             print $cgi->start_form(-method => 'POST', -action => script_url(),
-                -onsubmit => "return confirm('Restore the device table from " . esc($n)
-                    . "? The current table will be backed up first.');");
+                -data_confirm => 'Restore the device table from ' . esc($n)
+                    . '? The current table will be backed up first.');
             print qq{<input type="hidden" name="action" value="restore_backup">\n};
             print qq{<input type="hidden" name="name" value="} . esc($n) . qq{">\n};
             print csrf_field();
@@ -3705,7 +3705,8 @@ sub show_tools {
             print $cgi->end_form;
             # Delete (POST + CSRF + confirm)
             print $cgi->start_form(-method => 'POST', -action => script_url(),
-                -onsubmit => "return confirm('Delete backup " . esc($n) . "? This cannot be undone.');");
+                -data_confirm => 'Delete backup ' . esc($n) . '? This cannot be undone.',
+                -data_confirm_danger => 'y');
             print qq{<input type="hidden" name="action" value="delete_backup">\n};
             print qq{<input type="hidden" name="name" value="} . esc($n) . qq{">\n};
             print csrf_field();
@@ -3747,7 +3748,8 @@ JS
         if (@$backups >= 2) {
             print $cgi->start_form(-method => 'POST', -action => script_url(),
                 -id => 'delete-old-form',
-                -onsubmit => "return confirm('Delete all device-table backups older than the given number of days? The newest backup is always kept.');");
+                -data_confirm => 'Delete all device-table backups older than the given number of days? The newest backup is always kept.',
+                -data_confirm_danger => 'y');
             print qq{<input type="hidden" name="action" value="delete_old_backups">\n};
             print csrf_field();
             print qq{<p class="btn-row delete-old-row">}
@@ -3856,7 +3858,7 @@ sub show_fetchconfig_log {
         return;
     }
 
-    print page_head('View fetchconfig log', $user);
+    print page_head('View fetchconfig log', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
     print qq{<div class="tool-section">\n};
@@ -4428,7 +4430,7 @@ sub show_view_backup {
 
     my $name = $cgi->param('name') // '';
     my $path = resolve_backup_path($name);
-    print page_head('View backup', $user);
+    print page_head('View backup', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
     print qq{<h1>Backup: } . esc($name) . qq{</h1>\n};
@@ -4856,7 +4858,8 @@ sub show_user_page {
                         print qq{<div class="row-actions">\n};
                         print qq{<a class="btn" href="} . esc($reset_link) . qq{">Change password</a>\n};
                         print $cgi->start_form(-method => 'POST', -action => script_url(),
-                            -onsubmit => "return confirm('Delete user " . esc($u) . "?');");
+                            -data_confirm => 'Delete user ' . esc($u) . '?',
+                            -data_confirm_danger => 'y');
                         print qq{<input type="hidden" name="action" value="delete_user">\n};
                         print qq{<input type="hidden" name="username" value="} . esc($u) . qq{">\n};
                         print csrf_field();
@@ -5293,7 +5296,7 @@ sub show_help {
     my ($user) = @_;
 
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('Help', $user);
+    print page_head('Help', $user, 'help80');
     print qq{<h1>Help</h1>\n};
     print read_help_file();
     print top_bottom_nav();
@@ -6749,7 +6752,7 @@ sub show_bulk_edit {
     }
 
     print $cgi->start_form(-method => 'POST', -action => script_url(), -id => 'bulk-form',
-        -onsubmit => "return fcBulkConfirm();");
+        -onsubmit => "fcBulkConfirm(event); return false;");
     print qq{<input type="hidden" name="action" value="bulk_save">\n};
     print qq{<input type="hidden" name="table_mtime" value="} . esc($mtime) . qq{">\n};
     print csrf_field();
@@ -6770,17 +6773,24 @@ sub show_bulk_edit {
     # loudly when it would remove every device).
     print <<'JS';
 <script>
-function fcBulkConfirm() {
+function fcBulkConfirm(ev) {
+  var form = ev.target;
+  ev.preventDefault();
   var ta = document.getElementById('bulk-devices');
   var n = 0, lines = ta.value.split('\n');
   for (var i = 0; i < lines.length; i++) { if (lines[i].trim() !== '') n++; }
-  var msg;
+  var msg, danger;
   if (n === 0) {
     msg = 'This will DELETE ALL devices from the table (defaults and email are kept). Continue?';
+    danger = true;
   } else {
     msg = 'Replace the entire device list with these ' + n + ' device' + (n === 1 ? '' : 's') + '?';
+    danger = false;
   }
-  return window.confirm(msg);
+  // form.submit() does NOT re-fire onsubmit, so no re-entry guard is needed.
+  var go = function () { form.submit(); };
+  if (window.fcConfirm) window.fcConfirm(msg, go, { danger: danger });
+  else if (window.confirm(msg)) go();
 }
 </script>
 JS
@@ -6986,12 +6996,15 @@ sub edit_table_script {
     if (e.target.classList.contains('rec-del')) {
       var card = e.target.closest('.rec-card');
       if (!card) return;
-      if (!window.confirm('Delete this entry?')) return;
-      var rk = card.getAttribute('data-rk');
-      var mark = document.createElement('input');
-      mark.type = 'hidden'; mark.name = rk + '_deleted'; mark.value = '1';
-      card.parentNode.insertBefore(mark, card);
-      card.parentNode.removeChild(card);
+      var removeCard = function () {
+        var rk = card.getAttribute('data-rk');
+        var mark = document.createElement('input');
+        mark.type = 'hidden'; mark.name = rk + '_deleted'; mark.value = '1';
+        card.parentNode.insertBefore(mark, card);
+        card.parentNode.removeChild(card);
+      };
+      if (window.fcConfirm) window.fcConfirm('Delete this entry?', removeCard, { danger: true });
+      else if (window.confirm('Delete this entry?')) removeCard();
     }
   });
 
@@ -8328,6 +8341,9 @@ $backdrop_css
      padding gives the "5% free" margins on the left and right for all of the
      page content (heading, filters, table, stats). */
   main.full { max-width: none; margin: 2em 0; padding: 0 5%; }
+  /* Help page: 80% of the screen width (centred), with a sensible cap so the
+     text measure stays readable on very wide monitors. */
+  main.help80 { max-width: 80%; width: 80%; margin: 2em auto; padding: 0 1em; }
   h1 { font-size: 1.4em; }
   table.list { border-collapse: collapse; width: 100%; background: #fff; }
   table.list th, table.list td { border: 1px solid #ddd; padding: 0.3em 0.5em; text-align: left; white-space: nowrap; }
@@ -8421,6 +8437,22 @@ $backdrop_css
   #backup-overlay { position: fixed; inset: 0; z-index: 200;
                     background: rgba(20,30,40,0.6);
                     display: flex; align-items: center; justify-content: center; }
+  /* Custom confirmation dialog -- same look as the spinner box. */
+  .fc-modal { position: fixed; inset: 0; z-index: 300; background: rgba(20,30,40,0.6);
+              display: flex; align-items: center; justify-content: center; }
+  .fc-modal-box { background: #fff; border-radius: 10px; padding: 1.8em 2em 1.5em;
+                  box-shadow: 0 8px 30px rgba(0,0,0,0.3); max-width: min(90vw, 440px); text-align: left; }
+  .fc-modal-msg { margin: 0; font-size: 1.05em; color: #16232e; line-height: 1.5; }
+  .fc-modal-row { display: flex; align-items: flex-start; gap: 0.9em; margin: 0 0 1.3em; }
+  .fc-modal-icon { flex: 0 0 auto; line-height: 0; margin-top: 0.05em; }
+  .fc-modal-icon svg { display: block; }
+  /* Show the check by default (normal), the triangle when the dialog is danger. */
+  .fc-modal .fc-icon-danger { display: none; }
+  .fc-modal.fc-danger .fc-icon-danger { display: inline-block; }
+  .fc-modal.fc-danger .fc-icon-normal { display: none; }
+  .fc-modal-actions { display: flex; justify-content: flex-end; gap: 0.7em; }
+  .fc-btn-cancel { background: #e7e9ec; color: #333; }
+  .fc-btn-cancel:hover { background: #d7dade; }
   .backup-overlay-box { background: #fff; border-radius: 10px; padding: 2em 2.6em;
                         box-shadow: 0 8px 30px rgba(0,0,0,0.3); text-align: center;
                         max-width: 90vw; }
@@ -8615,7 +8647,96 @@ sub page_foot {
     my $fc = fetchconfig_version_cached();
     $name_ver .= ' using fetchconfig v' . esc($fc) if defined $fc && $fc ne '';
     my $cr = esc($COPYRIGHT);
-    return qq{</main>\n<footer class="app-footer">$name_ver &mdash; $cr</footer>\n</body>\n</html>\n};
+    my $confirm_html = confirm_modal_html();
+    return qq{</main>\n<footer class="app-footer">$name_ver &mdash; $cr</footer>\n$confirm_html</body>\n</html>\n};
+}
+
+# A custom confirmation dialog styled like the Backup-Now spinner box (centred
+# white card on a dark overlay), replacing the browser's native confirm().
+# fcConfirm(message, onConfirm, opts) shows it; opts.danger => red Confirm
+# button (destructive actions), opts.confirmLabel overrides the button text.
+# Forms carrying data-confirm="..." (and optional data-confirm-danger) are
+# handled automatically: submit is deferred until the user confirms.
+sub confirm_modal_html {
+    return <<'HTML';
+<div id="fc-confirm" class="fc-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="fc-confirm-msg">
+  <div class="fc-modal-box">
+    <div class="fc-modal-row">
+      <span class="fc-modal-icon fc-icon-danger" aria-hidden="true">
+        <svg width="30" height="30" viewBox="0 0 24 24"><path d="M12 2.2 1 21.3h22z" fill="#e21b1b" stroke="#c00" stroke-width="0.4" stroke-linejoin="round"/><rect x="11" y="9" width="2" height="6.2" rx="1" fill="#fff"/><circle cx="12" cy="18" r="1.25" fill="#fff"/></svg>
+      </span>
+      <span class="fc-modal-icon fc-icon-normal" aria-hidden="true">
+        <svg width="30" height="30" viewBox="0 0 24 24"><path d="M9.2 15.1 4.9 10.8a1 1 0 0 0-1.5 1.4l5.1 5.1a1 1 0 0 0 1.5 0L21 6.3a1 1 0 1 0-1.5-1.4z" fill="#4da619" stroke="#3a7d16" stroke-width="0.5" stroke-linejoin="round"/></svg>
+      </span>
+      <p id="fc-confirm-msg" class="fc-modal-msg"></p>
+    </div>
+    <div class="fc-modal-actions">
+      <button type="button" id="fc-confirm-cancel" class="btn fc-btn-cancel">Cancel</button>
+      <button type="button" id="fc-confirm-ok" class="btn">Confirm</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var ov     = document.getElementById('fc-confirm');
+  if (!ov) return;
+  var msgEl  = document.getElementById('fc-confirm-msg');
+  var okBtn  = document.getElementById('fc-confirm-ok');
+  var cxlBtn = document.getElementById('fc-confirm-cancel');
+  var current = null;   // pending onConfirm callback
+  var lastFocus = null;
+
+  function close() {
+    ov.style.display = 'none';
+    current = null;
+    document.removeEventListener('keydown', onKey, true);
+    if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+  }
+  function onKey(e) {
+    if (ov.style.display === 'none') return;
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if (e.key === 'Enter') { e.preventDefault(); doOk(); }
+  }
+  function doOk() {
+    var cb = current;
+    close();
+    if (typeof cb === 'function') cb();
+  }
+
+  cxlBtn.addEventListener('click', close);
+  okBtn.addEventListener('click', doOk);
+  ov.addEventListener('click', function (e) { if (e.target === ov) close(); });
+
+  // Public helper.
+  window.fcConfirm = function (message, onConfirm, opts) {
+    opts = opts || {};
+    lastFocus = document.activeElement;
+    msgEl.textContent = message;
+    okBtn.textContent = opts.confirmLabel || 'Confirm';
+    okBtn.classList.toggle('btn-danger', !!opts.danger);
+    ov.classList.toggle('fc-danger', !!opts.danger);   // CSS shows the right icon
+    current = onConfirm;
+    ov.style.display = 'flex';
+    document.addEventListener('keydown', onKey, true);
+    // Focus Cancel for destructive actions (safer default), else Confirm.
+    (opts.danger ? cxlBtn : okBtn).focus();
+  };
+
+  // Forms with data-confirm="..." defer submission until confirmed. Using
+  // form.submit() (which does not re-fire the submit event) avoids any
+  // re-entry guard.
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form || !form.getAttribute) return;
+    var msg = form.getAttribute('data-confirm');
+    if (!msg) return;
+    e.preventDefault();
+    var danger = form.getAttribute('data-confirm-danger') !== null;
+    window.fcConfirm(msg, function () { form.submit(); }, { danger: danger });
+  }, true);
+})();
+</script>
+HTML
 }
 
 # =============================================================================

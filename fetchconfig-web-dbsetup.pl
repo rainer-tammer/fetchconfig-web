@@ -430,7 +430,7 @@ DEFAULT_PASSWORD        = fetchconfig
 
 # --- misc ---
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
-APP_VERSION             = 1.12
+APP_VERSION             = 1.14
 COPYRIGHT               = 2026 (c) Rainer Tammer
 CFG
 }
