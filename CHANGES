@@ -7,6 +7,21 @@
 
 1.14
 ====
++ Added a Makefile.PL and a t/ unit-test suite (Test::More). "perl
+  Makefile.PL" checks the required Perl modules up front and fails with clear
+  errors if any is missing or too old (DBI >= 1.641, DBD::Pg >= 3.15.0,
+  CGI >= 4.53, Algorithm::Diff). README documents an AIX-specific CGI 4.53
+  CGI::Util patch for a harmless start_html() warning (may also apply on Linux).
++ Added a "make doc" target that regenerates the HTML manual via render-doc.py
+  (errors clearly if no Python interpreter is installed). run "perl
+  Makefile.PL && make test" or "prove -I t/lib t/". Covers version compare/gate,
+  backup filename parsing, secret masking + HTML/JSON escaping, valid_id, the
+  model-option catalog, template listing + generic-model validation, and the
+  syntax-highlighter safety invariant. "make install" only prints a note (the
+  app is deployed by copying files, per README.md).
++ Added imageconvert.pl (with README.imageconvert): a standalone helper that
+  encodes an image as a base64 "my $VAR = do {...};" Perl snippet (80-column
+  block) for embedding in the CGI, with help/version screens and error checks.
 * Replaced the browser's native confirmation dialogs with a custom modal styled
   like the Backup-Now spinner box (centred card on a dark overlay). Destructive
   actions (deletes, "permanently") get a red Confirm button; benign ones a blue

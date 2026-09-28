@@ -107,12 +107,15 @@ Every module the two scripts use *except* the following ships with Perl 5
 installing; if any is missing the app won't start, so install them before
 deploying:
 
-| Module            | Used by                          | Purpose                                              | Install (Debian/Ubuntu)   | Install (RHEL)          | Install (SLES)          | Install (CPAN)          |
-|-------------------|----------------------------------|------------------------------------------------------|---------------------------|-------------------------|-------------------------|-------------------------|
-| `DBI`             | `fetchconfig-web.cgi`, setup script | Database access layer for the PostgreSQL user store | `libdbi-perl`             | `perl-DBI`              | `perl-DBI`              | `cpan DBI`              |
-| `DBD::Pg`         | `fetchconfig-web.cgi`, setup script | PostgreSQL driver for `DBI` (used via the `dbi:Pg:` DSN -- no explicit `use`, but required at runtime) | `libdbd-pg-perl` | `perl-DBD-Pg` | `perl-DBD-Pg` | `cpan DBD::Pg` |
-| `Algorithm::Diff` | `fetchconfig-web.cgi`            | Side-by-side and Tools config diffs (`sdiff`); 1.201 is known-good | `libalgorithm-diff-perl` | `perl-Algorithm-Diff` | `perl-Algorithm-Diff` | `cpan Algorithm::Diff` |
-| `CGI` (`CGI.pm`)  | `fetchconfig-web.cgi`            | CGI request/response handling. Core until Perl 5.22, then removed -- treat as non-core on modern Perl | `libcgi-pm-perl` | `perl-CGI` | `perl-CGI` | `cpan CGI` |
+| Module            | Minimum version | Used by                          | Purpose                                              | Install (Debian/Ubuntu)   | Install (RHEL)          | Install (SLES)          | Install (CPAN)          |
+|-------------------|-----------------|----------------------------------|------------------------------------------------------|---------------------------|-------------------------|-------------------------|-------------------------|
+| `DBI`             | **1.641**       | `fetchconfig-web.cgi`, setup script | Database access layer for the PostgreSQL user store | `libdbi-perl`             | `perl-DBI`              | `perl-DBI`              | `cpan DBI`              |
+| `DBD::Pg`         | **3.15.0**      | `fetchconfig-web.cgi`, setup script | PostgreSQL driver for `DBI` (used via the `dbi:Pg:` DSN -- no explicit `use`, but required at runtime) | `libdbd-pg-perl` | `perl-DBD-Pg` | `perl-DBD-Pg` | `cpan DBD::Pg` |
+| `Algorithm::Diff` | any (1.201 ok)  | `fetchconfig-web.cgi`            | Side-by-side and Tools config diffs (`sdiff`); 1.201 is known-good | `libalgorithm-diff-perl` | `perl-Algorithm-Diff` | `perl-Algorithm-Diff` | `cpan Algorithm::Diff` |
+| `CGI` (`CGI.pm`)  | **4.53**        | `fetchconfig-web.cgi`            | CGI request/response handling. Core until Perl 5.22, then removed -- treat as non-core on modern Perl | `libcgi-pm-perl` | `perl-CGI` | `perl-CGI` | `cpan CGI` |
+
+`perl Makefile.PL` checks these versions and refuses to continue (with a clear
+message) if a module is missing or older than the minimum above.
 
 One-line install of all four:
 
@@ -129,6 +132,47 @@ zypper install perl-DBI perl-DBD-Pg perl-Algorithm-Diff perl-CGI
 
 The standalone `fetchconfig-web-dbsetup.pl` needs only `DBI` + `DBD::Pg`
 (plus core `Digest::MD5`).
+
+### CGI 4.53 patch for `start_html()` (AIX, and possibly Linux)
+
+On AIX with CGI 4.53, `CGI::Util::_rearrange_params` warns
+
+```
+Odd number of elements in hash assignment at .../CGI/Util.pm line 119
+```
+
+when `start_html()` is called with a BODY-format parameter (as fetchconfig-web
+does). The warning is harmless but noisy in the web-server error log. Suppress
+it by wrapping the parameter handling in `no warnings;` -- apply this small
+patch to the installed `CGI/Util.pm`:
+
+```diff
+--- Util.pm.orig        2021-07-26 16:33:34.716539697 +0200
++++ Util.pm     2021-07-26 16:33:19.941302316 +0200
+@@ -95,6 +95,13 @@ sub rearrange_header {
+ }
+
+ sub _rearrange_params {
++    # needed because of start_html() BODY format parameter
++    # Odd number of elements in hash assignment at
++    # /usr/opt/perl5/lib/site_perl/5.28.1/CGI/Util.pm line 119 (#1)
++    # (W misc) You specified an odd number of elements to initialize a hash,
++    # which is odd, because hashes come in key/value pairs.
++    no warnings;
++    # needed because of start_html() BODY format parameter
+     my($order,@param) = @_;
+     return [] unless @param;
+```
+
+Find the file with `perl -MCGI::Util -e 'print $INC{"CGI/Util.pm"}, "\n"'`,
+back it up, and apply the patch (e.g. with the AIX `patch` or the freeware
+`diff`/`patch` tools). This was first seen on AIX, but the warning comes from
+CGI 4.53 itself, not from AIX -- so **the same patch may be needed on Linux**
+(or any platform) running CGI 4.53 if `start_html()`'s BODY-format parameter
+triggers the same "odd number of elements" message in the web-server error
+log. The file location differs by platform (use the `perl -MCGI::Util` command
+above to find it), but the change is identical. If your CGI is a newer version
+that has already fixed this, the patch is not needed.
 
 ## Configuration
 
@@ -1355,6 +1399,50 @@ below are grouped by concern.
   through `sudo -n` when `USE_SUDO_FOR_BACKUP_NOW` is set. Scope the sudoers
   entry to exactly the `fetchconfig.pl` command, and keep the repository owned
   by the account fetchconfig runs as.
+
+## Development -- running the tests
+
+The project ships a `Makefile.PL` and a `t/` unit-test suite (using the core
+`Test::More`). Generate the Makefile and run the tests the usual way:
+
+```sh
+perl Makefile.PL
+make test
+```
+
+or run the suite directly without generating a Makefile:
+
+```sh
+prove -I t/lib t/
+```
+
+To regenerate the HTML manual (`fetchconfig-web-documentation.html`) from this
+README, run:
+
+```sh
+make doc
+```
+
+`make doc` runs `render-doc.py` with the first available Python interpreter
+(`python3`, else `python`) and fails with a clear error if neither is
+installed.
+
+The suite loads the pure functions out of `fetchconfig-web.cgi` (via the
+`t/lib/FCWebTest.pm` helper, which stubs CGI/DBI/DBD::Pg/Algorithm::Diff so the
+tests run even where those modules aren't installed) and checks: the scripts
+compile; `version_cmp` and the minimum-fetchconfig-version gate; the backup
+filename parsers (`parse_backup_timestamp`, `backup_compact_stamp`,
+`backup_name_suffix`); secret masking and HTML/JSON escaping (`mask_secrets`,
+`esc`, `json_string`); `valid_id`; the whole model-option catalog (mandatory
+vs. optional per model, the generic template model, the audited options); the
+template listing and the generic-model validation rule; and the
+syntax-highlighter safety invariant (highlighting only adds markup).
+
+**`make install` intentionally does nothing** -- fetchconfig-web is not a
+CPAN-style module; it is deployed by copying files into your web server as
+described under "Deploying" above (and the fonts/images and database-setup
+steps in the surrounding sections). Running `make install` just prints a
+reminder to that effect.
 
 ## License
 
