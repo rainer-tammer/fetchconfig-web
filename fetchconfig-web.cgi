@@ -60,7 +60,7 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.14';
+use constant APP_VERSION => '1.15';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
@@ -177,25 +177,40 @@ sub read_config {
     }
 
     # URL paths (not filesystem paths) under which the web server serves the
-    # optional fonts and images. Trailing slashes are trimmed. IMAGE_BASE_URL
-    # is where the login backdrop (back.jpg) is loaded from.
-    $FONT_BASE_URL  = (defined $kv->{FONT_BASE_URL}  && $kv->{FONT_BASE_URL}  ne '')
-                      ? $kv->{FONT_BASE_URL}  : '/fetchconfig-web/fonts';
-    $IMAGE_BASE_URL = (defined $kv->{IMAGE_BASE_URL} && $kv->{IMAGE_BASE_URL} ne '')
-                      ? $kv->{IMAGE_BASE_URL} : '/fetchconfig-web/images';
-    $FONT_BASE_URL  =~ s{/+$}{};
-    $IMAGE_BASE_URL =~ s{/+$}{};
+    # optional fonts, images and documentation. These values are emitted into
+    # href attributes and CSS url() strings, so they are VALIDATED to a safe
+    # shape: an absolute URL path of plain path characters only -- no scheme
+    # (blocks javascript:/data:), no quotes, parentheses, spaces or other
+    # characters that could break out of an attribute or a CSS string. An
+    # invalid value is a configuration error (shown on the login page), not a
+    # silent fallback, so a typo can't quietly break fonts/images. Trailing
+    # slashes are trimmed.
+    my %url_default = (
+        FONT_BASE_URL  => '/fetchconfig-web/fonts',
+        IMAGE_BASE_URL => '/fetchconfig-web/images',
+        HELP_BASE_URL  => '/fetchconfig-web',
+    );
+    my %url_val;
+    for my $k (qw(FONT_BASE_URL IMAGE_BASE_URL HELP_BASE_URL)) {
+        my $v = (defined $kv->{$k} && $kv->{$k} ne '') ? $kv->{$k} : $url_default{$k};
+        unless ($v =~ m{^/[A-Za-z0-9._~/-]*$}) {
+            return "$CONFIG_FILE: $k must be an absolute URL path containing only "
+                 . "letters, digits, '.', '_', '~', '-' and '/' (got '$v')";
+        }
+        $v =~ s{/+$}{};
+        $v = '/' if $v eq '';
+        $url_val{$k} = $v;
+    }
+    $FONT_BASE_URL  = $url_val{FONT_BASE_URL};
+    $IMAGE_BASE_URL = $url_val{IMAGE_BASE_URL};
+    $HELP_BASE_URL  = $url_val{HELP_BASE_URL};
+
     # Full path to the privileged template-install helper
     # (fetchconfig-web-install-template.pl), run via sudo for the template
     # editor's Save/Revert when the web user cannot write the template dirs.
     # Empty = no helper; the editor then writes directly (needs writable dirs).
     $TEMPLATE_HELPER = (defined $kv->{TEMPLATE_HELPER} && $kv->{TEMPLATE_HELPER} ne '')
                        ? $kv->{TEMPLATE_HELPER} : '';
-    # URL base for served documentation (e.g. the template-engine manual linked
-    # from the template editor). Trailing slashes trimmed.
-    $HELP_BASE_URL = (defined $kv->{HELP_BASE_URL} && $kv->{HELP_BASE_URL} ne '')
-                     ? $kv->{HELP_BASE_URL} : '/fetchconfig-web';
-    $HELP_BASE_URL =~ s{/+$}{};
 
     return undef;
 }
@@ -4149,12 +4164,16 @@ sub show_view_templates {
                          . CGI::escape($f->{path}));
             my $edit = esc(script_url() . '?action=edit_template&path='
                          . CGI::escape($f->{path}));
+            my $actions = $f->{problem} eq ''
+                ? qq{<a href="$view">View</a> &nbsp; <a href="$edit">Edit</a>}
+                : qq{<span class="error">Warning: } . esc($f->{problem})
+                  . qq{ -- not a plain text file; view/edit refused</span>};
             print qq{<tr>}
                 . qq{<td>} . esc($f->{name}) . qq{</td>}
                 . qq{<td>} . esc($f->{path}) . qq{</td>}
                 . qq{<td>} . esc(human_size($f->{size})) . qq{</td>}
                 . qq{<td>} . esc(fmt_mtime($f->{mtime})) . qq{</td>}
-                . qq{<td><a href="$view">View</a> &nbsp; <a href="$edit">Edit</a></td>}
+                . qq{<td>$actions</td>}
                 . qq{</tr>\n};
         }
         print qq{</table>\n};
@@ -4191,11 +4210,11 @@ sub show_view_template {
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
 
-    # Security: reject traversal and anything not in the discovered set.
-    my %allowed = map { $_->{path} => 1 } @{ list_template_files() };
-    if ($path eq '' || $path =~ /\.\./ || !$allowed{$path}) {
+    # Security: reject traversal, anything not in the discovered set, and any
+    # entry that is not a plain regular file (symlink / hard link / special).
+    unless (template_path_ok($path)) {
         print qq{<h1>Template</h1>\n};
-        print qq{<p class="error">Template not found, or not an allowed template path.</p>\n};
+        print qq{<p class="error">} . esc(template_refusal_message($path)) . qq{</p>\n};
         print page_foot();
         return;
     }
@@ -4250,7 +4269,7 @@ sub show_edit_template {
         print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
             . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
         print qq{<h1>Edit template</h1>\n};
-        print qq{<p class="error">Template not found, or not an allowed template path.</p>\n};
+        print qq{<p class="error">} . esc(template_refusal_message($path)) . qq{</p>\n};
         print page_foot();
         return;
     }
@@ -4404,7 +4423,7 @@ sub do_check_template {
     $content =~ s/\r/\n/g;
     unless (template_path_ok($path)) {
         print page_head('Edit template', $user, 'full');
-        print qq{<p class="error">Not an allowed template path.</p>\n};
+        print qq{<p class="error">} . esc(template_refusal_message($path)) . qq{</p>\n};
         print page_foot(); return;
     }
     my ($ok, $detail) = _check_buffer($content);
@@ -4430,7 +4449,7 @@ sub do_save_template {
     $content =~ s/\r/\n/g;
     unless (template_path_ok($path)) {
         print page_head('Edit template', $user, 'full');
-        print qq{<p class="error">Not an allowed template path.</p>\n};
+        print qq{<p class="error">} . esc(template_refusal_message($path)) . qq{</p>\n};
         print page_foot(); return;
     }
     my ($ok, $detail) = _check_buffer($content);
@@ -4462,7 +4481,7 @@ sub do_revert_template {
     my $path = $cgi->param('path') // '';
     unless (template_path_ok($path)) {
         print page_head('Edit template', $user, 'full');
-        print qq{<p class="error">Not an allowed template path.</p>\n};
+        print qq{<p class="error">} . esc(template_refusal_message($path)) . qq{</p>\n};
         print page_foot(); return;
     }
     my ($rok, $rmsg) = revert_template($path);
@@ -8444,11 +8463,29 @@ sub list_template_dirs {
     return $_template_dirs_cache;
 }
 
-# Scan the template directories for *.tmpl files. Returns an arrayref of
-# hashrefs { name, dir, path, size, mtime }, de-duplicated by full path only
-# (the same template name in different directories yields separate entries),
-# sorted by template name (then directory). $errref, if given, receives a list
-# of directories that could not be read.
+# Is $path a template file the viewer/editor may touch? It must be a plain
+# regular file -- NOT a symlink (which could point outside the template
+# directories) and NOT hard-linked (link count > 1 means the same inode is
+# reachable under another name, so writing/backing it up would affect that
+# other name too). Returns '' if ok, else a short human-readable reason.
+sub template_file_problem {
+    my ($path) = @_;
+    return 'symbolic link'            if -l $path;       # lstat: link itself
+    my @st = stat($path);
+    return 'not accessible'           unless @st;
+    return 'not a regular file'       unless -f _;
+    return 'hard-linked (link count ' . $st[3] . ')' if $st[3] > 1;
+    return '';
+}
+
+# Scan the template directories for *.tmpl entries. Returns an arrayref of
+# hashrefs { name, dir, path, size, mtime, problem }, de-duplicated by full
+# path only (the same template name in different directories yields separate
+# entries), sorted by template name (then directory). Entries that are not
+# plain regular files (symlinks, hard links, ...) are still listed so the
+# operator can see them, with `problem` set to the reason; the viewer and
+# editor refuse to open them. $errref, if given, receives a list of
+# directories that could not be read.
 sub list_template_files {
     my ($errref) = @_;
     my $dirs = list_template_dirs();
@@ -8462,16 +8499,20 @@ sub list_template_files {
         for my $entry (readdir($dh)) {
             next unless $entry =~ /\.tmpl$/;
             my $path = "$dir/$entry";
-            next unless -f $path;
             next if $seen{$path}++;              # de-dup by full path only
+            my $problem = template_file_problem($path);
+            # skip things that aren't even file-like (directories etc.) unless
+            # they're a link -- links are listed so they can be warned about.
+            next if $problem ne '' && !-l $path && !-f $path;
             (my $name = $entry) =~ s/\.tmpl$//;
             my @st = stat($path);
             push @files, {
-                name  => $name,
-                dir   => $dir,
-                path  => $path,
-                size  => (@st ? $st[7] : 0),
-                mtime => (@st ? $st[9] : 0),
+                name    => $name,
+                dir     => $dir,
+                path    => $path,
+                size    => (@st ? $st[7] : 0),
+                mtime   => (@st ? $st[9] : 0),
+                problem => $problem,
             };
         }
         closedir($dh);
@@ -8486,8 +8527,24 @@ sub template_path_ok {
     my ($path) = @_;
     return 0 unless defined $path && $path ne '';
     return 0 if $path =~ /\.\./;
-    my %ok = map { $_->{path} => 1 } @{ list_template_files() };
-    return $ok{$path} ? 1 : 0;
+    # Must be a discovered template AND a plain regular file (no symlink /
+    # hard link / special file) -- checked live, not just at scan time.
+    my %ok = map { $_->{path} => 1 } grep { $_->{problem} eq '' } @{ list_template_files() };
+    return 0 unless $ok{$path};
+    return template_file_problem($path) eq '' ? 1 : 0;
+}
+
+# Why a template path was refused: names the link/file problem when that is
+# the cause (so the operator understands the warning), else a generic message.
+sub template_refusal_message {
+    my ($path) = @_;
+    if (defined $path && $path ne '' && $path !~ /\.\./ && -e $path) {
+        my $p = template_file_problem($path);
+        return "Refused: this template entry is not a plain text file ($p). "
+             . "Only regular files in the template directories can be viewed or edited."
+            if $p ne '';
+    }
+    return 'Template not found, or not an allowed template path.';
 }
 
 # The single backup file for a template (<target>.bak), or undef if none.

@@ -496,7 +496,7 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v1.14</span>
+      <span class="pill">v1.15</span>
       <span class="pill">GPL&#8209;2.0+</span>
     </div>
 
@@ -522,7 +522,7 @@
         than 9.64 or cannot be determined.</p>
       </div>
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">1.14</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">1.15</span><span class="label">version</span></div>
         <div class="hero-stat"><span class="num">Perl CGI</span><span class="label">single file</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
@@ -611,7 +611,7 @@ MIN_PASSWORD_LENGTH     = 8
 DEFAULT_PASSWORD        = fetchconfig
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
-APP_VERSION             = 1.14
+APP_VERSION             = 1.15
 COPYRIGHT               = 2026 (c) Rainer Tammer</code></pre>
 <p>Format and loading:</p>
 <ul><li>One <code>key = value</code> per line; the first <code>=</code> splits key from value, and both sides are trimmed. A matching pair of surrounding quotes on the value is stripped, so <code>COPYRIGHT = &quot;2026 (c) ...&quot;</code> and the bare form are equivalent.</li><li>Whole-line <code>#</code> comments and blank lines are ignored. A <code>#</code> <em>inside</em> a value is kept (e.g. <code>COPYRIGHT = 2026 #1 vendor</code> works).</li><li><code>DEVICE_TABLE</code>, <code>REPOSITORY</code>, <code>FETCHCONFIG_PATH</code>, <code>FETCHCONFIG_BIN</code>, <code>SESSION_DIR</code>, <code>DBinst</code>, <code>DBuser</code>, and <code>DBhost</code> are <strong>required</strong>; the rest fall back to built-in defaults if absent (<code>BACKUP_TMP_DIR</code> defaults to <code>SESSION_DIR</code>; <code>BACKUP_DEVICE_TABLE</code>, where the device-table editor writes its timestamped <code>.bak</code> copies, defaults to <code>/usr/local/fetchconfig/backup</code> and is created automatically on first save). If the file is missing or a required key is absent, the app serves a clear configuration-error page instead of failing obscurely.</li><li>The config is read once per request, before anything else runs.</li><li><strong><code>FETCHCONFIG_PATH</code> and <code>FETCHCONFIG_BIN</code></strong> together locate the fetchconfig executable: it is run as <code>&lt;FETCHCONFIG_PATH&gt;/&lt;FETCHCONFIG_BIN&gt;</code> (e.g. <code>/usr/local/fetchconfig/fetchconfig.pl</code>). <code>FETCHCONFIG_PATH</code> is also where the version check looks for <code>fetchconfig/Constants.pm</code>. (Earlier releases used a single <code>FETCHCONFIG_BIN</code> holding the full path -- update old config files to the two-key form; the old single-key form is no longer accepted.)</li><li><strong><code>MAX_PARALLEL_SCAN</code></strong> (default <code>1</code>) sets how many device checks the Tools scan tools (&quot;devices without backups&quot;, &quot;empty backups&quot;, &quot;consistent backup suffixes&quot;) run concurrently in the browser. <code>1</code> is fully serial (the original behaviour). It must be an integer <strong>1..5</strong>; a value outside that range is a configuration error and the app refuses to start. Each concurrent check spawns its own <code>fetchconfig.pl</code>, so raise this only as far as the server hosting fetchconfig can comfortably handle -- and note that browsers also cap connections per host (about 6), which bounds the effective parallelism.</li></ul>
@@ -627,7 +627,7 @@ COPYRIGHT               = 2026 (c) Rainer Tammer</code></pre>
 <pre><code>cp fetchconfig-web.cgi /www/cgi-bin/
 chmod 755 /www/cgi-bin/fetchconfig-web.cgi</code></pre>
 <p>Point your browser at <code>https://yourhost/cgi-bin/fetchconfig-web.cgi</code>.</p>
-<p><strong>Login backdrop and static assets.</strong> <code>FONT_BASE_URL</code> (default <code>/fetchconfig-web/fonts</code>) and <code>IMAGE_BASE_URL</code> (default <code>/fetchconfig-web/images</code>) are the <strong>URL paths</strong> (not filesystem paths) under which the web server serves the optional fonts and images. The login page shows a full-page backdrop image loaded from <code>&lt;IMAGE_BASE_URL&gt;/back.jpg</code>; the title bar, login box and the (bottom-centred) copyright footer stay legible on top of it. Copy the <code>back.jpg</code> shipped in the <code>images/</code> directory of this package to wherever the server serves <code>IMAGE_BASE_URL</code>, e.g.:</p>
+<p><strong>Login backdrop and static assets.</strong> <code>FONT_BASE_URL</code> (default <code>/fetchconfig-web/fonts</code>) and <code>IMAGE_BASE_URL</code> (default <code>/fetchconfig-web/images</code>) are the <strong>URL paths</strong> (not filesystem paths) under which the web server serves the optional fonts and images. These (and <code>HELP_BASE_URL</code>) are validated at startup: they must be absolute URL paths made only of letters, digits and <code>. _ ~ - /</code> -- no scheme, quotes, spaces or parentheses -- because they are emitted into links and CSS; an invalid value is reported as a configuration error on the login page. The login page shows a full-page backdrop image loaded from <code>&lt;IMAGE_BASE_URL&gt;/back.jpg</code>; the title bar, login box and the (bottom-centred) copyright footer stay legible on top of it. Copy the <code>back.jpg</code> shipped in the <code>images/</code> directory of this package to wherever the server serves <code>IMAGE_BASE_URL</code>, e.g.:</p>
 <span class="file-label">shell</span>
 <pre><code>mkdir -p /www/pub/fetchconfig-web/images
 cp images/back.jpg /www/pub/fetchconfig-web/images/</code></pre>
@@ -794,7 +794,7 @@ chmod 755 /usr/local/fetchconfig/backup</code></pre></div>
 <span class="file-label">code</span>
 <pre><code>www ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig-web-install-template.pl</code></pre>
 <p>(replace <code>www</code> with your web-server user). The helper is invoked as <code>install &lt;tmpfile&gt; &lt;target.tmpl&gt;</code> (back up, then write) or <code>revert &lt;target.tmpl&gt;</code>, and independently enforces that the target is an <strong>absolute</strong> path, contains <strong>no <code>..</code></strong>, and ends in <strong><code>.tmpl</code></strong> -- so even a compromised caller cannot make it touch anything else. Saving through the helper requires <code>USE_SUDO_FOR_BACKUP_NOW = 1</code>.</p>
-<p>If <code>TEMPLATE_HELPER</code> is empty (or sudo is disabled), the editor writes the file <strong>directly</strong>, which only works if the template directory is writable by the web-server user; otherwise Save reports a clear error. In all cases the web application also validates the target against the live template list (from <code>-t</code>) and rejects any path containing <code>..</code> before doing anything.</p>
+<p>If <code>TEMPLATE_HELPER</code> is empty (or sudo is disabled), the editor writes the file <strong>directly</strong>, which only works if the template directory is writable by the web-server user; otherwise Save reports a clear error. In all cases the web application also validates the target against the live template list (from <code>-t</code>) and rejects any path containing <code>..</code> before doing anything. Only <strong>plain regular files</strong> are accepted: a <code>.tmpl</code> entry that is a symbolic link or a hard link (link count &gt; 1) is still listed, with a warning, but cannot be viewed or edited -- a symlink could point outside the template directories, and a hard link would make a write reach a second name. The helper enforces the same rule independently.</p>
 <p>The check is <strong>structural only</strong> -- fetchconfig verifies the template&#x27;s grammar, not that it actually drives your device; always test a changed template against the real hardware.</p>
 <p>The editor toolbar also has a <strong>Help templates</strong> button that opens <code>&lt;HELP_BASE_URL&gt;/README.template_engine.html</code> (the template-engine manual) in a new browser tab. <strong><code>HELP_BASE_URL</code></strong> (default <code>/fetchconfig-web</code>) is the URL base under which that documentation is served; put <code>README.template_engine.html</code> there (e.g. alongside the other served assets). If the file is not installed the button simply leads to a 404.</p>
 <p>User accounts live in a PostgreSQL table, <code>users</code>:</p>

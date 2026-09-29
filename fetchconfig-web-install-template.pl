@@ -41,7 +41,27 @@ sub check_target {
     fail("target must be an absolute path: $t")  unless $t =~ m{^/};
     fail("target must not contain '..': $t")     if $t =~ m{(?:^|/)\.\.(?:/|$)};
     fail("target must end in .tmpl: $t")         unless $t =~ /\.tmpl$/;
+    # If it already exists it must be a plain regular file: never a symlink
+    # (could point outside the template dirs) and never hard-linked (the same
+    # inode would be reachable under another name).
+    if (-l $t) { fail("target is a symbolic link, refusing: $t"); }
+    if (-e $t) {
+        fail("target is not a regular file, refusing: $t") unless -f $t;
+        my @st = stat($t);
+        fail("target is hard-linked (link count $st[3]), refusing: $t") if @st && $st[3] > 1;
+    }
     return $t;
+}
+
+# The source (the edited content written by the web app) must likewise be a
+# plain regular file, not a link.
+sub check_source {
+    my ($s) = @_;
+    fail("source file does not exist: $s")        unless -e $s;
+    fail("source is a symbolic link, refusing: $s") if -l $s;
+    fail("source is not a plain file: $s")        unless -f $s;
+    fail("source is not readable: $s")            unless -r $s;
+    return $s;
 }
 
 # Atomic copy $src -> $dst (temp in $dst's dir, then rename). Dies via fail().
@@ -68,9 +88,7 @@ $cmd = '' unless defined $cmd;
 if ($cmd eq 'install') {
     my ($src, $target) = @ARGV;
     fail("usage: $PROG install <srcfile> <target.tmpl>") unless defined $src && defined $target;
-    fail("source file does not exist: $src")  unless -e $src;
-    fail("source is not a plain file: $src")  unless -f $src;
-    fail("source is not readable: $src")      unless -r $src;
+    check_source($src);
     check_target($target);
     # Back up the existing target to <target>.bak (single, overwritten).
     if (-e $target) {

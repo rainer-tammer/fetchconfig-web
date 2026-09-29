@@ -54,4 +54,30 @@ ok($rok, 'revert succeeds');
 my $now = do { local $/; open(my $f,'<',$tmpl); <$f> };
 unlike($now, qr/edited/, 'revert restored the pre-save content');
 
+
+# --- security: symlinks / hard links are listed with a warning but refused ---
+{
+    my $outside = File::Spec->catfile($tdir, 'outside.txt');
+    open(my $o, '>', $outside) or die $!; print $o "secret\n"; close($o);
+    my $link = File::Spec->catfile($tdir, 'evil.tmpl');
+  SKIP: {
+        skip 'symlinks not supported here', 3 unless eval { symlink($outside, $link) };
+        my ($e) = grep { $_->{name} eq 'evil' } @{ main::list_template_files() };
+        ok($e && $e->{problem} =~ /symbolic link/, 'symlinked .tmpl listed with a warning');
+        ok(!main::template_path_ok($link),          'symlinked .tmpl refused by the whitelist');
+        like(main::template_refusal_message($link), qr/symbolic link/, 'refusal names the problem');
+        unlink($link);
+    }
+    my $hard = File::Spec->catfile($tdir, 'hard.tmpl');
+    my $hard2 = File::Spec->catfile($tdir, 'hard2.tmpl');
+    open($o, '>', $hard) or die $!; print $o "x\n"; close($o);
+  SKIP: {
+        skip 'hard links not supported here', 2 unless eval { link($hard, $hard2) };
+        my ($h) = grep { $_->{name} eq 'hard' } @{ main::list_template_files() };
+        ok($h && $h->{problem} =~ /hard-linked/, 'hard-linked .tmpl listed with a warning');
+        ok(!main::template_path_ok($hard),       'hard-linked .tmpl refused by the whitelist');
+        unlink($hard, $hard2);
+    }
+}
+
 done_testing();

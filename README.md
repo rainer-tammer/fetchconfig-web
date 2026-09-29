@@ -214,7 +214,7 @@ MIN_PASSWORD_LENGTH     = 8
 DEFAULT_PASSWORD        = fetchconfig
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
-APP_VERSION             = 1.14
+APP_VERSION             = 1.15
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 
@@ -404,7 +404,11 @@ Point your browser at `https://yourhost/cgi-bin/fetchconfig-web.cgi`.
 **Login backdrop and static assets.** `FONT_BASE_URL` (default
 `/fetchconfig-web/fonts`) and `IMAGE_BASE_URL` (default `/fetchconfig-web/images`)
 are the **URL paths** (not filesystem paths) under which the web server serves
-the optional fonts and images. The login page shows a full-page backdrop
+the optional fonts and images. These (and `HELP_BASE_URL`) are validated at
+startup: they must be absolute URL paths made only of letters, digits and
+`. _ ~ - /` -- no scheme, quotes, spaces or parentheses -- because they are
+emitted into links and CSS; an invalid value is reported as a configuration
+error on the login page. The login page shows a full-page backdrop
 image loaded from `<IMAGE_BASE_URL>/back.jpg`; the title bar, login box and
 the (bottom-centred) copyright footer stay legible on top of it. Copy the
 `back.jpg` shipped in the `images/` directory of this package to wherever the
@@ -1199,7 +1203,12 @@ If `TEMPLATE_HELPER` is empty (or sudo is disabled), the editor writes the file
 **directly**, which only works if the template directory is writable by the
 web-server user; otherwise Save reports a clear error. In all cases the web
 application also validates the target against the live template list (from `-t`)
-and rejects any path containing `..` before doing anything.
+and rejects any path containing `..` before doing anything. Only **plain
+regular files** are accepted: a `.tmpl` entry that is a symbolic link or a
+hard link (link count > 1) is still listed, with a warning, but cannot be
+viewed or edited -- a symlink could point outside the template directories,
+and a hard link would make a write reach a second name. The helper enforces
+the same rule independently.
 
 The check is **structural only** -- fetchconfig verifies the template's grammar,
 not that it actually drives your device; always test a changed template against

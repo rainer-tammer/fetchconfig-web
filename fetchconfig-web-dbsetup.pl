@@ -395,6 +395,7 @@ sub cfg_body {
 DEVICE_TABLE            = /usr/local/fetchconfig/device_table
 REPOSITORY              = /usr/local/fetchconfig/config
 FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
+LOG_MAX_DEVICES         = 1000
 FONT_BASE_URL           = /fetchconfig-web/fonts
 IMAGE_BASE_URL          = /fetchconfig-web/images
 HELP_BASE_URL           = /fetchconfig-web
@@ -418,6 +419,9 @@ SESSION_TTL             = 28800
 # --- device table parsing ---
 DEVICE_ID_FIELD         = 1
 
+# --- Tools ---
+MAX_PARALLEL_SCAN       = 1
+
 # --- PostgreSQL user database ---
 DBinst                  = $dbname
 DBuser                  = $dbuser
@@ -435,7 +439,7 @@ HELP_FILE               = /www/pub/fetchconfig-web/help.html
 # Leave empty to disable sudo saving (then the template directories must be
 # writable by the web-server user). See "Template editor" in README.md.
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
-APP_VERSION             = 1.14
+APP_VERSION             = 1.15
 COPYRIGHT               = 2026 (c) Rainer Tammer
 CFG
 }
