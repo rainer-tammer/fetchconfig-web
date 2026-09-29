@@ -195,6 +195,7 @@ LOG_MAX_DEVICES         = 1000
 MAX_PARALLEL_SCAN       = 1
 FONT_BASE_URL           = /fetchconfig-web/fonts
 IMAGE_BASE_URL          = /fetchconfig-web/images
+HELP_BASE_URL           = /fetchconfig-web
 FETCHCONFIG_PATH        = /usr/local/fetchconfig
 FETCHCONFIG_BIN         = fetchconfig.pl
 BACKUP_DEVICE_TABLE     = /usr/local/fetchconfig/backup
@@ -212,6 +213,7 @@ PROTECTED_USER          = admin
 MIN_PASSWORD_LENGTH     = 8
 DEFAULT_PASSWORD        = fetchconfig
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
+TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 APP_VERSION             = 1.14
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
@@ -1148,6 +1150,67 @@ and the `->` arrow; `expect` is green, `send`/`done` red, `goto` purple). The `p
 template list -- it must contain no `..` and must exactly match a scanned
 template path -- so the viewer can never read files outside the template
 directories.
+
+### Template editor
+
+Each row in the template list also has an **Edit** link
+(`?action=edit_template`, admin only). The editor is a vertical split: the left
+**Editor** pane is a plain textarea; the right **Checked version** pane shows
+the template with syntax highlighting, refreshed whenever you press **Check
+syntax** (so the right pane always reflects the last checked buffer). The
+buttons are:
+
+- **Check syntax** -- writes the current buffer to a temporary file and runs
+  `fetchconfig.pl --check-template <tmpfile>` (a structural check; no device
+  table, no device contact). The result (`ok`, or `NOT ok` with the per-line
+  errors) is shown and the right pane is re-highlighted.
+- **Save** -- runs the same check first and **refuses to save if it fails**
+  (a broken template would break the next scheduled backup). On success the
+  file is written and the previous version is kept as `<template>.tmpl.bak`
+  (a single backup, overwritten on each save).
+- **Revert to last version** -- shown only when a `<template>.tmpl.bak` exists;
+  restores that backup over the template. Not itself undoable.
+- **Cancel** -- returns to the template list.
+
+**Writing the files.** Template directories are usually owned by the account
+fetchconfig runs as and not writable by the web-server user, so saving goes
+through a small privileged helper, **`fetchconfig-web-install-template.pl`**
+(shipped with this package), run via `sudo -n`. Point the config at it:
+
+```
+TEMPLATE_HELPER = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
+```
+
+and grant the web-server user permission to run just that helper, e.g. via
+`visudo`:
+
+```
+www ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig-web-install-template.pl
+```
+
+(replace `www` with your web-server user). The helper is invoked as
+`install <tmpfile> <target.tmpl>` (back up, then write) or
+`revert <target.tmpl>`, and independently enforces that the target is an
+**absolute** path, contains **no `..`**, and ends in **`.tmpl`** -- so even a
+compromised caller cannot make it touch anything else. Saving through the helper
+requires `USE_SUDO_FOR_BACKUP_NOW = 1`.
+
+If `TEMPLATE_HELPER` is empty (or sudo is disabled), the editor writes the file
+**directly**, which only works if the template directory is writable by the
+web-server user; otherwise Save reports a clear error. In all cases the web
+application also validates the target against the live template list (from `-t`)
+and rejects any path containing `..` before doing anything.
+
+The check is **structural only** -- fetchconfig verifies the template's grammar,
+not that it actually drives your device; always test a changed template against
+the real hardware.
+
+The editor toolbar also has a **Help templates** button that opens
+`<HELP_BASE_URL>/README.template_engine.html` (the template-engine manual) in a
+new browser tab. **`HELP_BASE_URL`** (default `/fetchconfig-web`) is the URL
+base under which that documentation is served; put `README.template_engine.html`
+there (e.g. alongside the other served assets). If the file is not installed the
+button simply leads to a 404.
 
 User accounts live in a PostgreSQL table, `users`:
 

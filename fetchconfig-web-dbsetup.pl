@@ -397,6 +397,7 @@ REPOSITORY              = /usr/local/fetchconfig/config
 FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
 FONT_BASE_URL           = /fetchconfig-web/fonts
 IMAGE_BASE_URL          = /fetchconfig-web/images
+HELP_BASE_URL           = /fetchconfig-web
 
 # --- fetchconfig binary paths ---
 FETCHCONFIG_PATH        = /usr/local/fetchconfig
@@ -430,6 +431,10 @@ DEFAULT_PASSWORD        = fetchconfig
 
 # --- misc ---
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
+# Privileged helper for the Tools template editor's Save/Revert (run via sudo).
+# Leave empty to disable sudo saving (then the template directories must be
+# writable by the web-server user). See "Template editor" in README.md.
+TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 APP_VERSION             = 1.14
 COPYRIGHT               = 2026 (c) Rainer Tammer
 CFG

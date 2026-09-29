@@ -7,6 +7,27 @@
 
 1.14
 ====
++ Template editor: added a "Help templates" button opening
+  <HELP_BASE_URL>/README.template_engine.html in a new tab; new HELP_BASE_URL
+  config setting (default /fetchconfig-web), also added to
+  fetchconfig-web-dbsetup.pl.
++ Template editor: submitted content is normalised to LF line endings before
+  checking/saving (browsers submit textarea newlines as CRLF), so saved
+  templates are LF-only.
++ Tools: new "Template editor" (Edit next to each template). Split view -- an
+  editable pane and a syntax-highlighted "Checked version" refreshed by the
+  "Check syntax" button (fetchconfig.pl --check-template). Save is blocked if the
+  check fails and keeps one <template>.tmpl.bak; "Revert to last version"
+  restores it (shown only when a backup exists). The editor toolbar places
+  the action buttons next to the back-link and shows the full path in the
+  title. The Editor pane flags "Unsaved changes" (red) while edits are pending;
+  leaving via "<- Templates" or "Discard changes" with unsaved edits asks for
+  confirmation (the dirty state is measured against the on-disk version, so
+  edits shown after a syntax check are correctly detected as unsaved). Buttons: Save, Check syntax, Discard changes, Revert to last
+  backup version. Saving uses a new privileged
+  helper, fetchconfig-web-install-template.pl, via sudo, configured by the new
+  TEMPLATE_HELPER setting (absolute path, no "..", .tmpl only; also added to
+  fetchconfig-web-dbsetup.pl's generated config).
 + Tools: new "Template viewer" -- lists the generic-model *.tmpl templates in
   the directories fetchconfig.pl -t reports (de-duplicated by full path, sorted
   by name) and opens each read-only with template syntax highlighting with a role-based colour scheme: state + reserved state_* entry states in

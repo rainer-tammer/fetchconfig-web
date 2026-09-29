@@ -40,6 +40,7 @@ use Time::HiRes ();
 use Fcntl qw(:flock);
 use File::Path qw(make_path);
 use File::Temp qw(tempfile);
+use File::Copy ();
 use DBI;
 use Text::ParseWords ();
 use IPC::Open3;
@@ -80,7 +81,7 @@ my ($DEVICE_TABLE, $REPOSITORY, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFI
     $PROTECTED_USER, $MIN_PASSWORD_LENGTH, $DEFAULT_PASSWORD,
     $HELP_FILE, $APP_VERSION, $COPYRIGHT,
     $FETCHCONFIG_LOG, $LOG_MAX_DEVICES, $MAX_PARALLEL_SCAN,
-    $FONT_BASE_URL, $IMAGE_BASE_URL);
+    $FONT_BASE_URL, $IMAGE_BASE_URL, $TEMPLATE_HELPER, $HELP_BASE_URL);
 
 # Parse $CONFIG_FILE (key = value, '#' comments and blank lines ignored,
 # optional surrounding quotes on the value) into a hashref, or (undef,
@@ -184,6 +185,17 @@ sub read_config {
                       ? $kv->{IMAGE_BASE_URL} : '/fetchconfig-web/images';
     $FONT_BASE_URL  =~ s{/+$}{};
     $IMAGE_BASE_URL =~ s{/+$}{};
+    # Full path to the privileged template-install helper
+    # (fetchconfig-web-install-template.pl), run via sudo for the template
+    # editor's Save/Revert when the web user cannot write the template dirs.
+    # Empty = no helper; the editor then writes directly (needs writable dirs).
+    $TEMPLATE_HELPER = (defined $kv->{TEMPLATE_HELPER} && $kv->{TEMPLATE_HELPER} ne '')
+                       ? $kv->{TEMPLATE_HELPER} : '';
+    # URL base for served documentation (e.g. the template-engine manual linked
+    # from the template editor). Trailing slashes trimmed.
+    $HELP_BASE_URL = (defined $kv->{HELP_BASE_URL} && $kv->{HELP_BASE_URL} ne '')
+                     ? $kv->{HELP_BASE_URL} : '/fetchconfig-web';
+    $HELP_BASE_URL =~ s{/+$}{};
 
     return undef;
 }
@@ -687,7 +699,7 @@ if (!-d $SESSION_DIR) {
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
 my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete);
+    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete check_template save_template revert_template);
 
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
@@ -765,6 +777,14 @@ sub main {
             show_view_templates($user);
         } elsif ($action eq 'view_template') {
             show_view_template($user);
+        } elsif ($action eq 'edit_template') {
+            show_edit_template($user);
+        } elsif ($action eq 'check_template') {
+            do_check_template($user);
+        } elsif ($action eq 'save_template') {
+            do_save_template($user);
+        } elsif ($action eq 'revert_template') {
+            do_revert_template($user);
         } elsif ($action eq 'orphan_check') {
             show_orphan_check($user);
         } elsif ($action eq 'orphan_delete') {
@@ -4127,12 +4147,14 @@ sub show_view_templates {
         for my $f (@$files) {
             my $view = esc(script_url() . '?action=view_template&path='
                          . CGI::escape($f->{path}));
+            my $edit = esc(script_url() . '?action=edit_template&path='
+                         . CGI::escape($f->{path}));
             print qq{<tr>}
                 . qq{<td>} . esc($f->{name}) . qq{</td>}
                 . qq{<td>} . esc($f->{path}) . qq{</td>}
                 . qq{<td>} . esc(human_size($f->{size})) . qq{</td>}
                 . qq{<td>} . esc(fmt_mtime($f->{mtime})) . qq{</td>}
-                . qq{<td><a href="$view">View</a></td>}
+                . qq{<td><a href="$view">View</a> &nbsp; <a href="$edit">Edit</a></td>}
                 . qq{</tr>\n};
         }
         print qq{</table>\n};
@@ -4204,6 +4226,263 @@ sub show_view_template {
     print qq{</div>\n};
     print copy_button_script();
     print page_foot();
+}
+
+# Template editor page (?action=edit_template&path=..., admin only). A vertical
+# split: left "Editor" textarea, right "Checked version" (highlighted, refreshed
+# when Check syntax is pressed). Buttons: Save, Check syntax, Revert (only if a
+# .bak exists), Cancel. Save is blocked if the syntax check fails.
+sub show_edit_template {
+    my ($user, %opt) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8')
+        unless $opt{no_header};
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    my $path = defined $opt{path} ? $opt{path} : ($cgi->param('path') // '');
+
+    print page_head('Edit template', $user, 'full');
+
+    unless (template_path_ok($path)) {
+        print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+            . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
+        print qq{<h1>Edit template</h1>\n};
+        print qq{<p class="error">Template not found, or not an allowed template path.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    # Always read the on-disk (saved) content -- this is the dirty-state
+    # baseline the JS compares against, so edits shown after a syntax check or
+    # a failed save (where the buffer differs from disk) are correctly flagged
+    # as unsaved. The buffer actually shown is the just-submitted content (on
+    # check / save-fail) or, on a fresh open, the disk content itself.
+    my $saved;
+    {
+        open(my $fh, '<', $path) or do {
+            print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+                . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
+            print qq{<p class="error">Cannot read template: } . esc("$!") . qq{</p>\n};
+            print page_foot();
+            return;
+        };
+        local $/; $saved = <$fh>; close($fh);
+        $saved = '' unless defined $saved;
+    }
+    my $content = defined $opt{content} ? $opt{content} : $saved;
+
+    (my $name = $path) =~ s{.*/}{}; $name =~ s/\.tmpl$//;
+
+    # The highlighted "checked version" reflects $opt{checked_content} if a
+    # check/save just ran, else the content as loaded.
+    my $checked = defined $opt{checked_content} ? $opt{checked_content} : $content;
+    my $preview = highlight_template($checked);
+
+    # Whole page is one form so the action buttons can sit on the top toolbar
+    # row (next to the back-link), saving vertical space.
+    print qq{<form method="POST" action="} . esc(script_url()) . qq{" class="tpl-edit-form">\n};
+    print qq{<input type="hidden" name="path" value="} . esc($path) . qq{">\n};
+    print csrf_field();
+
+    my $list_url  = esc(script_url() . '?action=view_templates');
+    my $reopen_url = esc(script_url() . '?action=edit_template&path=' . CGI::escape($path));
+
+    # Toolbar row: back-link + action buttons. The back-link and "Discard
+    # changes" are guarded by JS (tpl-editor-script) when there are unsaved
+    # edits; Save/Check/Revert submit the form normally.
+    print qq{<div class="tpl-toolbar">\n};
+    print qq{<a id="tpl-back" class="btn btn-green" href="$list_url">&larr; Templates</a>\n};
+    print qq{<button type="submit" name="action" value="check_template" class="btn btn-green">Check syntax</button>\n};
+    print qq{<button type="submit" name="action" value="save_template" class="btn">Save</button>\n};
+    print qq{<a id="tpl-discard" class="btn" href="$reopen_url">Discard changes</a>\n};
+    print qq{<a class="btn btn-gray" href="} . esc("$HELP_BASE_URL/README.template_engine.html")
+        . qq{" target="_blank" rel="noopener">Help templates</a>\n};
+    if (defined template_backup_path($path)) {
+        print qq{<button type="submit" name="action" value="revert_template" class="btn btn-danger" }
+            . qq{data-confirm="Revert this template to the last saved version (\@{[ esc($name) ]}.tmpl.bak)? Your current edits will be lost." }
+            . qq{data-confirm-danger="y">Revert to last backup version</button>\n};
+    }
+    print qq{</div>\n};
+
+    # Title with the full path in parentheses (muted).
+    print qq{<h1 class="tpl-title">Edit template: } . esc($name)
+        . qq{ <span class="muted tpl-path">(} . esc($path) . qq{)</span></h1>\n};
+
+    # Optional result box (syntax-check outcome / save messages).
+    if (defined $opt{result_html}) { print $opt{result_html}; }
+
+    print qq{<div class="tpl-split">\n};
+    print qq{  <div class="tpl-pane">\n    <div class="tpl-pane-title">Editor}
+        . qq{<span id="tpl-dirty" class="tpl-dirty" style="display:none;"> &mdash; Unsaved changes</span>}
+        . qq{</div>\n};
+    print qq{    <textarea id="tpl-content" name="content" class="tpl-editor" spellcheck="false" wrap="off">}
+        . esc($content) . qq{</textarea>\n  </div>\n};
+    print qq{  <div class="tpl-pane">\n    <div class="tpl-pane-title">Checked version</div>\n};
+    print qq{    <pre class="config hl tpl-preview">} . $preview . qq{</pre>\n  </div>\n};
+    print qq{</div>\n};
+
+    print $cgi->end_form;
+    print tpl_editor_script($saved);
+    print page_foot();
+}
+
+# Client-side dirty-state tracking for the template editor:
+#   - toggles the red "-- Unsaved changes" label in the Editor pane title,
+#   - guards the "<- Templates" back-link and "Discard changes" link with the
+#     custom confirm dialog when there are unsaved edits.
+# Save / Check syntax / Revert submit the form and are not guarded here.
+sub tpl_editor_script {
+    my ($saved) = @_;
+    # The baseline is the on-disk (saved) content, so edits shown after a
+    # syntax check / failed save (buffer != disk) are still "unsaved".
+    $saved = '' unless defined $saved;
+    my $saved_js = json_string($saved);   # pure-ASCII JS string literal
+    my $out = qq{<script>window.FCWEB_TPL_SAVED = $saved_js;</script>\n};
+    $out .= <<'JS';
+<script>
+(function () {
+  var ta   = document.getElementById('tpl-content');
+  var dirty= document.getElementById('tpl-dirty');
+  var back = document.getElementById('tpl-back');
+  var disc = document.getElementById('tpl-discard');
+  if (!ta) return;
+  var saved = (typeof window.FCWEB_TPL_SAVED === 'string') ? window.FCWEB_TPL_SAVED : ta.value;
+  function isDirty() { return ta.value !== saved; }
+  function refresh() { if (dirty) dirty.style.display = isDirty() ? '' : 'none'; }
+  ta.addEventListener('input', refresh);
+  refresh();
+
+  function guard(link, message) {
+    if (!link) return;
+    link.addEventListener('click', function (e) {
+      if (!isDirty()) return;                 // no changes -> navigate normally
+      e.preventDefault();
+      var go = function () { window.location.href = link.getAttribute('href'); };
+      if (window.fcConfirm) window.fcConfirm(message, go, { danger: true });
+      else if (window.confirm(message)) go();
+    });
+  }
+  guard(back, 'Leave without saving? Your unsaved changes will be lost.');
+  guard(disc, 'Discard your unsaved changes and reload the template?');
+})();
+</script>
+JS
+    return $out;
+}
+
+# Format the --check-template output into a result box (green ok / red errors).
+sub template_check_result_html {
+    my ($ok, $detail) = @_;
+    $detail = '' unless defined $detail;
+    my $cls = $ok ? 'success' : 'error';
+    my $head = !defined $ok ? 'Syntax check could not run.'
+             : $ok ? 'Syntax check: ok.'
+             : 'Syntax check: NOT ok.';
+    my $html = qq{<div class="config-wrap"><p class="$cls">} . esc($head) . qq{</p>\n};
+    $html .= qq{<pre class="config">} . esc($detail) . qq{</pre></div>\n} if $detail ne '';
+    return $html;
+}
+
+# POST: run the syntax check on the submitted buffer, refresh the preview, do
+# not save. (action=check_template)
+sub do_check_template {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot(); return;
+    }
+    my $path    = $cgi->param('path')    // '';
+    my $content = $cgi->param('content');
+    $content = '' unless defined $content;
+    # Browsers submit textarea newlines as CRLF; templates must be LF-only.
+    $content =~ s/\r\n/\n/g;
+    $content =~ s/\r/\n/g;
+    unless (template_path_ok($path)) {
+        print page_head('Edit template', $user, 'full');
+        print qq{<p class="error">Not an allowed template path.</p>\n};
+        print page_foot(); return;
+    }
+    my ($ok, $detail) = _check_buffer($content);
+    show_edit_template($user, no_header => 1, path => $path, content => $content,
+        checked_content => $content,
+        result_html => template_check_result_html($ok, $detail));
+}
+
+# POST: syntax-check then save (only if ok). (action=save_template)
+sub do_save_template {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot(); return;
+    }
+    my $path    = $cgi->param('path')    // '';
+    my $content = $cgi->param('content');
+    $content = '' unless defined $content;
+    # Browsers submit textarea newlines as CRLF; templates must be LF-only.
+    $content =~ s/\r\n/\n/g;
+    $content =~ s/\r/\n/g;
+    unless (template_path_ok($path)) {
+        print page_head('Edit template', $user, 'full');
+        print qq{<p class="error">Not an allowed template path.</p>\n};
+        print page_foot(); return;
+    }
+    my ($ok, $detail) = _check_buffer($content);
+    if (!$ok) {
+        # Blocked: show the errors, keep the buffer, do not write.
+        my $box = template_check_result_html($ok, $detail);
+        $box =~ s{<p class="error">Syntax check: NOT ok\.</p>}
+                 {<p class="error">Not saved -- fix the errors below first.</p>};
+        show_edit_template($user, no_header => 1, path => $path, content => $content,
+            checked_content => $content, result_html => $box);
+        return;
+    }
+    my ($sok, $smsg) = save_template($path, $content);
+    my $cls = $sok ? 'success' : 'error';
+    my $box = qq{<div class="config-wrap"><p class="$cls">} . esc($smsg) . qq{</p></div>\n};
+    show_edit_template($user, no_header => 1, path => $path, content => $content,
+        checked_content => $content, result_html => $box);
+}
+
+# POST: revert to <target>.bak, reload the editor from the restored file.
+sub do_revert_template {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot(); return;
+    }
+    my $path = $cgi->param('path') // '';
+    unless (template_path_ok($path)) {
+        print page_head('Edit template', $user, 'full');
+        print qq{<p class="error">Not an allowed template path.</p>\n};
+        print page_foot(); return;
+    }
+    my ($rok, $rmsg) = revert_template($path);
+    my $cls = $rok ? 'success' : 'error';
+    my $box = qq{<div class="config-wrap"><p class="$cls">} . esc($rmsg) . qq{</p></div>\n};
+    # Reload from the (restored) file: pass no content so the editor re-reads.
+    show_edit_template($user, no_header => 1, path => $path, result_html => $box);
+}
+
+# Write $content to a temp file and run the structural check on it.
+sub _check_buffer {
+    my ($content) = @_;
+    my ($tfh, $tmp) = eval { tempfile('fcweb-chk-XXXXXXXX', DIR => $BACKUP_TMP_DIR, SUFFIX => '.tmpl') };
+    return (undef, "cannot create temp file: $@") unless $tfh;
+    binmode($tfh); print $tfh $content; close($tfh);
+    my ($ok, $detail) = run_check_template($tmp);
+    unlink($tmp);
+    # The temp path leaks into the message; replace it with a neutral label.
+    $detail =~ s/\Q$tmp\E/(template)/g if defined $detail;
+    return ($ok, $detail);
 }
 
 # Client-side expand/collapse for the log viewer.
@@ -8201,6 +8480,103 @@ sub list_template_files {
     return \@files;
 }
 
+# True if $path is a known template (member of the current -t list) and has no
+# ".." -- the whitelist the editor uses before reading/writing a template.
+sub template_path_ok {
+    my ($path) = @_;
+    return 0 unless defined $path && $path ne '';
+    return 0 if $path =~ /\.\./;
+    my %ok = map { $_->{path} => 1 } @{ list_template_files() };
+    return $ok{$path} ? 1 : 0;
+}
+
+# The single backup file for a template (<target>.bak), or undef if none.
+sub template_backup_path {
+    my ($path) = @_;
+    my $bak = "$path.bak";
+    return (-f $bak) ? $bak : undef;
+}
+
+# Structural syntax check via `fetchconfig.pl --check-template <file>` (no
+# -devices, no sudo -- it only reads). Returns (ok, detail): ok is 1 (rc 0),
+# 0 (rc 1 = NOT ok), or undef (fork/other error); detail is the info/error text.
+sub run_check_template {
+    my ($file) = @_;
+    my ($out, $status, $err) = run_command_capture($FETCHCONFIG_BIN_FULL, '--check-template', $file);
+    return (undef, $err) if defined $err;
+    my $ok = (defined $status && $status == 0) ? 1
+           : (defined $status && $status == 1) ? 0
+           : undef;
+    return ($ok, defined $out ? $out : '');
+}
+
+# Install $content as the template at $target: write a temp file, then either
+# run the sudo helper (TEMPLATE_HELPER set) or, as a fallback, do the backup +
+# atomic write directly (needs a web-writable directory). Returns (ok, msg).
+sub save_template {
+    my ($target, $content) = @_;
+    my ($tfh, $tmp) = eval { tempfile('fcweb-tmpl-XXXXXXXX', DIR => $BACKUP_TMP_DIR) };
+    return (0, "cannot create temp file: $@") unless $tfh;
+    binmode($tfh);
+    print $tfh $content;
+    close($tfh);
+    chmod(0600, $tmp);
+
+    my ($ok, $msg);
+    if ($TEMPLATE_HELPER ne '' && $USE_SUDO_FOR_BACKUP_NOW) {
+        my ($out, $status, $err) =
+            run_command_capture($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'install', $tmp, $target);
+        if (defined $err)        { ($ok, $msg) = (0, $err); }
+        elsif ($status == 0)     { ($ok, $msg) = (1, "Saved. Previous version kept as $target.bak."); }
+        else                     { ($ok, $msg) = (0, "Helper failed (exit $status): " . ($out // '')); }
+    } else {
+        # Direct write (no helper): back up to <target>.bak, then atomic rename.
+        if (-e $target) {
+            unless (_atomic_copy_file($target, "$target.bak")) {
+                unlink($tmp);
+                return (0, "cannot back up $target: $!");
+            }
+        }
+        if (_atomic_copy_file($tmp, $target)) {
+            ($ok, $msg) = (1, "Saved. Previous version kept as $target.bak.");
+        } else {
+            ($ok, $msg) = (0, "cannot write $target: $! (set TEMPLATE_HELPER, or make the template directory writable)");
+        }
+    }
+    unlink($tmp);
+    return ($ok, $msg);
+}
+
+# Restore $target from its single <target>.bak. Returns (ok, msg).
+sub revert_template {
+    my ($target) = @_;
+    my $bak = "$target.bak";
+    return (0, "no backup available") unless -f $bak;
+    if ($TEMPLATE_HELPER ne '' && $USE_SUDO_FOR_BACKUP_NOW) {
+        my ($out, $status, $err) =
+            run_command_capture($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'revert', $target);
+        return (0, $err) if defined $err;
+        return ($status == 0) ? (1, "Reverted to the last saved version.")
+                              : (0, "Helper failed (exit $status): " . ($out // ''));
+    }
+    return _atomic_copy_file($bak, $target)
+        ? (1, "Reverted to the last saved version.")
+        : (0, "cannot restore $target: $!");
+}
+
+# Atomic file copy (temp in the destination's directory, then rename).
+sub _atomic_copy_file {
+    my ($src, $dst) = @_;
+    my $dir = $dst; $dir =~ s{/[^/]*$}{}; $dir = '.' if $dir eq '';
+    my ($fh, $tmp) = eval { tempfile('.fcweb-cp-XXXXXX', DIR => $dir) };
+    return 0 unless $fh;
+    close($fh);
+    unless (File::Copy::copy($src, $tmp)) { unlink($tmp); return 0; }
+    chmod(0644, $tmp);
+    unless (rename($tmp, $dst)) { unlink($tmp); return 0; }
+    return 1;
+}
+
 # Empty-directory check: `fetchconfig.pl -devices=<table> -e`. Read-only; lists
 # empty date/device directories in the repository. Like -o, it exits 0 when
 # none are found and 1 when some are (an expected result, not an error).
@@ -8695,6 +9071,24 @@ $backdrop_css
   pre.config.hl .hl-tpurple { color: #d2a8ff; }               /* goto, done */
   pre.config.hl .hl-tdir    { color: #39c5cf; }               /* directives */
   pre.config.hl .hl-tstate  { color: #79c0ff; font-weight: 700; } /* state names */
+  /* Template editor split view */
+  .tpl-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5em; margin: 0 0 0.6em; }
+  .tpl-title { margin: 0.2em 0 0.4em; }
+  .tpl-title .tpl-path { font-weight: normal; font-size: 0.7em; }
+  .tpl-dirty { color: #c0362c; font-weight: 700; }
+  /* Tighten the result box so the panes sit right under it. */
+  .tpl-edit-form .config-wrap { margin: 0.4em 0; }
+  .tpl-edit-form .config-wrap p { margin: 0.2em 0; }
+  .tpl-split { display: flex; gap: 1em; align-items: stretch; margin: 0.4em 0 0; }
+  .tpl-pane { flex: 1 1 50%; min-width: 0; display: flex; flex-direction: column; }
+  .tpl-pane-title { font-family: var(--font-head, inherit); font-weight: 700; color: #23303d;
+                    margin: 0 0 0.35em; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.85em; }
+  .tpl-editor { width: 100%; height: 60vh; box-sizing: border-box; resize: vertical;
+                font-family: Consolas, Menlo, "Courier New", monospace; font-size: 0.9em;
+                line-height: 1.4; padding: 1em; border: 1px solid #ccc; border-radius: 4px;
+                background: #1e1e1e; color: #d4d4d4; white-space: pre; overflow: auto; }
+  .tpl-preview { height: 60vh; margin: 0; overflow: auto; box-sizing: border-box; }
+  \@media (max-width: 860px) { .tpl-split { flex-direction: column; } .tpl-editor, .tpl-preview { height: 40vh; } }
   /* Side-by-side diff: a light two-column table matching the app's other
      list tables. Each side is monospaced; changed/added/removed rows are
      tinted, and a per-row gutter shows the source line number. */
@@ -8822,6 +9216,8 @@ $backdrop_css
   .btn-danger:hover { background: #8c0019; }
   .btn-green { background: #66bb6a; }
   .btn-green:hover { background: #549d58; }
+  .btn-gray { background: #8a9199; }
+  .btn-gray:hover { background: #737b83; }
   .breadcrumb { display: flex; align-items: center; gap: 0.5em; margin: 0 0 1em 0; }
   .breadcrumb .sep { color: #888; }
   main h2 { font-size: 1.1em; margin-top: 1.8em; }

@@ -424,6 +424,18 @@
   directory, shown as separate rows with their directory), sorted by name. Click
   <strong>View</strong> to open a template read-only, with syntax highlighting,
   in the same kind of window as a configuration view.</p>
+  <p><strong>Template editor</strong> &mdash; click <strong>Edit</strong> next to
+  a template to open it in a split editor: the left pane is editable, the right
+  <strong>Checked version</strong> shows it highlighted. <strong>Check
+  syntax</strong> validates it with fetchconfig (a structural check) and shows
+  any errors; <strong>Save</strong> only writes if the check passes and keeps the
+  previous version as a single <code>.tmpl.bak</code>; <strong>Discard
+  changes</strong> reloads the file and drops your unsaved edits; <strong>Revert
+  to last backup version</strong> (shown when a backup exists) restores that
+  backup; <strong>Help templates</strong> opens the template-engine manual in a
+  new tab. Leaving the editor with unsaved changes asks for confirmation, and the
+  Editor pane shows "Unsaved changes" while you have edits pending. A changed
+  template should always be tested against the real device.</p>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 

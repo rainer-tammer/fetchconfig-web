@@ -46,3 +46,4 @@ my $e4 = main::validate_records([ defg(user=>'x') ]);
 ok(!(grep /needs a model/, @$e4), 'default: generic w/o model (no device) -> ok');
 
 done_testing();
+
