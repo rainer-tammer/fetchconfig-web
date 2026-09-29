@@ -1127,6 +1127,28 @@ time** line is shown below the output. At most `LOG_MAX_DEVICES` sections are
 rendered (default **1000**); if the log has more, a warning is shown above the
 output and only the first `LOG_MAX_DEVICES` are displayed.
 
+### Template viewer
+
+The Tools page has a **Template viewer** section with a **Show templates**
+button that opens a list of the generic-model templates on its own page
+(`?action=view_templates`, admin only). The template directories come from the
+`template dir:` lines that `fetchconfig.pl -devices=<table> -t` reports (so the
+list matches exactly what fetchconfig itself uses); each directory is scanned
+for `*.tmpl` files. Every file is listed once, de-duplicated by full path only:
+the same template name may legitimately exist in more than one directory (in
+the device table a generic model is the combination of `template_dir` and the
+template name), so same-named files in different directories appear as separate
+rows, each with its full template name (path including the file), size and modification time. The list is sorted
+by template name.
+
+Clicking **View** opens a template read-only (`?action=view_template`) in the
+same output window as a configuration view, with **template syntax
+highlighting** (directives, state keywords, `/regex/` patterns, quoted strings,
+and the `->` arrow; `expect` is green, `send`/`done` red, `goto` purple). The `path` parameter is validated against the discovered
+template list -- it must contain no `..` and must exactly match a scanned
+template path -- so the viewer can never read files outside the template
+directories.
+
 User accounts live in a PostgreSQL table, `users`:
 
 | Column              | Type    | Notes |

@@ -761,6 +761,10 @@ sub main {
             show_tools($user);
         } elsif ($action eq 'view_log') {
             show_fetchconfig_log($user);
+        } elsif ($action eq 'view_templates') {
+            show_view_templates($user);
+        } elsif ($action eq 'view_template') {
+            show_view_template($user);
         } elsif ($action eq 'orphan_check') {
             show_orphan_check($user);
         } elsif ($action eq 'orphan_delete') {
@@ -2651,6 +2655,100 @@ sub highlight_mediant {
     return join("\n", @out);
 }
 
+# --- fetchconfig generic-template highlighter -------------------------------
+#
+# Colours the state-machine template grammar (see README.template_engine.md):
+#   - "#" comments (but NOT inside a /regex/ or a "..."/'...' string)
+#   - directives (transport, banner_timeout, capture_from, interrupt, ...)
+#   - state grammar (state, expect, send, goto, done, capture_start, ...)
+#   - barewords prompt/user/pass/enable
+#   - /regex/ patterns, "double"/'single' strings, the -> arrow, numbers
+# Line-based; preserves the safety invariant (stripping the spans yields esc()).
+sub highlight_template {
+    my ($content) = @_;
+    # Token -> colour class, by semantic role:
+    #   blue  (kw)     : state, reserved state_* entry states, send_match, ->
+    #   green (tgreen) : expect
+    #   red   (tred)   : send, send_secret, send_nolf, send_match? (send* family)
+    #   purple(tpurple): goto, done (control flow)
+    #   teal  (tdir)   : directives + max_visits modifier
+    #   orange(num)    : capture_start / capture_stop markers + numbers
+    #   grey  (comment): nop, comments, the -> arrow
+    #   lavender(iface): barewords prompt/user/pass/enable
+    #   bold-blue(tstate): user-defined state names (after state/goto)
+    my %CLASS = (
+        # directives (teal) -- only when first word on the line (see below)
+        (map { $_ => 'tdir' } qw(transport banner_timeout fetch_timeout
+            fetch_delay prompt_settle max_visits strip_ansi prompt_head
+            prompt_tail ssh_extra_opts capture_from skip_first interrupt ignore)),
+        # state keywords (blue)
+        state => 'kw',
+        state_login_ssh => 'kw', state_password_ssh => 'kw',
+        state_login_telnet => 'kw', state_password_telnet => 'kw',
+        # verbs
+        expect => 'tgreen',
+        send => 'tred', send_secret => 'tred', send_nolf => 'tred', send_match => 'tred',
+        goto => 'tpurple', done => 'tpurple',
+        capture_start => 'num', capture_stop => 'num',
+        nop => 'comment',
+    );
+    # Directive words are only coloured as directives at the start of a line;
+    # elsewhere (e.g. max_visits as a state modifier) they stay teal too, which
+    # is fine. Barewords are operands.
+    my %BAREWORD = map { $_ => 1 } qw( prompt user pass enable );
+    # Words after these introduce a user-defined state NAME (bold blue).
+    my %NAME_INTRO = ( state => 1, goto => 1 );
+
+    my @out;
+    for my $line (split /\n/, $content, -1) {
+        if ($line =~ /^\s*$/) { push @out, esc($line); next; }
+        # Whole-line comment.
+        if ($line =~ /^\s*#/) { push @out, hl('comment', esc($line)); next; }
+
+        # Tokenise, keeping /regex/, "..." and '...' as single tokens, and a
+        # trailing #comment as its own token. Everything else splits on space.
+        my $html = '';
+        my $rest = $line;
+        my $prev_word;                      # the previous bareword token seen
+        # leading indent
+        if ($rest =~ s/^(\s+)//) { $html .= esc($1); }
+
+        while (length $rest) {
+            if ($rest =~ /^(\s+)/) { $html .= esc($1); $rest = substr($rest, length $1); next; }
+            # inline comment to end of line
+            if ($rest =~ /^#/) { $html .= hl('comment', esc($rest)); $rest = ''; last; }
+            # /regex/  (allow escaped slashes)
+            if ($rest =~ m{^(/(?:\\.|[^/\\])*/)}) {
+                $html .= hl('string', esc($1)); $rest = substr($rest, length $1); $prev_word = undef; next;
+            }
+            # "double" or 'single' quoted string
+            if ($rest =~ /^("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/) {
+                $html .= hl('string', esc($1)); $rest = substr($rest, length $1); $prev_word = undef; next;
+            }
+            # the transition arrow -- de-emphasised grey
+            if ($rest =~ /^(->)/) { $html .= hl('comment', esc($1)); $rest = substr($rest, 2); $prev_word = undef; next; }
+            # a bare word / number
+            if ($rest =~ /^(\S+?)(?=\s|->|$|#|\/|["'])/ || $rest =~ /^(\S+)/) {
+                my $tok = $1; $rest = substr($rest, length $tok);
+                if    ($tok =~ /^-?\d+$/)              { $html .= hl('num', esc($tok)); }
+                elsif ($prev_word && $NAME_INTRO{$prev_word}) {
+                    # user-defined state name, right after "state" or "goto"
+                    $html .= hl('tstate', esc($tok));
+                }
+                elsif ($CLASS{$tok})                  { $html .= hl($CLASS{$tok}, esc($tok)); }
+                elsif ($BAREWORD{$tok})               { $html .= hl('iface', esc($tok)); }
+                else                                  { $html .= esc($tok); }
+                $prev_word = $tok;
+                next;
+            }
+            # fallback: consume one char
+            $html .= esc(substr($rest, 0, 1)); $rest = substr($rest, 1);
+        }
+        push @out, $html;
+    }
+    return join("\n", @out);
+}
+
 # Register the highlighters. Add new models here.
 $SYNTAX_HIGHLIGHTERS{'cisco-ios'}     = \&highlight_cisco_ios;
 $SYNTAX_HIGHLIGHTERS{'cisco-ios-ssh'} = \&highlight_cisco_ios;
@@ -2664,6 +2762,8 @@ $SYNTAX_HIGHLIGHTERS{'planet-ssh'}    = \&highlight_cisco_ios;
 $SYNTAX_HIGHLIGHTERS{'aruba-cx-ssh'}  = \&highlight_aruba_cx;
 $SYNTAX_HIGHLIGHTERS{'nexus-ssh'}     = \&highlight_nexus;
 $SYNTAX_HIGHLIGHTERS{'mediant-sbc'}   = \&highlight_mediant;
+# Synthetic key for the Tools template viewer (not a device model).
+$SYNTAX_HIGHLIGHTERS{'__template__'}  = \&highlight_template;
 
 # Model of a device (field 0 of its device-table line), or undef.
 sub device_model {
@@ -3816,6 +3916,7 @@ JS
 
     # --- fetchconfig log launcher ---------------------------------------
     render_log_section();
+    render_template_section();
 
     print top_bottom_nav();
     print page_foot();
@@ -3836,6 +3937,19 @@ sub render_log_section {
         print qq{<p><a class="btn" href="}
             . esc(script_url() . '?action=view_log') . qq{">Display log</a></p>\n};
     }
+    print qq{</div>\n};   # .tool-section
+}
+
+# Tools-page section: launcher for the template viewer (?action=view_templates).
+sub render_template_section {
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Template viewer</h2>\n};
+    print qq{<p class="muted">Lists the generic-model templates found in the }
+        . qq{template directories <code>fetchconfig.pl -t</code> reports, and }
+        . qq{lets you view each one (read-only) with syntax highlighting. The }
+        . qq{same template name may appear in more than one directory.</p>\n};
+    print qq{<p><a class="btn" href="}
+        . esc(script_url() . '?action=view_templates') . qq{">Show templates</a></p>\n};
     print qq{</div>\n};   # .tool-section
 }
 
@@ -3956,6 +4070,139 @@ sub show_fetchconfig_log {
     print log_viewer_script();
     print qq{</div>\n};   # .tool-section
     print top_bottom_nav();
+    print page_foot();
+}
+
+# Format a byte count as B / KB / MB (one decimal), for the template list.
+sub human_size {
+    my ($n) = @_;
+    $n = 0 unless defined $n;
+    return "$n B"                       if $n < 1024;
+    return sprintf('%.1f KB', $n/1024)  if $n < 1024*1024;
+    return sprintf('%.1f MB', $n/1024/1024);
+}
+# Format an mtime epoch as "YYYY-MM-DD HH:MM" in local time.
+sub fmt_mtime {
+    my ($t) = @_;
+    return '' unless $t;
+    my @lt = localtime($t);
+    return sprintf('%04d-%02d-%02d %02d:%02d',
+        $lt[5]+1900, $lt[4]+1, $lt[3], $lt[2], $lt[1]);
+}
+
+# Template list page (?action=view_templates, admin only, read-only). Lists the
+# *.tmpl files in the directories fetchconfig reports via -t, one row per file
+# (de-duplicated by full path), sorted by template name.
+sub show_view_templates {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    my $t0 = Time::HiRes::time();
+    print page_head('Templates', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Templates</h2>\n};
+
+    my @dirs_err;
+    my $files = list_template_files(\@dirs_err);
+    my $dirs  = list_template_dirs();
+
+    if (!@$dirs) {
+        print qq{<p class="muted">No template directories reported by }
+            . qq{<code>fetchconfig.pl -t</code>. Check that fetchconfig 9.64+ }
+            . qq{is installed and configured.</p>\n};
+    } elsif (!@$files) {
+        print qq{<p class="muted">No <code>*.tmpl</code> files found in the }
+            . scalar(@$dirs) . qq{ template director}
+            . (@$dirs == 1 ? 'y' : 'ies') . qq{.</p>\n};
+    } else {
+        print qq{<table class="list">\n<tr><th>Template</th><th>Full Template Name</th>}
+            . qq{<th>Size</th><th>Modified</th><th></th></tr>\n};
+        for my $f (@$files) {
+            my $view = esc(script_url() . '?action=view_template&path='
+                         . CGI::escape($f->{path}));
+            print qq{<tr>}
+                . qq{<td>} . esc($f->{name}) . qq{</td>}
+                . qq{<td>} . esc($f->{path}) . qq{</td>}
+                . qq{<td>} . esc(human_size($f->{size})) . qq{</td>}
+                . qq{<td>} . esc(fmt_mtime($f->{mtime})) . qq{</td>}
+                . qq{<td><a href="$view">View</a></td>}
+                . qq{</tr>\n};
+        }
+        print qq{</table>\n};
+    }
+    if (@dirs_err) {
+        print qq{<p class="muted">Note: could not read }
+            . join(', ', map { "<code>" . esc($_) . "</code>" } @dirs_err) . qq{.</p>\n};
+    }
+    my $secs = Time::HiRes::time() - $t0;
+    print qq{<p class="dev-loadtime">Template list load time: }
+        . esc($secs < 1 ? sprintf('%dms', int($secs*1000+0.5)) : sprintf('%.2fs',$secs))
+        . qq{</p>\n};
+    print qq{</div>\n};   # .tool-section
+    print page_foot();
+}
+
+# Single-template view (?action=view_template&path=..., admin only, read-only).
+# The path MUST contain no ".." and MUST be a member of the current template
+# list (exact full-path whitelist); anything else is refused.
+sub show_view_template {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    my $path = $cgi->param('path');
+    $path = '' unless defined $path;
+
+    print page_head('Template', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
+
+    # Security: reject traversal and anything not in the discovered set.
+    my %allowed = map { $_->{path} => 1 } @{ list_template_files() };
+    if ($path eq '' || $path =~ /\.\./ || !$allowed{$path}) {
+        print qq{<h1>Template</h1>\n};
+        print qq{<p class="error">Template not found, or not an allowed template path.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    (my $name = $path) =~ s{.*/}{}; $name =~ s/\.tmpl$//;
+    print qq{<h1>Template: } . esc($name) . qq{</h1>\n};
+    print qq{<p class="muted">} . esc($path) . qq{</p>\n};
+
+    my $content;
+    {
+        open(my $fh, '<', $path) or do {
+            print qq{<p class="error">Cannot read template: } . esc("$!") . qq{</p>\n};
+            print page_foot();
+            return;
+        };
+        local $/;
+        $content = <$fh>;
+        close($fh);
+    }
+    $content = '' unless defined $content;
+
+    my $highlighted = highlight_template($content);
+    my $body = defined $highlighted ? $highlighted : esc($content);
+    my $hl_class = defined $highlighted ? ' hl' : '';
+    print qq{<div class="config-wrap">\n};
+    print copy_button_html();
+    print qq{<pre class="config$hl_class" id="config-content">} . $body . qq{</pre>\n};
+    print qq{</div>\n};
+    print copy_button_script();
     print page_foot();
 }
 
@@ -7892,6 +8139,68 @@ sub list_templates {
     return $_template_cache;
 }
 
+# The template directories fetchconfig actually uses, parsed from the debug
+# lines that `fetchconfig.pl -t` emits, e.g.:
+#   fetchconfig.pl: debug: 1. template dir: /usr/local/fetchconfig/templates
+# fetchconfig owns directory resolution, so we take the list verbatim (ordered,
+# de-duplicated). Cached per request. Returns an arrayref of directory paths.
+my $_template_dirs_cache;
+sub list_template_dirs {
+    return $_template_dirs_cache if defined $_template_dirs_cache;
+    $_template_dirs_cache = [];
+    my ($out, $err, $status, $fork_err) =
+        run_fetchconfig('-devices=' . $DEVICE_TABLE, '-t');
+    return $_template_dirs_cache if $fork_err;
+    my $combined = (defined $err ? $err : '') . "\n" . (defined $out ? $out : '');
+    my (@dirs, %seen);
+    for my $line (split /\n/, $combined) {
+        # "...: debug: N. template dir: /path"
+        if ($line =~ /template\s+dir:\s*(\S.*?)\s*$/) {
+            my $d = $1;
+            next if $seen{$d}++;
+            push @dirs, $d;
+        }
+    }
+    $_template_dirs_cache = \@dirs;
+    return $_template_dirs_cache;
+}
+
+# Scan the template directories for *.tmpl files. Returns an arrayref of
+# hashrefs { name, dir, path, size, mtime }, de-duplicated by full path only
+# (the same template name in different directories yields separate entries),
+# sorted by template name (then directory). $errref, if given, receives a list
+# of directories that could not be read.
+sub list_template_files {
+    my ($errref) = @_;
+    my $dirs = list_template_dirs();
+    my (@files, %seen);
+    for my $dir (@$dirs) {
+        my $dh;
+        unless (opendir($dh, $dir)) {
+            push @$errref, $dir if $errref;
+            next;
+        }
+        for my $entry (readdir($dh)) {
+            next unless $entry =~ /\.tmpl$/;
+            my $path = "$dir/$entry";
+            next unless -f $path;
+            next if $seen{$path}++;              # de-dup by full path only
+            (my $name = $entry) =~ s/\.tmpl$//;
+            my @st = stat($path);
+            push @files, {
+                name  => $name,
+                dir   => $dir,
+                path  => $path,
+                size  => (@st ? $st[7] : 0),
+                mtime => (@st ? $st[9] : 0),
+            };
+        }
+        closedir($dh);
+    }
+    @files = sort { $a->{name} cmp $b->{name} || $a->{dir} cmp $b->{dir} } @files;
+    return \@files;
+}
+
 # Empty-directory check: `fetchconfig.pl -devices=<table> -e`. Read-only; lists
 # empty date/device directories in the repository. Like -o, it exits 0 when
 # none are found and 1 when some are (an expected result, not an error).
@@ -8380,6 +8689,12 @@ $backdrop_css
   pre.config.hl .hl-ip      { color: #7ee787; }
   pre.config.hl .hl-num     { color: #f0b866; }
   pre.config.hl .hl-string  { color: #a5d6ff; }
+  /* Template state-machine verbs (Tools -> Template viewer). */
+  pre.config.hl .hl-tgreen  { color: #56d364; }               /* expect */
+  pre.config.hl .hl-tred    { color: #ff7b72; }               /* send* */
+  pre.config.hl .hl-tpurple { color: #d2a8ff; }               /* goto, done */
+  pre.config.hl .hl-tdir    { color: #39c5cf; }               /* directives */
+  pre.config.hl .hl-tstate  { color: #79c0ff; font-weight: 700; } /* state names */
   /* Side-by-side diff: a light two-column table matching the app's other
      list tables. Each side is monospaced; changed/added/removed rows are
      tinted, and a per-row gutter shows the source line number. */

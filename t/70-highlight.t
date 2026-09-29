@@ -25,6 +25,17 @@ for my $model (sort keys %sample) {
     is(strip($hl), $plain, "highlight_config($model): strip(spans) == esc(original)");
 }
 
+# The template highlighter (Tools -> Template viewer) obeys the same invariant.
+{
+    my $tpl = "# a template\ntransport ssh telnet\nprompt_tail '#'\n"
+            . "capture_from /^!/\nstate getconfig\n"
+            . "  send \"show running-config\"\n"
+            . "  expect prompt -> capture_stop -> done\n";
+    my $hl = main::highlight_template($tpl);
+    my $plain = join("\n", map { main::esc($_) } split /\n/, $tpl, -1);
+    is(strip($hl), $plain, "highlight_template: strip(spans) == esc(original)");
+}
+
 # a model with no highlighter falls back to escaped text (no spans added)
 my $none = main::highlight_config('fortigate', "config system\nend\n");
 unlike($none, qr/<span class="hl-/, 'model without highlighter: no spans');

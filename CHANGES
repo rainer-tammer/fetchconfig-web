@@ -7,6 +7,14 @@
 
 1.14
 ====
++ Tools: new "Template viewer" -- lists the generic-model *.tmpl templates in
+  the directories fetchconfig.pl -t reports (de-duplicated by full path, sorted
+  by name) and opens each read-only with template syntax highlighting with a role-based colour scheme: state + reserved state_* entry states in
+  blue, user-defined state names bold blue, directives teal, expect green, the
+  send* family red, goto/done purple, capture_start/stop orange, nop/arrow grey,
+  barewords lavender. The list shows the full template name (path incl. file). The path
+  is whitelisted against the discovered templates (no "..", must match a scanned
+  path), so it cannot read outside the template directories.
 + Added a Makefile.PL and a t/ unit-test suite (Test::More). "perl
   Makefile.PL" checks the required Perl modules up front and fails with clear
   errors if any is missing or too old (DBI >= 1.641, DBD::Pg >= 3.15.0,
