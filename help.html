@@ -306,11 +306,29 @@
         buttons to remove options or whole entries. On the Devices tab you can
         filter the cards by <strong>Device-ID</strong> and by
         <strong>comment</strong> (the filter is remembered between visits).</li>
+    <li>If the device table has a <strong>directory allow-list</strong> (the
+        <code>directory:</code> lines, editable only on the server), the
+        <strong>repository</strong> and <strong>template_dir</strong> options
+        become drop-downs of the allowed directories, shown by their
+        <code>$ALIAS</code> with the full path in gray. The <code>on_fetch_run</code>
+        option (if allowed) is edited as a directory drop-down plus a command
+        field; if the allow-list sets <code>fetch_run</code> to <code>none</code>
+        it cannot be used. When a <code>report</code> directory is allow-listed,
+        the Email tab gains the report options (<code>report_dir</code> as a
+        drop-down, plus <code>write_report</code>, <code>email_max_diff</code>,
+        <code>web_report_url</code>, <code>report_logo</code> and
+        <code>report_days</code>). A table that uses a
+        directory not on the list opens with a red warning but cannot be saved
+        until it is fixed.</li>
     <li>For the <strong>generic</strong> (template-driven) model, the
         <code>model</code> option is a drop-down of the templates fetchconfig
-        reports (via <code>fetchconfig.pl -t</code>). Pick the template for the
-        device, or set it once on a <strong>Defaults</strong> card for
-        <code>generic</code> so all generic devices inherit it.</li>
+        reports (via <code>fetchconfig.pl -t</code>), scoped to the
+        <code>template_dir</code> in effect for that row. Pick the template for
+        the device, or set it once on a <strong>Defaults</strong> card for
+        <code>generic</code> so all generic devices inherit it. If you change
+        <code>template_dir</code>, the model list updates when you leave the
+        field; the information icon notes that templates added on disk appear
+        only after you reload the page.</li>
     <li>The <strong>Email notification</strong> tab sets who gets the
         backup-summary e-mail (the <code>from</code>, <code>to</code> and
         <code>smtp</code> server, plus optional SMTP <code>user</code>/

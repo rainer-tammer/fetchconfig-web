@@ -64,7 +64,7 @@ use constant APP_VERSION => '1.15';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.64';
+use constant MIN_FETCHCONFIG_VERSION => '9.65';
 
 my $CONFIG_FILE = '/etc/fetchconfig-web.cfg';
 my $APP_TITLE   = 'fetchconfig-web';
@@ -144,12 +144,30 @@ sub read_config {
     $SUDO_BIN            = defined $kv->{SUDO_BIN}            ? $kv->{SUDO_BIN}            : '/usr/bin/sudo';
     $BACKUP_TMP_DIR      = defined $kv->{BACKUP_TMP_DIR} && $kv->{BACKUP_TMP_DIR} ne '' ? $kv->{BACKUP_TMP_DIR} : $SESSION_DIR;
     $BACKUP_DEVICE_TABLE = defined $kv->{BACKUP_DEVICE_TABLE} && $kv->{BACKUP_DEVICE_TABLE} ne '' ? $kv->{BACKUP_DEVICE_TABLE} : '/usr/local/fetchconfig/backup';
-    $SESSION_TTL         = (defined $kv->{SESSION_TTL} && $kv->{SESSION_TTL} =~ /^[1-9]\d*$/)
-                           ? $kv->{SESSION_TTL} : 8 * 3600;
-    $DEVICE_ID_FIELD     = (defined $kv->{DEVICE_ID_FIELD} && $kv->{DEVICE_ID_FIELD} =~ /^\d+$/)
-                           ? $kv->{DEVICE_ID_FIELD} : 1;
+    # Integer config keys: a missing/empty value uses the default, but a
+    # present-but-invalid value is a configuration error (reported on the login
+    # page) rather than a silent fallback -- so a typo cannot pass unnoticed.
+    # $min/$max are inclusive bounds (undef = unbounded).
+    my $cfg_err;
+    my $cfg_int = sub {
+        my ($key, $default, $min, $max) = @_;
+        my $v = $kv->{$key};
+        return $default if !defined $v || $v eq '';
+        unless ($v =~ /^\d+$/
+                && (!defined $min || $v >= $min) && (!defined $max || $v <= $max)) {
+            my $range = defined $min && defined $max ? "an integer between $min and $max"
+                      : defined $min                 ? "an integer >= $min"
+                      :                                "a non-negative integer";
+            $cfg_err ||= "$CONFIG_FILE: $key must be $range (got '$v')";
+            return $default;
+        }
+        return $v;
+    };
+
+    $SESSION_TTL         = $cfg_int->('SESSION_TTL', 8 * 3600, 1, undef);
+    $DEVICE_ID_FIELD     = $cfg_int->('DEVICE_ID_FIELD', 1, 0, undef);
     $PROTECTED_USER      = defined $kv->{PROTECTED_USER}     ? $kv->{PROTECTED_USER}     : 'admin';
-    $MIN_PASSWORD_LENGTH = defined $kv->{MIN_PASSWORD_LENGTH} ? $kv->{MIN_PASSWORD_LENGTH} : 8;
+    $MIN_PASSWORD_LENGTH = $cfg_int->('MIN_PASSWORD_LENGTH', 8, 1, undef);
     $DEFAULT_PASSWORD    = defined $kv->{DEFAULT_PASSWORD}   ? $kv->{DEFAULT_PASSWORD}   : 'fetchconfig';
     $HELP_FILE           = defined $kv->{HELP_FILE}          ? $kv->{HELP_FILE}          : '/www/pub/fetchconfig-web/help.html';
     # The config file may override the version this file ships as (the
@@ -161,20 +179,13 @@ sub read_config {
     # the Tools "fetchconfig log" box). Empty/unset = feature shows "not
     # configured". LOG_MAX_DEVICES caps how many sections are rendered.
     $FETCHCONFIG_LOG     = defined $kv->{FETCHCONFIG_LOG}    ? $kv->{FETCHCONFIG_LOG}    : '';
-    $LOG_MAX_DEVICES     = (defined $kv->{LOG_MAX_DEVICES} && $kv->{LOG_MAX_DEVICES} =~ /^\d+$/)
-                           ? $kv->{LOG_MAX_DEVICES} : 1000;
+    $LOG_MAX_DEVICES     = $cfg_int->('LOG_MAX_DEVICES', 1000, 0, undef);
     # Number of device scans the Tools scan tools run concurrently in the
-    # browser. Missing -> 1 (serial). If present it must be an integer 1..5;
-    # anything else is a configuration error.
-    if (!defined $kv->{MAX_PARALLEL_SCAN} || $kv->{MAX_PARALLEL_SCAN} eq '') {
-        $MAX_PARALLEL_SCAN = 1;
-    } elsif ($kv->{MAX_PARALLEL_SCAN} =~ /^\d+$/
-             && $kv->{MAX_PARALLEL_SCAN} >= 1 && $kv->{MAX_PARALLEL_SCAN} <= 5) {
-        $MAX_PARALLEL_SCAN = $kv->{MAX_PARALLEL_SCAN};
-    } else {
-        return "$CONFIG_FILE: MAX_PARALLEL_SCAN must be an integer between 1 and 5"
-             . " (got '$kv->{MAX_PARALLEL_SCAN}')";
-    }
+    # browser. Missing -> 1 (serial); if present, an integer 1..5.
+    $MAX_PARALLEL_SCAN   = $cfg_int->('MAX_PARALLEL_SCAN', 1, 1, 5);
+
+    # Surface the first invalid integer value (if any) as a config error.
+    return $cfg_err if defined $cfg_err;
 
     # URL paths (not filesystem paths) under which the web server serves the
     # optional fonts, images and documentation. These values are emitted into
@@ -714,7 +725,7 @@ if (!-d $SESSION_DIR) {
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
 my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete check_template save_template revert_template);
+    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete check_template save_template revert_template delete_report prune_reports);
 
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
@@ -758,8 +769,6 @@ sub main {
             show_side_by_side($user);
         } elsif ($action eq 'checkempty') {
             show_check_empty($user);
-        } elsif ($action eq 'checksuffix') {
-            show_check_suffix($user);
         } elsif ($action eq 'backup_now') {
             show_backup_now($user);
         } elsif ($action eq 'user') {
@@ -782,6 +791,16 @@ sub main {
             show_help($user);
         } elsif ($action eq 'setup') {
             show_setup($user);
+        } elsif ($action eq 'report') {
+            show_reports($user);
+        } elsif ($action eq 'view_report') {
+            show_view_report($user);
+        } elsif ($action eq 'download_report') {
+            do_download_report($user);
+        } elsif ($action eq 'delete_report') {
+            do_delete_report($user);
+        } elsif ($action eq 'prune_reports') {
+            do_prune_reports($user);
         } elsif ($action eq 'status') {
             show_status_page($user);
         } elsif ($action eq 'tools') {
@@ -800,6 +819,8 @@ sub main {
             do_save_template($user);
         } elsif ($action eq 'revert_template') {
             do_revert_template($user);
+        } elsif ($action eq 'template_models') {
+            show_template_models_json($user);
         } elsif ($action eq 'orphan_check') {
             show_orphan_check($user);
         } elsif ($action eq 'orphan_delete') {
@@ -1679,6 +1700,9 @@ sub show_status_page {
         return;
     }
 
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Device status</h2>\n};
+
     # Filter row: State + Changed dropdowns, Clear, and Per-page selector.
     print qq{<div class="dev-filter-row">\n};
     print qq{<label class="filter-label">State }
@@ -1783,6 +1807,7 @@ sub show_status_page {
         ? sprintf('%dms', int($load_secs * 1000 + 0.5))
         : sprintf('%.2fs', $load_secs);
     print qq{<p class="dev-loadtime">Status table load time: } . esc($load_str) . qq{</p>\n};
+    print qq{</div>\n};   # .tool-section
 
     print status_page_script();
     print top_bottom_nav();
@@ -1965,9 +1990,8 @@ sub show_backup_list {
         # alongside them (a device with no backups yet has nothing to check).
         print qq{<a class="btn" href="} . esc(script_url() . '?action=checkempty&dev=' . CGI::escape($dev))
             . qq{">Check for empty backups</a>\n};
-        # Read-only check that this device's backups all share one extension.
-        print qq{<a class="btn" href="} . esc(script_url() . '?action=checksuffix&dev=' . CGI::escape($dev))
-            . qq{">Check backup suffixes</a>\n};
+        # (The per-device backup-suffix check was removed; the Tools page's
+        # "Check devices for consistent backup suffixes" covers all devices.)
         # Download the newest backup's configuration as a file.
         print qq{<a class="btn" href="} . esc(script_url() . '?action=download_latest&dev=' . CGI::escape($dev))
             . qq{">Download latest configuration</a>\n};
@@ -2723,7 +2747,7 @@ sub highlight_template {
         # verbs
         expect => 'tgreen',
         send => 'tred', send_secret => 'tred', send_nolf => 'tred', send_match => 'tred',
-        goto => 'tpurple', done => 'tpurple',
+        goto => 'tpurple', done => 'tpurple', stay => 'tpurple',
         capture_start => 'num', capture_stop => 'num',
         nop => 'comment',
     );
@@ -2834,9 +2858,17 @@ sub device_repository {
         }
     }
     return undef unless defined $model;                 # device not in table
-    return $dev_repo if defined $dev_repo && $dev_repo ne '';
-    return $default_repo{$model} if defined $default_repo{$model} && $default_repo{$model} ne '';
-    return $REPOSITORY;                                 # last-resort fallback
+    my $repo = (defined $dev_repo && $dev_repo ne '') ? $dev_repo
+             : (defined $default_repo{$model} && $default_repo{$model} ne '') ? $default_repo{$model}
+             : $REPOSITORY;                             # last-resort fallback
+    # The stored value may be a $alias from the directory: allow-list; the web
+    # code accesses the repository directly on the filesystem (e.g. the .status
+    # file), so expand the alias to its real path here.
+    if (defined $repo && $repo =~ /^\$/) {
+        my $p = resolve_allowed_path('repository', $repo);
+        $repo = $p if defined $p;
+    }
+    return $repo;
 }
 
 # Read the per-device status file (fetchconfig >= 9.52 writes
@@ -2913,6 +2945,7 @@ sub read_all_status {
         for my $p (@{ $r->{opts} }) { $repo = $p->[1] if $p->[0] eq 'repository'; }
         $repo = $default_repo{ $r->{model} } if (!defined $repo || $repo eq '');
         $repo = $REPOSITORY                    if (!defined $repo || $repo eq '');
+        $repo = resolve_dir_alias('repository', $repo);   # $alias -> real path
         my $info;
         if (defined $repo && $repo ne '' && valid_id($dev)) {
             $info = read_status_file("$repo/$dev.status");
@@ -3640,50 +3673,6 @@ sub show_check_empty {
 # Per-device page: full output of `fetchconfig.pl -s dev_id`, which reports
 # whether the device's backup files have consistent extensions/suffixes.
 # Same layout as show_check_empty (raw transcript in a copyable block).
-sub show_check_suffix {
-    my ($user) = @_;
-    my $dev = $cgi->param('dev') // '';
-
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
-
-    unless (valid_id($dev)) {
-        print page_head('Error', $user);
-        print qq{<p class="error">Invalid device id.</p>\n};
-        print page_foot();
-        return;
-    }
-
-    print page_head("Check backup suffixes: $dev", $user, "checkout");
-    print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url()) . qq{">&larr; Devices</a>}
-        . qq{<span class="sep">/</span>}
-        . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
-        . esc($dev) . qq{</a></p>\n};
-    print qq{<h1>Check backup suffixes: } . esc($dev) . qq{</h1>\n};
-    print qq{<p class="muted">Result of <code>fetchconfig.pl -s </code>}
-        . esc($dev) . qq{, which checks that the device's stored backup files }
-        . qq{all use the same filename extension.</p>\n};
-
-    my ($output, $status, $err) = run_check_suffix($dev);
-    my $return_link = script_url() . '?dev=' . CGI::escape($dev);
-
-    if ($err) {
-        print qq{<p class="error">} . esc($err) . qq{</p>\n};
-    } else {
-        my ($cls, $msg) = suffix_rc_message($status);
-        print qq{<p class="$cls">} . esc($msg) . qq{</p>\n};
-        my $shown = (defined $output && $output ne '') ? $output
-                  : "(fetchconfig.pl -s produced no output.)";
-        print qq{<div class="config-wrap">\n};
-        print copy_button_html();
-        print qq{<pre class="config" id="config-content">} . esc($shown) . qq{</pre>\n};
-        print qq{</div>\n};
-        print copy_button_script();
-    }
-
-    print qq{<p><a class="btn" href="} . esc($return_link) . qq{">}
-        . qq{Return to backups for } . esc($dev) . qq{</a></p>\n};
-    print page_foot();
-}
 
 # =============================================================================
 # Tools (admin only): orphaned-backup check and delete
@@ -4109,6 +4098,407 @@ sub show_fetchconfig_log {
 }
 
 # Format a byte count as B / KB / MB (one decimal), for the template list.
+# =============================================================================
+# Reports (all logged-in users): list / view / download / delete the HTML
+# change-reports fetchconfig writes into the "report_dir" (the email: option,
+# resolved through the directory: allow-list). The web server has no direct
+# access to that directory, so every file operation is streamed/handled here
+# behind the fetchconfig-web login.
+# =============================================================================
+
+# The resolved report directory (the email: report_dir option -> allow-list
+# path), or undef if reporting is not configured / disabled / the dir is not
+# resolvable. Reads the device table directly (server-side).
+sub report_directory {
+    my ($content, $err) = slurp_device_table();
+    return undef if $err;
+    my $recs = parse_device_table($content);
+    my $val;
+    for my $r (@$recs) {
+        next unless $r->{kind} eq 'email';
+        for my $pair (@{ $r->{opts} || [] }) {
+            $val = $pair->[1] if defined $pair->[0] && $pair->[0] eq 'report_dir';
+        }
+    }
+    return undef unless defined $val && $val ne '';
+    my $al = read_allowed_dirs();
+    if ($al->{present}) {
+        my $p = resolve_allowed_path('report', $val);
+        return $p;                     # undef if not an allowed report dir
+    }
+    # No allow-list: accept a literal absolute path.
+    return ($val =~ m{^/} && $val !~ /\.\./) ? $val : undef;
+}
+
+# A report filename is valid iff it is a bare basename matching report-*.html
+# (no path separators, no "..").
+sub valid_report_name {
+    my ($f) = @_;
+    return 0 unless defined $f && $f ne '';
+    return 0 if $f =~ m{[/\\]} || $f =~ /\.\./;
+    return $f =~ /^report-.*\.html$/ ? 1 : 0;
+}
+
+# Parse a report-YYYYMMDD-HHMMSS.html timestamp into a sortable string; falls
+# back to '' (caller then uses mtime).
+sub report_name_stamp {
+    my ($f) = @_;
+    return "$1$2" if defined $f && $f =~ /^report-(\d{8})-(\d{6})\.html$/;
+    return '';
+}
+
+# List report-*.html files in the report dir, newest first. Returns an
+# arrayref of { name, size, mtime, stamp } (stamp = filename timestamp or '').
+sub list_reports {
+    my ($dir) = @_;
+    return [] unless defined $dir && $dir ne '';
+    my $dh;
+    opendir($dh, $dir) or return [];
+    my @files;
+    for my $entry (readdir($dh)) {
+        next unless valid_report_name($entry);
+        my $path = "$dir/$entry";
+        next unless -f $path;
+        my @st = stat($path);
+        push @files, {
+            name  => $entry,
+            size  => (@st ? $st[7] : 0),
+            mtime => (@st ? $st[9] : 0),
+            stamp => report_name_stamp($entry),
+        };
+    }
+    closedir($dh);
+    # newest first: by filename stamp when present, else mtime.
+    @files = sort {
+        my $ka = $a->{stamp} ne '' ? $a->{stamp} : sprintf('%020d', $a->{mtime});
+        my $kb = $b->{stamp} ne '' ? $b->{stamp} : sprintf('%020d', $b->{mtime});
+        $kb cmp $ka;
+    } @files;
+    return \@files;
+}
+
+# The Reports list page (?action=report), all logged-in users.
+sub show_reports {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Reports', $user, 'full');
+    my $flash_msg = $cgi->param('msg');
+    my $flash_err = $cgi->param('err');
+    if (defined $flash_msg && $flash_msg ne '') { print qq{<p class="success">} . esc($flash_msg) . qq{</p>\n}; }
+    if (defined $flash_err && $flash_err ne '') { print qq{<p class="error">} . esc($flash_err) . qq{</p>\n}; }
+
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Reports</h2>\n};
+
+    my $dir = report_directory();
+    unless (defined $dir) {
+        print qq{<p class="muted">Reporting is not configured. Set an }
+            . qq{allow-listed <code>report_dir</code> on the <code>email:</code> line }
+            . qq{(Setup &rarr; Edit device table &rarr; Email notification and reporting).</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+    unless (-d $dir) {
+        print qq{<p class="error">The configured report directory does not exist: }
+            . esc($dir) . qq{</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    my $reports = list_reports($dir);
+    print qq{<p class="muted">Change reports in <code>} . esc($dir) . qq{</code>.</p>\n};
+
+    if (!@$reports) {
+        print qq{<p class="muted">No reports found.</p>\n};
+    } else {
+        print qq{<table class="list">\n}
+            . qq{<tr><th>Report</th><th>Date / time</th><th>Size</th><th></th></tr>\n};
+        for my $r (@$reports) {
+            my $n    = $r->{name};
+            my $when = $r->{stamp} ne ''
+                ? sprintf('%s-%s-%s %s:%s:%s',
+                    substr($r->{stamp},0,4), substr($r->{stamp},4,2), substr($r->{stamp},6,2),
+                    substr($r->{stamp},8,2), substr($r->{stamp},10,2), substr($r->{stamp},12,2))
+                : fmt_mtime($r->{mtime});
+            my $fenc = CGI::escape($n);
+            print qq{<tr>}
+                . qq{<td>} . esc($n) . qq{</td>}
+                . qq{<td>} . esc($when) . qq{</td>}
+                . qq{<td>} . esc(human_size($r->{size})) . qq{</td>}
+                . qq{<td><div class="row-actions">\n};
+            # View + Download (GET, read-only) as buttons
+            print qq{<a class="btn" href="}
+                . esc(script_url() . '?action=view_report&file=' . $fenc) . qq{">View</a>\n};
+            print qq{<a class="btn" href="}
+                . esc(script_url() . '?action=download_report&file=' . $fenc) . qq{">Download</a>\n};
+            # Delete (POST + CSRF + confirm)
+            print $cgi->start_form(-method => 'POST', -action => script_url(),
+                -data_confirm => 'Delete report ' . esc($n) . '? This cannot be undone.',
+                -data_confirm_danger => 'y');
+            print qq{<input type="hidden" name="action" value="delete_report">\n};
+            print qq{<input type="hidden" name="file" value="} . esc($n) . qq{">\n};
+            print csrf_field();
+            print qq{<button type="submit" class="btn btn-danger">Delete</button>\n};
+            print $cgi->end_form;
+            print qq{</div></td></tr>\n};
+        }
+        print qq{</table>\n};
+    }
+
+    # Prune: delete reports older than N days (always keeps the newest), same
+    # pattern as the device-table backup cleanup.
+    print qq{<div class="prune-box">\n};
+    print $cgi->start_form(-method => 'POST', -action => script_url(),
+                           -data_confirm => 'Delete all reports older than the given number of days? The newest report is always kept.',
+                           -data_confirm_danger => 'y');
+    print qq{<input type="hidden" name="action" value="prune_reports">\n};
+    print csrf_field();
+    print qq{<label>Delete reports older than }
+        . qq{<input type="text" inputmode="numeric" name="days" value="30" size="4"> days</label> }
+        . qq{<button type="submit" class="btn btn-danger">Delete reports older than days</button>\n};
+    print $cgi->end_form;
+    print qq{</div>\n};   # .prune-box
+
+    print qq{</div>\n};   # .tool-section
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# Parse the device-diff blocks out of a report's HTML. Returns a list of
+# { device, state, diff_html } where diff_html is the re-escaped, re-classified
+# diff body (or '' for a device with no diff, e.g. Unchanged). The report HTML
+# is untrusted: we extract text and re-emit it, never inject the raw markup.
+sub parse_report_blocks {
+    my ($html) = @_;
+    my @blocks;
+    while ($html =~ m{<div\s+class="device-diff"\s+([^>]*)>(.*?)</div>}sg) {
+        my ($attrs, $inner) = ($1, $2);
+        my ($device) = $attrs =~ /data-device="([^"]*)"/;
+        my ($state)  = $attrs =~ /data-state="([^"]*)"/;
+        $device = defined $device ? $device : '';
+        $state  = defined $state  ? $state  : '';
+        # Extract the diff <pre> body if present.
+        my $diff_html = '';
+        if ($inner =~ m{<pre\s+class="diff">(.*?)</pre>}s) {
+            my $pre = $1;
+            # Re-emit each original <span class="d-*">TEXT</span> and plain text
+            # as escaped text wrapped in our own d-* spans (class whitelist).
+            my @out;
+            for my $line (split /\n/, $pre, -1) {
+                my $rendered = '';
+                my $rest = $line;
+                while ($rest =~ s{^<span\s+class="(d-old|d-new|d-hunk)">(.*?)</span>}{}s) {
+                    my ($cls, $txt) = ($1, $2);
+                    $txt = html_unescape($txt);
+                    $rendered .= qq{<span class="$cls">} . esc($txt) . qq{</span>};
+                }
+                # any leftover (plain text outside spans)
+                if ($rest ne '') { $rendered .= esc(html_unescape($rest)); }
+                push @out, $rendered;
+            }
+            $diff_html = join("\n", @out);
+        }
+        push @blocks, { device => $device, state => $state, diff_html => $diff_html };
+    }
+    return @blocks;
+}
+
+# Minimal HTML entity unescape for text pulled out of the report (it was
+# HTML-escaped by fetchconfig); we re-escape with esc() afterwards.
+sub html_unescape {
+    my ($s) = @_;
+    return '' unless defined $s;
+    $s =~ s/&lt;/</g;  $s =~ s/&gt;/>/g;
+    $s =~ s/&quot;/"/g; $s =~ s/&#39;/'/g;
+    $s =~ s/&amp;/&/g;   # must be last
+    return $s;
+}
+
+# View a report (?action=view_report&file=...): parse the device-diff blocks
+# and show them as collapsible sections (collapsed initially), with
+# Expand/Collapse all -- like the fetchconfig-log viewer.
+sub show_view_report {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('View report', $user, 'full');
+    my $back = esc(script_url() . '?action=report');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="$back">&larr; Reports</a></p>\n};
+
+    my $dir  = report_directory();
+    my $file = $cgi->param('file');
+    $file = '' unless defined $file;
+    unless (defined $dir && valid_report_name($file) && -f "$dir/$file") {
+        print qq{<h1>View report</h1>\n};
+        print qq{<p class="error">Report not found, or not a valid report file.</p>\n};
+        print page_foot();
+        return;
+    }
+    print qq{<h1>View report <span class="muted">(} . esc($file) . qq{)</span></h1>\n};
+
+    my $html = '';
+    if (open(my $fh, '<', "$dir/$file")) { local $/; $html = <$fh>; close($fh); }
+    my @blocks = parse_report_blocks($html);
+
+    unless (@blocks) {
+        print qq{<p class="muted">This report contains no device sections / diffs.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    print qq{<p><button type="button" class="btn btn-small" id="rep-expand-all">Expand all</button> }
+        . qq{<button type="button" class="btn btn-small" id="rep-collapse-all">Collapse all</button></p>\n};
+    print qq{<div class="log-view">\n};
+    for my $b (@blocks) {
+        my $state = $b->{state} ne '' ? $b->{state} : 'Unknown';
+        my $scls  = 'state-' . lc($state);
+        $scls =~ s/[^a-z0-9-]//g;
+        print qq{<div class="log-section" data-open="0">\n};
+        print qq{  <div class="log-head" role="button" tabindex="0">}
+            . qq{<span class="log-toggle">+</span> }
+            . qq{<span class="log-name">} . esc($b->{device}) . qq{</span> }
+            . qq{<span class="state $scls">} . esc($state) . qq{</span></div>\n};
+        print qq{  <div class="log-body" style="display:none;">\n};
+        if ($b->{diff_html} ne '') {
+            print qq{<pre class="diff rep-diff">} . $b->{diff_html} . qq{</pre>\n};
+        } else {
+            print qq{<p class="muted">No diff (unchanged).</p>\n};
+        }
+        print qq{  </div>\n};
+        print qq{</div>\n};
+    }
+    print qq{</div>\n};
+    print report_viewer_script();
+    print top_bottom_nav();
+    print page_foot();
+}
+
+sub report_viewer_script {
+    return <<'JS';
+<script>
+(function () {
+  var view = document.querySelector('.log-view');
+  if (!view) return;
+  function setOpen(sec, open) {
+    sec.setAttribute('data-open', open ? '1' : '0');
+    var body = sec.querySelector('.log-body');
+    var tog  = sec.querySelector('.log-toggle');
+    if (body) body.style.display = open ? '' : 'none';
+    if (tog)  tog.innerHTML = open ? '\u2212' : '+';
+  }
+  view.addEventListener('click', function (e) {
+    var head = e.target.closest ? e.target.closest('.log-head') : null;
+    if (!head) return;
+    var sec = head.parentNode;
+    setOpen(sec, sec.getAttribute('data-open') !== '1');
+  });
+  var ea = document.getElementById('rep-expand-all');
+  var ca = document.getElementById('rep-collapse-all');
+  if (ea) ea.addEventListener('click', function () {
+    var s = view.querySelectorAll('.log-section');
+    for (var i = 0; i < s.length; i++) setOpen(s[i], true);
+  });
+  if (ca) ca.addEventListener('click', function () {
+    var s = view.querySelectorAll('.log-section');
+    for (var i = 0; i < s.length; i++) setOpen(s[i], false);
+  });
+})();
+</script>
+JS
+}
+
+# Stream a report file as a download (?action=download_report&file=...). The
+# web server cannot reach the report dir, so the CGI streams the bytes behind
+# the login, as an attachment so the untrusted HTML never renders in our origin.
+sub do_download_report {
+    my ($user) = @_;
+    my $dir  = report_directory();
+    my $file = $cgi->param('file');
+    $file = '' unless defined $file;
+    unless (defined $dir && valid_report_name($file) && -f "$dir/$file") {
+        print $cgi->header(-status => '404 Not Found', -type => 'text/plain', -charset => 'UTF-8');
+        print "Report not found.\n";
+        return;
+    }
+    my $path = "$dir/$file";
+    my $size = (stat($path))[7];
+    if (open(my $fh, '<', $path)) {
+        binmode($fh);
+        print $cgi->header(-type => 'text/html', -charset => 'UTF-8',
+                           -attachment => $file,
+                           (defined $size ? ('-Content_length' => $size) : ()));
+        binmode(STDOUT);
+        local $/ = \65536;
+        while (my $chunk = <$fh>) { print $chunk; }
+        close($fh);
+    } else {
+        print $cgi->header(-status => '500 Internal Server Error', -type => 'text/plain', -charset => 'UTF-8');
+        print "Cannot read report.\n";
+    }
+}
+
+# Delete one report (POST+CSRF).
+sub do_delete_report {
+    my ($user) = @_;
+    my $dir  = report_directory();
+    my $file = $cgi->param('file');
+    $file = '' unless defined $file;
+    unless (defined $dir && valid_report_name($file) && -f "$dir/$file") {
+        redirect_to_reports(err => 'Report not found, or not a valid report file.');
+        return;
+    }
+    if (unlink("$dir/$file")) {
+        redirect_to_reports(msg => "Deleted report $file.");
+    } else {
+        redirect_to_reports(err => "Could not delete $file: $!");
+    }
+}
+
+# Prune reports older than N days, always keeping the newest (POST+CSRF).
+sub do_prune_reports {
+    my ($user) = @_;
+    my $dir  = report_directory();
+    unless (defined $dir && -d $dir) {
+        redirect_to_reports(err => 'Reporting is not configured.');
+        return;
+    }
+    my $days = $cgi->param('days');
+    unless (defined $days && $days =~ /^\d+$/ && $days >= 1) {
+        redirect_to_reports(err => 'Please enter a whole number of days (1 or more).');
+        return;
+    }
+    my $reports = list_reports($dir);   # newest first
+    my $cutoff  = time - $days * 86400;
+    my $deleted = 0;
+    for my $i (1 .. $#$reports) {        # skip index 0 (always keep newest)
+        my $r = $reports->[$i];
+        my $age_time = $r->{stamp} ne ''
+            ? stamp_to_epoch($r->{stamp})
+            : $r->{mtime};
+        next unless defined $age_time && $age_time < $cutoff;
+        $deleted++ if unlink("$dir/$r->{name}");
+    }
+    redirect_to_reports(msg => "Deleted $deleted report" . ($deleted == 1 ? '' : 's')
+                             . " older than $days day" . ($days == 1 ? '' : 's') . '.');
+}
+
+# report-YYYYMMDD-HHMMSS stamp -> epoch (local time), or undef.
+sub stamp_to_epoch {
+    my ($s) = @_;
+    return undef unless defined $s && $s =~ /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/;
+    require POSIX;
+    return eval { POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900) };
+}
+
+sub redirect_to_reports {
+    my (%o) = @_;
+    my $url = script_url() . '?action=report';
+    $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
+    $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
+    print $cgi->header(-location => $url, -status => '302 Found');
+}
+
 sub human_size {
     my ($n) = @_;
     $n = 0 unless defined $n;
@@ -4144,18 +4534,16 @@ sub show_view_templates {
     print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">Templates</h2>\n};
 
-    my @dirs_err;
-    my $files = list_template_files(\@dirs_err);
-    my $dirs  = list_template_dirs();
+    my $t = run_templates_t();
+    my $files = list_template_files();
 
-    if (!@$dirs) {
-        print qq{<p class="muted">No template directories reported by }
-            . qq{<code>fetchconfig.pl -t</code>. Check that fetchconfig 9.64+ }
-            . qq{is installed and configured.</p>\n};
+    my $t_err = template_t_error_html($t);
+    if ($t_err ne '') {
+        print $t_err;
     } elsif (!@$files) {
-        print qq{<p class="muted">No <code>*.tmpl</code> files found in the }
-            . scalar(@$dirs) . qq{ template director}
-            . (@$dirs == 1 ? 'y' : 'ies') . qq{.</p>\n};
+        print qq{<p class="error">No templates found in the configured template }
+            . qq{directories.</p>\n};
+        print template_t_raw_html($t);
     } else {
         print qq{<table class="list">\n<tr><th>Template</th><th>Full Template Name</th>}
             . qq{<th>Size</th><th>Modified</th><th></th></tr>\n};
@@ -4165,7 +4553,9 @@ sub show_view_templates {
             my $edit = esc(script_url() . '?action=edit_template&path='
                          . CGI::escape($f->{path}));
             my $actions = $f->{problem} eq ''
-                ? qq{<a href="$view">View</a> &nbsp; <a href="$edit">Edit</a>}
+                ? qq{<div class="row-actions">}
+                  . qq{<a class="btn" href="$view">View</a>\n}
+                  . qq{<a class="btn" href="$edit">Edit</a></div>}
                 : qq{<span class="error">Warning: } . esc($f->{problem})
                   . qq{ -- not a plain text file; view/edit refused</span>};
             print qq{<tr>}
@@ -4177,10 +4567,6 @@ sub show_view_templates {
                 . qq{</tr>\n};
         }
         print qq{</table>\n};
-    }
-    if (@dirs_err) {
-        print qq{<p class="muted">Note: could not read }
-            . join(', ', map { "<code>" . esc($_) . "</code>" } @dirs_err) . qq{.</p>\n};
     }
     my $secs = Time::HiRes::time() - $t0;
     print qq{<p class="dev-loadtime">Template list load time: }
@@ -4245,6 +4631,29 @@ sub show_view_template {
     print qq{</div>\n};
     print copy_button_script();
     print page_foot();
+}
+
+# JSON: the model names available in a template directory (?action=template_models
+# &dir=...). Used by the device-table editor to re-evaluate the generic model=
+# dropdown when the user types a template_dir that fetchconfig -t does not yet
+# know about (it only lists configured directories). The directory is scanned
+# directly for *.tmpl files (scan_dir_models). Admin/edit-table gated,
+# read-only. Returns {"models":[...]}.
+sub show_template_models_json {
+    my ($user) = @_;
+    print $cgi->header(-type => 'application/json', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    my $allowed = $dbh ? user_may_edit_table($dbh, $user) : 0;
+    $dbh->disconnect if $dbh;
+    unless ($allowed) {
+        print qq{{"error":"permission denied","models":[]}\n};
+        return;
+    }
+    my $dir = $cgi->param('dir');
+    $dir = '' unless defined $dir;
+    my $models = scan_dir_models($dir);
+    my $json = '{"models":[' . join(',', map { json_string($_) } @$models) . ']}';
+    print $json, "\n";
 }
 
 # Template editor page (?action=edit_template&path=..., admin only). A vertical
@@ -5887,7 +6296,7 @@ sub show_setup {
     # Bulk Edit is admin-only (stricter than the edit-device-table right).
     if ($is_admin) {
         print qq{ <a class="btn" href="} . esc(script_url() . '?action=bulk_edit')
-            . qq{">Bulk Edit</a>};
+            . qq{">Bulk edit</a>};
     }
     print qq{</p>\n};
 
@@ -6111,6 +6520,16 @@ my %EMAIL_OPTS = (
     password => { type => 'secret',     mandatory => 0 },
     footer   => { type => 'text',       mandatory => 0 },
     tls      => { type => 'enum_tls',   mandatory => 0 },
+    # HTML-report options (fetchconfig writes a report into an allow-listed
+    # "report" directory; these configure it). All optional.
+    report_dir     => { type => 'enum_report_dir', mandatory => 0 },
+    write_report   => { type => 'enum_onoff',      mandatory => 0 },
+    mask_secrets   => { type => 'enum_onoff',      mandatory => 0 },
+    email_max_diff => { type => 'int',             mandatory => 0 },
+    web_report_url => { type => 'report_url',      mandatory => 0 },
+    report_logo    => { type => 'text',            mandatory => 0 },
+    report_days    => { type => 'int',             mandatory => 0 },
+    report_hide    => { type => 'report_hide',     mandatory => 0, repeatable => 1 },
 );
 
 # Ordered list of known models, for the "model" dropdown in the editor.
@@ -6247,6 +6666,28 @@ sub parse_device_table {
         # and the editor can show it as a single recipient field.
         if ($trimmed =~ /^email\s*:\s*(.*)$/i) {
             my $payload = $1;
+            # report_hide= is special: the rest of the line after the first
+            # "report_hide=" is the regex, verbatim (no comma-split, no quoting).
+            # Only ONE report_hide= is allowed per line; a second occurrence is a
+            # parse error and the line is ignored (surfaced to the user).
+            if ($payload =~ /report_hide\s*=/) {
+                my $count = () = $payload =~ /report_hide\s*=/g;
+                if ($count > 1) {
+                    push @records, { kind => 'parse_error', raw => $line,
+                        error => "email: line has more than one report_hide= "
+                               . "(only one per line is allowed); line ignored: $trimmed" };
+                    next;
+                }
+                # Split: everything before report_hide= parses normally (comma
+                # options); everything after the first report_hide= is the regex.
+                my ($pre, $rx) = $payload =~ /^(.*?)report_hide\s*=(.*)$/;
+                my @opts;
+                $pre =~ s/,\s*$//;                     # trailing comma before report_hide=
+                push @opts, @{ parse_opts($pre) } if defined $pre && $pre =~ /\S/ && $pre =~ /=/;
+                push @opts, ['report_hide', $rx];      # verbatim, including spaces
+                push @records, { kind => 'email', opts => \@opts };
+                next;
+            }
             if ($payload =~ /=/) {
                 push @records, { kind => 'email', opts => parse_opts($payload) };
             } else {
@@ -6257,6 +6698,12 @@ sub parse_device_table {
         # default: directive -- "default: model k=v,..."
         if ($trimmed =~ /^default\s*:\s*(\S+)\s*(.*)$/i) {
             push @records, { kind => 'default', model => $1, opts => parse_opts($2) };
+            next;
+        }
+        # directory: allow-list line -- kept verbatim and NEVER editable in the
+        # web UI (it is the security allow-list; read/written server-side only).
+        if ($trimmed =~ /^directory\s*:/i) {
+            push @records, { kind => 'directory', raw => $line };
             next;
         }
         # Any other "word:" directive we don't model -> keep verbatim.
@@ -6303,6 +6750,30 @@ sub parse_device_table {
 # are discarded; only these fixed section headers are emitted. Blank/comment
 # records are dropped; 'other' (unknown directive) records are kept under
 # "# Unknown" at the end of the defaults section.
+# Return a copy of an opts arrayref with repository= / template_dir= literal
+# paths rewritten to their $alias (Q-1/Q-2), when the allow-list is present.
+# Unresolvable values and everything else are left unchanged.
+sub normalize_dir_opts {
+    my ($opts) = @_;
+    my $al = read_allowed_dirs();
+    return $opts unless $al->{present} && $opts;
+    my @out;
+    for my $pair (@$opts) {
+        my ($k, $v) = @$pair;
+        if (defined $k && ($k eq 'repository' || $k eq 'template_dir')) {
+            my $kind = $k eq 'repository' ? 'repository' : 'template';
+            push @out, [$k, alias_for_value($kind, $v)];
+        } elsif (defined $k && $k eq 'on_fetch_run') {
+            push @out, [$k, alias_for_fetch_run($v)];
+        } elsif (defined $k && $k eq 'report_dir') {
+            push @out, [$k, alias_for_value('report', $v)];
+        } else {
+            push @out, [$k, $v];
+        }
+    }
+    return \@out;
+}
+
 sub serialize_records {
     my ($records) = @_;
     my (@emails, @defaults, @devices, @unknown);
@@ -6311,18 +6782,50 @@ sub serialize_records {
         elsif ($r->{kind} eq 'default') { push @defaults, $r; }
         elsif ($r->{kind} eq 'device')  { push @devices,  $r; }
         elsif ($r->{kind} eq 'other')   { push @unknown,  $r; }
-        # 'comment' records are discarded.
+        # 'comment' and 'directory' records are dropped here: the directory:
+        # allow-list is re-emitted verbatim from disk below, never from the
+        # (potentially forged) form data.
     }
 
     my @out;
     push @out, '# DEFAULT OPTIONS SECTION', '';
 
+    # directory: allow-list -- read straight from the on-disk device table and
+    # written back unchanged, armored with the "must be edited on the server"
+    # comment lines, at the very top of the defaults section.
+    my $al = read_allowed_dirs();
+    if ($al->{present}) {
+        push @out, '# directory', '';
+        push @out, '# directory allow list - must be directly edited on the server';
+        push @out, @{ directory_raw_block() };
+        push @out, '# directory allow list - must be directly edited on the server';
+        push @out, '';
+    }
+
     if (@emails) {
         push @out, '# eMail', '';
         for my $r (@emails) {
-            push @out, defined $r->{bare}
-                ? 'email: ' . $r->{bare}
-                : 'email: ' . serialize_opts($r->{opts}, 1);   # 1 = comma-only quoting
+            if (defined $r->{bare}) {
+                push @out, 'email: ' . $r->{bare};
+                next;
+            }
+            # Separate report_hide pairs (rest-of-line verbatim, one per line)
+            # from the normal comma-joined options.
+            my (@normal, @hide);
+            for my $pair (@{ $r->{opts} || [] }) {
+                if (defined $pair->[0] && $pair->[0] eq 'report_hide') {
+                    push @hide, $pair->[1];
+                } else {
+                    push @normal, $pair;
+                }
+            }
+            push @out, 'email: ' . serialize_opts(normalize_dir_opts(\@normal), 1)
+                if @normal;
+            # Each report_hide on its own line, value verbatim (no quoting).
+            for my $rx (@hide) {
+                next unless defined $rx && $rx ne '';
+                push @out, "email: report_hide=$rx";
+            }
         }
         push @out, '';
     }
@@ -6333,7 +6836,7 @@ sub serialize_records {
         # Blank line between the groups of default: lines for different
         # models (consecutive lines for the same model stay together).
         push @out, '' if defined $prev_model && $r->{model} ne $prev_model;
-        push @out, "default:\t$r->{model}\t" . serialize_opts($r->{opts});
+        push @out, "default:\t$r->{model}\t" . serialize_opts(normalize_dir_opts($r->{opts}));
         $prev_model = $r->{model};
     }
     push @out, '';
@@ -6347,7 +6850,7 @@ sub serialize_records {
     push @out, '# DEVICES SECTION', '';
     push @out, '# model        dev-unique-id                      hostname                      device-specific-options', '';
     for my $r (@devices) {
-        my $o = serialize_opts($r->{opts});
+        my $o = serialize_opts(normalize_dir_opts($r->{opts}));
         push @out, join("\t", $r->{model}, $r->{id}, $r->{host})
                  . ($o ne '' ? "\t$o" : '');
     }
@@ -6394,10 +6897,15 @@ my $SECRET_KEEP = '\\__unchanged__/';
 # values are never emitted in clear text: a field showing $SECRET_KEEP means
 # "unchanged". Returns HTML.
 sub render_option_field {
-    my ($rk, $model_or_email, $key, $val, $is_email) = @_;
+    my ($rk, $model_or_email, $key, $val, $is_email, $section, $row_tpl_dir, $idx) = @_;
+    $section = '' unless defined $section;
+    $row_tpl_dir = '' unless defined $row_tpl_dir;
+    $idx = 0 unless defined $idx;
     my $spec = $is_email ? $EMAIL_OPTS{$key} : option_spec($model_or_email, $key);
     my $type = $spec ? $spec->{type} : 'text';
-    my $name = "${rk}_opt_${key}";
+    # Repeatable options get an indexed field name so several can coexist.
+    my $name = ($spec && $spec->{repeatable})
+             ? "${rk}_opt_${key}__${idx}" : "${rk}_opt_${key}";
     my $mand = ($spec && $spec->{mandatory}) ? qq{ <span class="opt-req">*</span>} : '';
     my $unrecognized = $spec ? '' : qq{ <span class="opt-unknown">(unrecognized)</span>};
     my $ev = esc(defined $val ? $val : '');
@@ -6441,30 +6949,47 @@ sub render_option_field {
                  . qq{<option value="telnet"$sel{telnet}>telnet</option>}
                  . qq{<option value="auto"$sel{auto}>auto</option></select>};
     } elsif ($type eq 'enum_template') {
-        # Generic-model template selector. Options come from fetchconfig -t
-        # (list_templates), sorted alphabetically. The current value is always
-        # offered even if it's not in the discovered list (e.g. a template in a
-        # dir the web user can't scan), so an existing setting is never lost. If
-        # no templates are discovered, fall back to a plain text field so the
-        # editor still works.
-        my $templates = list_templates();
+        # Generic-model template (model=) selector. Its option list depends on
+        # the row's section (default/device) and template_dir; the JS
+        # (tpl_model_script) populates and re-evaluates it from the -t snapshot
+        # shipped to the browser, on load and whenever template_dir changes.
+        # The server seeds the initial options (section + this row's
+        # template_dir) so it works without JS too; the current value is always
+        # kept as an option so an existing setting is never lost.
         my $v = defined $val ? $val : '';
-        if (@$templates) {
-            my %have = map { $_ => 1 } @$templates;
-            my @opts = @$templates;
-            unshift @opts, $v if $v ne '' && !$have{$v};
-            my $sel_empty = ($v eq '') ? ' selected' : '';
-            $control = qq{<select name="} . esc($name) . qq{">}
-                     . qq{<option value=""$sel_empty>(choose template)</option>};
-            for my $t (@opts) {
-                my $sel = ($v eq $t) ? ' selected' : '';
-                $control .= qq{<option value="} . esc($t) . qq{"$sel>} . esc($t) . qq{</option>};
-            }
-            $control .= qq{</select>};
-        } else {
-            $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="20">}
-                     . qq{ <span class="opt-unit">no templates found (fetchconfig -t)</span>};
+        my $sec = $section ne '' ? $section : 'device';
+        my $eff_dir = ($row_tpl_dir ne '') ? $row_tpl_dir
+                    : ($sec eq 'device' ? template_default_dir() : '');
+        my $models = template_models_for($sec, $eff_dir);
+        my %have = map { $_ => 1 } @$models;
+        # Current value invalid = set but not among this directory's models. It
+        # is shown as a disabled marker (not selectable) and the warning is on.
+        my $invalid_cur = ($v ne '' && !$have{$v});
+        my $sel_empty = ($v eq '') ? ' selected' : '';
+        $control = qq{<select name="} . esc($name) . qq{" class="tpl-model-select" }
+                 . qq{data-tpl-role="model" data-tpl-section="} . esc($sec) . qq{" }
+                 . qq{data-tpl-current="} . esc($v) . qq{">}
+                 . qq{<option value=""$sel_empty>(choose template)</option>};
+        if ($invalid_cur) {
+            $control .= qq{<option value="} . esc($v) . qq{" selected disabled>}
+                      . esc($v) . qq{ (current, not in this directory)</option>};
         }
+        for my $t (@$models) {
+            my $sel = ($v eq $t) ? ' selected' : '';
+            $control .= qq{<option value="} . esc($t) . qq{"$sel>} . esc($t) . qq{</option>};
+        }
+        $control .= qq{</select>};
+        # Red warning (JS shows/updates it) + info bubble (Q-B/Q2). Shown now if
+        # there are no models or the current value is invalid for the dir.
+        my $warn_txt = !@$models ? 'No templates in this directory'
+                     : $invalid_cur ? 'Current template not in this directory' : '';
+        my $warn_style = ($warn_txt ne '') ? '' : ' style="display:none;"';
+        $control .= qq{ <span class="tpl-model-warn error"$warn_style>}
+                  . esc($warn_txt ne '' ? $warn_txt : 'No templates in this directory')
+                  . qq{</span>};
+        $control .= qq{ <span class="tpl-info" title="Templates are read when the }
+                  . qq{page loads; changes on disk appear only after you reload }
+                  . qq{this page.">&#128712;</span>};
     } elsif ($type eq 'int') {
         # Append a unit hint for the time-based options: milliseconds for the
         # *_ms / type_delay options, seconds for the *timeout options.
@@ -6474,9 +6999,103 @@ sub render_option_field {
         my $unit_html = $unit ne '' ? qq{ <span class="opt-unit">$unit</span>} : '';
         $control = qq{<input type="text" inputmode="numeric" name="} . esc($name) . qq{" value="$ev" size="8">}
                  . $unit_html;
+    } elsif ($key eq 'on_fetch_run'
+             && read_allowed_dirs()->{present}
+             && read_allowed_dirs()->{fetch_run_configured}
+             && !read_allowed_dirs()->{fetch_run_disabled}) {
+        # Two fields: a directory dropdown (fetch_run allow-list, value = $alias)
+        # + a command-with-options text field. They are combined into the real
+        # hidden field ($name) as "<alias>/<command>" by the JS on change. The
+        # gray expanded path is shown beside the dropdown.
+        my $al  = read_allowed_dirs();
+        my $v   = defined $val ? $val : '';
+        my ($cur_dir, $cur_cmd) = split_fetch_run($v);
+        # The dropdown options carry $aliases; if the stored dir is a literal
+        # path, normalise it to its alias so the matching option is selected.
+        $cur_dir = alias_for_value('fetch_run', $cur_dir) if $cur_dir ne '';
+        my $dir_ok = ($cur_dir ne '') ? defined resolve_allowed_path('fetch_run', $cur_dir) : 1;
+        $control  = qq{<input type="hidden" name="} . esc($name) . qq{" value="$ev" class="fr-hidden">};
+        $control .= qq{<select class="fr-dir dir-alias-select" data-dir-kind="fetch_run">}
+                  . qq{<option value=""} . ($cur_dir eq '' ? ' selected' : '') . qq{>(choose directory)</option>};
+        if ($cur_dir ne '' && !$dir_ok) {
+            $control .= qq{<option value="} . esc($cur_dir) . qq{" selected disabled>}
+                      . esc($cur_dir) . qq{ (current, not allowed)</option>};
+        }
+        for my $e (@{ $al->{fetch_run} }) {
+            my $sel = ($cur_dir eq $e->{alias}) ? ' selected' : '';
+            $control .= qq{<option value="} . esc($e->{alias}) . qq{"$sel }
+                      . qq{data-path="} . esc($e->{path}) . qq{">} . esc($e->{alias}) . qq{</option>};
+        }
+        $control .= qq{</select>};
+        my $exp = ($cur_dir ne '' && $dir_ok) ? expanded_path_for('fetch_run', $cur_dir) : '';
+        $control .= qq{ <span class="dir-alias-path muted">} . esc($exp) . qq{</span>};
+        $control .= qq{ <input type="text" class="fr-cmd" size="24" placeholder="command -options" value="}
+                  . esc($cur_cmd) . qq{">};
+        $control .= qq{ <span class="dir-alias-warn error"}
+                  . (($cur_dir ne '' && !$dir_ok) ? '' : ' style="display:none;"')
+                  . qq{>not in the allowed directory list</span>};
+    } elsif ($type eq 'enum_onoff') {
+        # on / off selector (write_report).
+        my $v = defined $val ? $val : '';
+        $control = qq{<select name="} . esc($name) . qq{">}
+                 . qq{<option value=""}  . ($v eq '' ? ' selected' : '') . qq{>(unset)</option>}
+                 . qq{<option value="on"}  . ($v eq 'on'  ? ' selected' : '') . qq{>on</option>}
+                 . qq{<option value="off"} . ($v eq 'off' ? ' selected' : '') . qq{>off</option>}
+                 . qq{</select>};
+    } elsif ($type eq 'report_url') {
+        # Free-text URL with a gray hint showing the suggested report endpoint.
+        $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="44">}
+                 . qq{ <span class="opt-hint muted">http(s)://fqdn/.../fetchconfig-web.cgi?action=report</span>};
+    } elsif ($type eq 'report_hide') {
+        # Repeatable ~40-char text input holding a regex (stored rest-of-line
+        # verbatim, one per email: line), with a gray example hint.
+        $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="40">}
+                 . qq{ <span class="opt-hint muted">report_hide=(?&lt;=wpa-passphrase )\\S+ }
+                 . qq{-&gt; "wpa-passphrase ****"</span>};
+    } elsif ((($key eq 'repository' || $key eq 'template_dir')
+              || $type eq 'enum_report_dir')
+             && read_allowed_dirs()->{present}) {
+        # Allow-list is active: restrict this path to the configured entries.
+        # The dropdown offers the $aliases; the value stored is the $alias. The
+        # expanded path is shown in gray beside it. A stored value that is not
+        # allowed is kept as a disabled "(current, not allowed)" option so it is
+        # visible but not re-selectable (and the save is blocked).
+        my $al      = read_allowed_dirs();
+        my $dkind   = $type eq 'enum_report_dir' ? 'report'
+                    : $key  eq 'repository'       ? 'repository' : 'template';
+        my $v       = defined $val ? $val : '';
+        my $allowed = defined resolve_allowed_path($dkind, $v);
+        # Options carry $aliases; normalise a stored literal path to its alias
+        # so the matching option is selected on load.
+        $v = alias_for_value($dkind, $v) if $v ne '' && $allowed;
+        my $extra   = ($key eq 'template_dir')
+                    ? qq{ data-tpl-role="template_dir" data-tpl-section="} . esc($section) . qq{"} : '';
+        $control = qq{<select name="} . esc($name) . qq{" class="dir-alias-select"}
+                 . qq{ data-dir-kind="$dkind"$extra>}
+                 . qq{<option value=""} . ($v eq '' ? ' selected' : '') . qq{>(choose directory)</option>};
+        if ($v ne '' && !$allowed) {
+            $control .= qq{<option value="} . esc($v) . qq{" selected disabled>}
+                      . esc($v) . qq{ (current, not allowed)</option>};
+        }
+        for my $e (@{ $al->{$dkind} }) {
+            my $sel = ($v eq $e->{alias}) ? ' selected' : '';
+            $control .= qq{<option value="} . esc($e->{alias}) . qq{"$sel }
+                      . qq{data-path="} . esc($e->{path}) . qq{">} . esc($e->{alias}) . qq{</option>};
+        }
+        $control .= qq{</select>};
+        # gray expanded path + red "not allowed" note
+        my $exp = $allowed ? expanded_path_for($dkind, $v) : '';
+        $control .= qq{ <span class="dir-alias-path muted">} . esc($exp) . qq{</span>};
+        $control .= qq{ <span class="dir-alias-warn error"}
+                  . (($v ne '' && !$allowed) ? '' : ' style="display:none;"')
+                  . qq{>not in the allowed directory list</span>};
     } else {
-        # text / path / recipients -- plain text field
-        $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="30">};
+        # text / path / recipients -- plain text field. The generic model's
+        # template_dir gets a data-role so the JS re-evaluates the model=
+        # dropdown when it changes.
+        my $extra = ($key eq 'template_dir')
+                  ? qq{ data-tpl-role="template_dir" data-tpl-section="} . esc($section) . qq{"} : '';
+        $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="30"$extra>};
     }
 
     return qq{<div class="opt-field"><label>} . esc($key) . qq{$mand$unrecognized</label> }
@@ -6491,7 +7110,22 @@ sub render_add_option {
     my ($rk, $model_or_email, $present, $is_email) = @_;
     my @keys = $is_email ? (sort keys %EMAIL_OPTS) : model_option_keys($model_or_email);
     my %have = map { $_ => 1 } @$present;
-    my @avail = grep { !$have{$_} } @keys;
+    # A repeatable option (e.g. report_hide) stays in the menu even when one is
+    # already present, so more can be added.
+    my @avail = grep {
+        my $sp = $is_email ? $EMAIL_OPTS{$_} : option_spec($model_or_email, $_);
+        !$have{$_} || ($sp && $sp->{repeatable});
+    } @keys;
+    # A directory list set to "none" disables the matching option, so it is not
+    # offered in the "+ add option" menu: on_fetch_run (fetch_run none) on a
+    # device/default, report_dir (report none) on the Email tab.
+    my $al = read_allowed_dirs();
+    if (!$is_email && $al->{present} && $al->{fetch_run_disabled}) {
+        @avail = grep { $_ ne 'on_fetch_run' } @avail;
+    }
+    if ($is_email && $al->{present} && $al->{report_disabled}) {
+        @avail = grep { $_ ne 'report_dir' } @avail;
+    }
     my $opts = join('', map {
         my $spec = $is_email ? $EMAIL_OPTS{$_} : option_spec($model_or_email, $_);
         my $t = $spec ? $spec->{type} : 'text';
@@ -6549,8 +7183,55 @@ sub show_edit_table {
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=setup') . qq{">&larr; Setup</a></p>\n};
     print qq{<h1>Edit device table</h1>\n};
+
+    # The generic model's template dropdowns depend on `fetchconfig -t`. If it
+    # failed (missing template directory, or none found), show the same error
+    # as the template viewer instead of the editor -- editing with broken
+    # template data would be misleading and a save could be rejected anyway.
+    my $t_err = template_t_error_html(run_templates_t());
+    if ($t_err ne '') {
+        print $t_err;
+        print page_foot();
+        return;
+    }
+    my $ad_err = allowed_dirs_error_html();
+    if ($ad_err ne '') {
+        print $ad_err;
+        print page_foot();
+        return;
+    }
+
     if (defined $msg && $msg ne '') { print qq{<p class="success">} . esc($msg) . qq{</p>\n}; }
     if (defined $eerr && $eerr ne '') { print qq{<p class="error">} . esc($eerr) . qq{</p>\n}; }
+
+    # Directory allow-list violations already present in the table: show a red
+    # banner naming each (with the expanded path where it resolves) so the admin
+    # can fix them. The editor stays open, but a save is blocked (validate_records).
+    # Device-table parse errors (e.g. two report_hide= on one email: line) --
+    # the offending line is ignored; show it clearly so it can be fixed.
+    my @parse_err = map { $_->{error} } grep { $_->{kind} eq 'parse_error' } @$records;
+    if (@parse_err) {
+        print qq{<div class="error" style="border:2px solid #b00020;padding:0.7em 1em;">\n};
+        print qq{<strong>Device-table parse errors &mdash; these lines were ignored:</strong>\n};
+        print qq{<ul>\n};
+        print qq{<li>} . esc($_) . qq{</li>\n} for @parse_err;
+        print qq{</ul>\n};
+        print qq{</div>\n};
+    }
+
+    my @dir_viol = directory_allowlist_violations($records);
+    if (@dir_viol) {
+        print qq{<div class="error" style="border:2px solid #b00020;padding:0.7em 1em;">\n};
+        print qq{<strong>Directory allow-list violations &mdash; these must be fixed before saving:</strong>\n};
+        print qq{<ul>\n};
+        print qq{<li>} . esc($_) . qq{</li>\n} for @dir_viol;
+        print qq{</ul>\n};
+        print qq{<p class="muted">The allowed directories are set in the }
+            . qq{<code>directory:</code> section of the device table, which can only }
+            . qq{be edited directly on the server.</p>\n};
+        print qq{</div>\n};
+    }
+
     print qq{<div class="edit-warning">Credentials are masked (}
         . esc($SECRET_KEEP) . qq{ = unchanged). A timestamped backup of the current }
         . qq{table is saved before your changes are written. Edits take effect on the }
@@ -6573,7 +7254,7 @@ sub show_edit_table {
     print qq{<div class="tabbar">}
         . qq{<button type="button" class="tab active" data-tab="devices">Devices</button>}
         . qq{<button type="button" class="tab" data-tab="defaults">Defaults (per model)</button>}
-        . qq{<button type="button" class="tab" data-tab="email">Email notification</button>}
+        . qq{<button type="button" class="tab" data-tab="email">Email notification and reporting</button>}
         . qq{</div>\n};
 
     # We iterate records once, emitting each into its tab panel while keeping
@@ -6706,9 +7387,24 @@ sub reconstruct_records_from_form {
         # map (last write wins, though keys are unique per record).
         my %submitted;
         my @submitted_order;   # order options first appeared in the form
+        my %repeat;            # repeatable key -> [ values in index order ]
         for my $pname ($cgi->param()) {
             next unless $pname =~ /^\Q${rk}\E_opt_(.+)$/;
             my $key = $1;
+            # Repeatable options use an indexed name "<key>__<n>"; collect them
+            # into an ordered list rather than the single-value map.
+            if ($key =~ /^(.+)__(\d+)$/) {
+                my ($rkey, $ridx) = ($1, $2);
+                my $rspec = $is_email ? $EMAIL_OPTS{$rkey} : option_spec($model, $rkey);
+                if ($rspec && $rspec->{repeatable}) {
+                    my $rv = $cgi->param($pname);
+                    $rv = '' unless defined $rv;
+                    $repeat{$rkey}[$ridx] = $rv;
+                    push @submitted_order, $rkey unless exists $submitted{$rkey} || exists $repeat{"__seen_$rkey"};
+                    $repeat{"__seen_$rkey"} = 1;
+                    next;
+                }
+            }
             my $val = $cgi->param($pname);
             $val = '' unless defined $val;
             # Secret write-back: a field still holding the mask keeps the
@@ -6735,14 +7431,27 @@ sub reconstruct_records_from_form {
             if (defined $orig_rec->{bare}) { @orig_keys = ('to'); }
             else { @orig_keys = map { $_->[0] } @{ $orig_rec->{opts} || [] }; }
         }
+        # Emit one or more pairs for a key: a repeatable key yields a pair per
+        # non-empty value (in index order); a normal key yields its single value.
+        my $emit = sub {
+            my ($k) = @_;
+            if (exists $repeat{$k}) {
+                for my $rv (@{ $repeat{$k} }) {
+                    next unless defined $rv && $rv ne '';
+                    push @opts, [$k, $rv];
+                }
+            } elsif (exists $submitted{$k}) {
+                push @opts, [$k, $submitted{$k}];
+            }
+        };
         for my $k (@orig_keys) {
-            next unless exists $submitted{$k};
+            next unless exists $submitted{$k} || exists $repeat{$k};
             next if $emitted{$k}++;
-            push @opts, [$k, $submitted{$k}];
+            $emit->($k);
         }
         for my $k (@submitted_order) {
             next if $emitted{$k}++;
-            push @opts, [$k, $submitted{$k}];
+            $emit->($k);
         }
 
         if ($kind eq 'email') {
@@ -6801,14 +7510,23 @@ sub validate_records {
     # a device line UNLESS a "default: generic" line supplies it. Precompute
     # whether the defaults section provides model= for generic devices.
     my $default_generic_has_model = 0;
+    my @default_generic_errors;
     for my $r (@$records) {
         next unless $r->{kind} eq 'default';
         my $m = defined $r->{model} ? lc($r->{model}) : '';
         next unless $m eq 'generic';
+        my ($model_val, $dir_val);
         for my $pair (@{ $r->{opts} || [] }) {
             my ($k, $v) = @$pair;
-            $default_generic_has_model = 1
-                if defined $k && lc($k) eq 'model' && defined $v && $v ne '';
+            $model_val = $v if defined $k && lc($k) eq 'model';
+            $dir_val   = $v if defined $k && lc($k) eq 'template_dir';
+        }
+        if (defined $model_val && $model_val ne '') {
+            $default_generic_has_model = 1;
+            # Q-D: the default's model must exist in its (default-section) dir.
+            my $err = generic_model_dir_error("the 'default: generic' line",
+                                              'default', $model_val, $dir_val);
+            push @default_generic_errors, $err if $err;
         }
     }
 
@@ -6867,19 +7585,164 @@ sub validate_records {
         if ($seen_id{$r->{id}}++) { push @errors, "Duplicate Device-ID '$r->{id}'."; }
 
         # Generic model: model=<template> is required on the device line unless
-        # a "default: generic" line supplies it.
-        if (defined $r->{model} && lc($r->{model}) eq 'generic' && !$default_generic_has_model) {
-            my $has_model = 0;
+        # a "default: generic" line supplies it; and the chosen model must exist
+        # in the effective template directory (Q-D).
+        if (defined $r->{model} && lc($r->{model}) eq 'generic') {
+            my ($model_val, $dir_val);
             for my $pair (@{ $r->{opts} || [] }) {
                 my ($k, $v) = @$pair;
-                $has_model = 1 if defined $k && lc($k) eq 'model' && defined $v && $v ne '';
+                $model_val = $v if defined $k && lc($k) eq 'model';
+                $dir_val   = $v if defined $k && lc($k) eq 'template_dir';
             }
-            push @errors, "Generic device '$r->{id}' needs a model= (template); "
-                        . "set it on the device or on a 'default: generic' line."
-                unless $has_model;
+            my $has_model = defined $model_val && $model_val ne '';
+            if (!$has_model && !$default_generic_has_model) {
+                push @errors, "Generic device '$r->{id}' needs a model= (template); "
+                            . "set it on the device or on a 'default: generic' line.";
+            } elsif ($has_model) {
+                my $err = generic_model_dir_error("device '$r->{id}'", 'device',
+                                                  $model_val, $dir_val);
+                push @errors, $err if $err;
+            }
         }
     }
+    push @errors, @default_generic_errors;
+
+    # directory: allow-list enforcement (a violation blocks the save).
+    push @errors, directory_allowlist_violations($records);
+
+    # report_hide values are regexes; reject any that do not compile, and also
+    # catch the common bracket typos that Perl silently accepts as literals
+    # (e.g. a stray trailing '}' after a quantifier).
+    for my $r (@$records) {
+        next unless $r->{kind} eq 'email';
+        for my $pair (@{ $r->{opts} || [] }) {
+            next unless defined $pair->[0] && $pair->[0] eq 'report_hide';
+            my $rx = $pair->[1];
+            next unless defined $rx && $rx ne '';
+            my $ok = eval { qr/$rx/; 1 };
+            unless ($ok) {
+                my $msg = $@ || 'invalid';
+                $msg =~ s/\s+at .*$//s;             # trim Perl's "at ... line N"
+                push @errors, "report_hide: invalid regular expression '$rx' ($msg).";
+                next;
+            }
+            my $bp = regex_bracket_problem($rx);
+            push @errors, "report_hide: unbalanced brackets in '$rx' ($bp)." if $bp;
+        }
+    }
+
     return \@errors;
+}
+
+# Heuristic bracket-balance check for a regex, to catch the common typos Perl
+# accepts as literals (a stray ')' or '}', or an unclosed '(' / '{'). It is
+# escaping- and char-class-aware: inside [...] the ( ) { } are literal, and a
+# lone ']' or '}' as a literal is NOT flagged (Perl is lenient and those are
+# legal), only an unmatched closer or unclosed opener. Returns '' if ok.
+sub regex_bracket_problem {
+    my ($rx) = @_;
+    return '' unless defined $rx;
+    my @stack; my $in_class = 0; my $class_start = -1;
+    my @ch = split //, $rx;
+    for (my $i = 0; $i < @ch; $i++) {
+        my $c = $ch[$i];
+        if ($c eq '\\') { $i++; next; }             # skip an escaped char
+        if ($in_class) {
+            # ] closes the class, except as the first class char (also after [^)
+            my $first = $class_start + ((defined $ch[$class_start+1] && $ch[$class_start+1] eq '^') ? 2 : 1);
+            $in_class = 0 if $c eq ']' && $i > $first;
+            next;
+        }
+        if    ($c eq '[') { $in_class = 1; $class_start = $i; }
+        elsif ($c eq '(' || $c eq '{') { push @stack, $c; }
+        elsif ($c eq ')') { return "unmatched ')'" unless @stack && $stack[-1] eq '('; pop @stack; }
+        elsif ($c eq '}') { return "stray closing brace '}'" unless @stack && $stack[-1] eq '{'; pop @stack; }
+    }
+    return "unterminated character class '['" if $in_class;
+    return "unclosed '" . $stack[-1] . "'" if @stack;
+    return '';
+}
+
+# Return a list of human-readable directory allow-list violations for the given
+# records: every repository= / template_dir= on a device or default line that
+# does not resolve to an allowed directory (by $alias or by matching an allowed
+# path). Empty list when the allow-list is absent or all paths are allowed.
+sub directory_allowlist_violations {
+    my ($records) = @_;
+    my $al = read_allowed_dirs();
+    return () unless $al->{present};
+    my @v;
+    for my $r (@$records) {
+        next unless $r->{kind} eq 'device' || $r->{kind} eq 'default'
+                 || $r->{kind} eq 'email';
+        my $who = $r->{kind} eq 'device'
+                ? "Device '" . (defined $r->{id} ? $r->{id} : '?') . "'"
+                : $r->{kind} eq 'default'
+                ? "The 'default: " . (defined $r->{model} ? $r->{model} : '?') . "' line"
+                : "The 'email:' line";
+        for my $pair (@{ $r->{opts} || [] }) {
+            my ($k, $v) = @$pair;
+            next unless defined $k;
+            next unless defined $v && $v ne '';
+            if ($k eq 'repository' || $k eq 'template_dir') {
+                my $kind = $k eq 'repository' ? 'repository' : 'template';
+                next if defined resolve_allowed_path($kind, $v);
+                push @v, "$who: $k=$v is not in the allowed directory list.";
+            } elsif ($k eq 'on_fetch_run' && $al->{fetch_run_configured}) {
+                if ($al->{fetch_run_disabled}) {
+                    push @v, "$who: on_fetch_run is not allowed "
+                           . "(the fetch_run directory list is set to 'none').";
+                    next;
+                }
+                my ($dir) = split_fetch_run($v);
+                next if $dir ne '' && defined resolve_allowed_path('fetch_run', $dir);
+                push @v, "$who: on_fetch_run=$v uses a directory that is not in "
+                       . "the allowed fetch_run list.";
+            } elsif ($k eq 'report_dir' && $al->{report_configured}) {
+                if ($al->{report_disabled}) {
+                    push @v, "$who: report_dir is not allowed "
+                           . "(the report directory list is set to 'none').";
+                    next;
+                }
+                next if defined resolve_allowed_path('report', $v);
+                push @v, "$who: report_dir=$v is not in the allowed report list.";
+            }
+        }
+    }
+    return @v;
+}
+
+# Q-D: check that $model exists in the effective template directory for a
+# generic row. $dir is the row's template_dir (undef/'' = use the default-section
+# directory for device rows, section-only for default rows). Returns an error
+# string, or '' if ok. If `fetchconfig -t` failed (rc 1/2 or could not run),
+# returns an error too, so a broken template setup blocks the save.
+sub generic_model_dir_error {
+    my ($label, $section, $model, $dir) = @_;
+    my $t = run_templates_t();
+    if (!defined $t->{rc}) {
+        return "Cannot verify the template for $label: fetchconfig -t did not run.";
+    }
+    if ($t->{rc} == 2) {
+        return "Cannot save $label: a configured template directory is missing "
+             . "(fetchconfig -t). Fix the template_dir settings first.";
+    }
+    if ($t->{rc} == 1) {
+        return "Cannot save $label: no templates are available (fetchconfig -t).";
+    }
+    my $eff_dir = (defined $dir && $dir ne '') ? $dir
+                : ($section eq 'device' ? template_default_dir() : '');
+    # Models known to -t for this section+dir; if the directory is one -t does
+    # not list (a freshly-typed template_dir), scan it directly.
+    my @known = @{ template_models_for($section, $eff_dir) };
+    unless (@known) {
+        @known = @{ scan_dir_models($eff_dir) } if $eff_dir ne '';
+    }
+    my %ok = map { $_ => 1 } @known;
+    return '' if $ok{$model};
+    my $where = ($eff_dir ne '') ? "template directory '$eff_dir'"
+                                 : "the $section templates";
+    return "Template '$model' for $label was not found in $where.";
 }
 
 # Preview: reconstruct the records from the submitted form and show the
@@ -6923,15 +7786,11 @@ sub show_preview_table {
         print qq{<p class="muted">Warnings: } . esc(join('  ', @$warnings)) . qq{</p>\n};
     }
 
-    print qq{<div class="config-wrap">\n};
-    print copy_button_html();
-    print qq{<pre class="config" id="config-content">} . esc($masked) . qq{</pre>\n};
-    print qq{</div>\n};
-    print copy_button_script();
-
-    # Carry the whole submitted editor form forward as hidden fields, so the
-    # user can Save directly from here (changes preserved) or go back to the
-    # editor to keep editing. Save is offered only when validation passed.
+    # Action buttons at the TOP (above the raw table), so they are reachable
+    # without scrolling past a long table. The form carries the whole submitted
+    # editor form forward as hidden fields, so the user can Save directly from
+    # here (changes preserved) or go back to the editor. Save is offered only
+    # when validation passed.
     print $cgi->start_form(-method => 'POST', -action => script_url(), -id => 'preview-form');
     print preview_hidden_fields();
     print qq{<div class="save-row">\n};
@@ -6942,6 +7801,13 @@ sub show_preview_table {
     print qq{<a class="btn btn-green" href="} . esc(script_url() . '?action=setup') . qq{">Cancel</a>\n};
     print qq{</div>\n};
     print $cgi->end_form;
+
+    print qq{<div class="config-wrap">\n};
+    print copy_button_html();
+    print qq{<pre class="config" id="config-content">} . esc($masked) . qq{</pre>\n};
+    print qq{</div>\n};
+    print copy_button_script();
+    print top_bottom_nav();
     print page_foot();
 }
 
@@ -7009,6 +7875,17 @@ sub do_save_table {
 
     # --- serialize + write, with a timestamped backup first ---
     my $new_content = serialize_records(\@records);
+
+    # Before touching the live table, have fetchconfig itself validate exactly
+    # the bytes we are about to write: -t (templates) and --list-allowed-dirs
+    # (allowed directories on disk). If either aborts, block the save so an
+    # invalid table never reaches disk.
+    my $fc_err = validate_table_with_fetchconfig($new_content);
+    if (defined $fc_err) {
+        redirect_to_editor(err => $fc_err);
+        return;
+    }
+
     my ($ok, $info) = backup_and_write_table($content, $new_content);
     if (!$ok) {
         redirect_to_editor(err => $info);
@@ -7212,7 +8089,7 @@ sub devices_to_text {
     my @lines;
     for my $r (@$records) {
         next unless $r->{kind} eq 'device';
-        my $o = serialize_opts($r->{opts});
+        my $o = serialize_opts(normalize_dir_opts($r->{opts}));
         push @lines, join("\t", $r->{model}, $r->{id}, $r->{host})
                    . ($o ne '' ? "\t$o" : '');
     }
@@ -7284,6 +8161,15 @@ sub show_bulk_edit {
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=setup') . qq{">&larr; Setup</a></p>\n};
     print qq{<h1>Bulk edit devices</h1>\n};
+
+    # Same directory checks as the graphical editor: if `-t` (templates) or
+    # `--list-allowed-dirs` reports a missing directory, show the fetchconfig
+    # output and refuse to open the editor.
+    my $t_err = template_t_error_html(run_templates_t());
+    if ($t_err ne '') { print $t_err; print page_foot(); return; }
+    my $ad_err = allowed_dirs_error_html();
+    if ($ad_err ne '') { print $ad_err; print page_foot(); return; }
+
     print qq{<div class="edit-warning">This is the <strong>complete</strong> device }
         . qq{list, one device per line as <code>model&nbsp;device-id&nbsp;host&nbsp;}
         . qq{[options]</code>. Saving <strong>replaces the entire device section</strong> }
@@ -7301,6 +8187,12 @@ sub show_bulk_edit {
     print qq{<input type="hidden" name="action" value="bulk_save">\n};
     print qq{<input type="hidden" name="table_mtime" value="} . esc($mtime) . qq{">\n};
     print csrf_field();
+    # Action buttons at the TOP, above the textarea, so they're reachable
+    # without scrolling past a long device list.
+    print qq{<div class="save-row">}
+        . qq{<button type="submit" class="btn btn-green">Save changes</button>}
+        . qq{<a class="btn" href="} . esc(script_url() . '?action=setup') . qq{">Cancel</a>}
+        . qq{</div>\n};
     # Passwords are shown in PLAIN TEXT here (admin-only, and the whole point
     # of bulk edit is to edit the raw lines), so HTML-escape only -- do NOT
     # go through esc(), which would mask pass=/enable= and cause the mask to
@@ -7308,10 +8200,6 @@ sub show_bulk_edit {
     print qq{<textarea name="devices" id="bulk-devices" class="bulk-textarea" }
         . qq{spellcheck="false" autocomplete="off" wrap="off">}
         . CGI::escapeHTML($text) . qq{</textarea>\n};
-    print qq{<div class="save-row">}
-        . qq{<button type="submit" class="btn btn-green">Save changes</button>}
-        . qq{<a class="btn" href="} . esc(script_url() . '?action=setup') . qq{">Cancel</a>}
-        . qq{</div>\n};
     print $cgi->end_form;
 
     # Confirm on save, summarising the resulting device count (and warning
@@ -7394,6 +8282,15 @@ sub do_bulk_save {
     push @records, @$new_devices;
 
     my $new_content = serialize_records(\@records);
+
+    # Block the save if fetchconfig rejects the resulting table (same check as
+    # the structured editor).
+    my $fc_err = validate_table_with_fetchconfig($new_content);
+    if (defined $fc_err) {
+        show_bulk_edit($user, $text, [$fc_err]);
+        return;
+    }
+
     my ($ok, $info) = backup_and_write_table($content, $new_content);
     if (!$ok) {
         show_bulk_edit($user, $text, [$info]);
@@ -7450,9 +8347,21 @@ sub render_record_card {
         $h .= render_option_field($rk, 'email', 'to', $r->{bare}, 1);
         push @present, 'to';
     } else {
+        my $section = $kind eq 'default' ? 'default'
+                    : $kind eq 'device'  ? 'device' : '';
+        # This row's template_dir value (if set), so the model= dropdown can be
+        # seeded for the right directory.
+        my $row_tpl_dir = '';
+        for my $pair (@{$r->{opts}}) {
+            $row_tpl_dir = $pair->[1] if defined $pair->[0] && $pair->[0] eq 'template_dir'
+                                         && defined $pair->[1];
+        }
+        my %kidx;   # per-key occurrence index (for repeatable options)
         for my $pair (@{$r->{opts}}) {
             my ($k, $v) = @$pair;
-            $h .= render_option_field($rk, $is_email ? 'email' : $model, $k, $v, $is_email);
+            my $idx = $kidx{$k}++;
+            $h .= render_option_field($rk, $is_email ? 'email' : $model, $k, $v,
+                                      $is_email, $section, $row_tpl_dir, $idx);
             push @present, $k;
         }
     }
@@ -7484,22 +8393,218 @@ sub read_help_file {
 # simple. All option controls are named "<rk>_opt_<key>", so adding an
 # option just appends a new field with that name.
 sub edit_table_script {
-    # Build a JS array literal of the discovered generic-model templates so the
-    # client-side "+ add option" handler can render the enum_template dropdown
-    # (fetchconfig -t cannot be run in the browser). Emitted in its own small
-    # interpolated <script> so the main script below stays a non-interpolating
-    # heredoc (it contains JS regexes / $ that must not be touched by Perl).
-    my $templates = list_templates();
-    my $tmpl_js = '[' . join(',', map {
-        my $t = $_; $t =~ s/(["\\])/\\$1/g; qq{"$t"};
-    } @$templates) . ']';
-    my $out = qq{<script>window.FCWEB_TEMPLATES = $tmpl_js;</script>\n};
+    # Ship the full `fetchconfig -t` snapshot to the browser so the client-side
+    # "+ add option" handler and the model= re-evaluation (on template_dir
+    # change) can build the section/dir-aware dropdown without re-running -t.
+    # Emitted in its own small interpolated <script> so the main script below
+    # stays a non-interpolating heredoc (it contains JS regexes / $).
+    my $t = run_templates_t();
+    my $rows_js = '[' . join(',', map {
+        my $r = $_;
+        '{' . join(',', map {
+            my ($k, $val) = ($_, $r->{$_}); $val = '' unless defined $val;
+            $val =~ s/(["\\])/\\$1/g;
+            qq{"$k":"$val"};
+        } qw(section path model dir)) . '}';
+    } @{ $t->{rows} }) . ']';
+    my $def_dir = template_default_dir(); $def_dir =~ s/(["\\])/\\$1/g;
+    # Directory allow-list data for the JS "+ add option" builder:
+    #   FCWEB_DIR_ALIAS   flat  { '$ALIAS' => '/path', ... } (any kind) for
+    #                     resolving a template_dir alias to its path;
+    #   FCWEB_DIR_ENTRIES per-kind [{alias,path}] so the add-option handler can
+    #                     build the repository / template_dir / fetch_run
+    #                     dropdowns client-side;
+    #   FCWEB_FETCHRUN_DISABLED  1 when "directory: fetch_run none".
+    my $al = read_allowed_dirs();
+    my %flat;
+    for my $kind (qw(repository template fetch_run report)) {
+        $flat{$_} = $al->{alias2path}{$kind}{$_} for keys %{ $al->{alias2path}{$kind} };
+    }
+    my $jesc = sub { my $s = defined $_[0] ? $_[0] : ''; $s =~ s/(["\\])/\\$1/g; $s };
+    my $alias_js = '{' . join(',', map { qq{"} . $jesc->($_) . qq{":"} . $jesc->($flat{$_}) . qq{"} }
+                                    sort keys %flat) . '}';
+    my $entries_js = '{' . join(',', map {
+        my $kind = $_;
+        qq{"$kind":[} . join(',', map {
+            qq[{"alias":"] . $jesc->($_->{alias}) . qq[","path":"] . $jesc->($_->{path}) . qq["}]
+        } @{ $al->{$kind} }) . ']';
+    } qw(repository template fetch_run report)) . '}';
+    my $fr_disabled  = ($al->{present} && $al->{fetch_run_disabled}) ? 1 : 0;
+    my $rep_disabled = ($al->{present} && $al->{report_disabled})    ? 1 : 0;
+    my $out = qq{<script>window.FCWEB_TPL_ROWS = $rows_js;\n}
+            . qq{window.FCWEB_TPL_DEFAULT_DIR = "$def_dir";\n}
+            . qq{window.FCWEB_DIR_ALIAS = $alias_js;\n}
+            . qq{window.FCWEB_DIR_ENTRIES = $entries_js;\n}
+            . qq{window.FCWEB_FETCHRUN_DISABLED = $fr_disabled;\n}
+            . qq{window.FCWEB_REPORT_DISABLED = $rep_disabled;</script>\n};
     $out .= <<'JS';
 <script>
 (function () {
-  var TEMPLATES = window.FCWEB_TEMPLATES || [];
+  var TPL_ROWS = window.FCWEB_TPL_ROWS || [];
+  var TPL_DEFAULT_DIR = window.FCWEB_TPL_DEFAULT_DIR || '';
+  var DIR_ALIAS = window.FCWEB_DIR_ALIAS || {};
+  var DIR_ENTRIES = window.FCWEB_DIR_ENTRIES || {repository:[],template:[],fetch_run:[],report:[]};
+  var FETCHRUN_DISABLED = !!window.FCWEB_FETCHRUN_DISABLED;
+  var REPORT_DISABLED = !!window.FCWEB_REPORT_DISABLED;
+  var DIR_PRESENT = false;
+  for (var _k in DIR_ENTRIES) { if (DIR_ENTRIES[_k] && DIR_ENTRIES[_k].length) DIR_PRESENT = true; }
+  // Build an allow-list <select> of $aliases for a directory kind.
+  function dirAliasSelectHTML(kind, name, extra) {
+    var ent = DIR_ENTRIES[kind] || [];
+    var html = '<select' + (name ? ' name="' + name + '"' : '') +
+               ' class="dir-alias-select' + (kind === 'fetch_run' ? ' fr-dir' : '') +
+               '" data-dir-kind="' + kind + '"' + (extra || '') + '>' +
+               '<option value="">(choose directory)</option>';
+    for (var i = 0; i < ent.length; i++) {
+      html += '<option value="' + ent[i].alias + '" data-path="' + ent[i].path + '">' +
+              ent[i].alias + '</option>';
+    }
+    return html + '</select>' +
+      ' <span class="dir-alias-path muted"></span>' +
+      ' <span class="dir-alias-warn error" style="display:none;">not in the allowed directory list</span>';
+  }
   var form = document.getElementById('edit-form');
   if (!form) return;
+  // Resolve a template_dir field value to a path: a $alias via the allow-list
+  // map, else the value as-is (a literal path when there is no allow-list).
+  function dirToPath(v) {
+    if (!v) return v;
+    if (v.charAt(0) === '$' && DIR_ALIAS[v]) return DIR_ALIAS[v];
+    return v;
+  }
+
+  // Distinct, sorted model names for a section (+ optional directory) from the
+  // fetchconfig -t snapshot. Section-only filter when dir is empty.
+  function trimSlash(s) { return (s || '').replace(/\/+$/, ''); }
+  function modelsFor(section, dir) {
+    var want = trimSlash(dir);
+    var seen = {}, out = [];
+    for (var i = 0; i < TPL_ROWS.length; i++) {
+      var r = TPL_ROWS[i];
+      if (r.section !== section) continue;
+      if (want && trimSlash(r.dir) !== want) continue;
+      if (r.model && !seen[r.model]) { seen[r.model] = 1; out.push(r.model); }
+    }
+    out.sort();
+    return out;
+  }
+  // The template_dir currently typed in the Defaults-tab generic row, or '' .
+  function defaultsTabDir() {
+    var el = form.querySelector('[data-tpl-role="template_dir"][data-tpl-section="default"]');
+    return el ? dirToPath(el.value || '') : '';
+  }
+  // Rebuild one model= <select> from the snapshot, keeping its current value
+  // (kept as an option even if it no longer matches, so nothing is lost), and
+  // toggle the red "no templates" warning next to its template_dir field.
+  // Does the -t snapshot know about this (section, dir) pair at all?
+  function snapshotHasDir(section, dir) {
+    var want = trimSlash(dir);
+    if (!want) return true;                  // section-only: snapshot suffices
+    for (var i = 0; i < TPL_ROWS.length; i++) {
+      if (TPL_ROWS[i].section === section && trimSlash(TPL_ROWS[i].dir) === want) return true;
+    }
+    return false;
+  }
+  // Rebuild the <select> from a models array (+ toggle the warning).
+  function fillModelSelect(sel, row, models) {
+    var cur = sel.getAttribute('data-tpl-current') || '';
+    var have = {}; for (var i = 0; i < models.length; i++) have[models[i]] = 1;
+    var invalidCur = (cur !== '' && !have[cur]);
+    var html = '<option value=""' + (cur === '' ? ' selected' : '') + '>(choose template)</option>';
+    if (invalidCur) {
+      html += '<option value="' + cur + '" selected disabled>' + cur +
+              ' (current, not in this directory)</option>';
+    }
+    for (var j = 0; j < models.length; j++) {
+      var s = (models[j] === cur) ? ' selected' : '';
+      html += '<option value="' + models[j] + '"' + s + '>' + models[j] + '</option>';
+    }
+    sel.innerHTML = html;
+    var warn = row ? row.querySelector('.tpl-model-warn') : null;
+    if (warn) {
+      if (!models.length)   warn.textContent = 'No templates in this directory';
+      else if (invalidCur)  warn.textContent = 'Current template not in this directory';
+      warn.style.display = (models.length && !invalidCur) ? 'none' : '';
+    }
+  }
+  var scriptUrl = (form.getAttribute('action') || '');
+  function refreshModelSelect(sel) {
+    if (!sel) return;
+    var section = sel.getAttribute('data-tpl-section') || 'device';
+    var row = sel.closest ? sel.closest('.rec-card') : null;
+    var dirEl = row ? row.querySelector('[data-tpl-role="template_dir"]') : null;
+    var dir;
+    if (dirEl && dirEl.value) dir = dirToPath(dirEl.value);
+    else if (section === 'device') dir = defaultsTabDir() || TPL_DEFAULT_DIR;
+    else dir = '';                                  // defaults tab, no dir
+    // Known to the snapshot -> filter it (fast, no request). Otherwise the user
+    // typed a directory -t doesn't know yet: ask the server to scan it.
+    if (snapshotHasDir(section, dir)) {
+      fillModelSelect(sel, row, modelsFor(section, dir));
+      return;
+    }
+    if (typeof window.fetch !== 'function') {         // no fetch: snapshot only
+      fillModelSelect(sel, row, modelsFor(section, dir));
+      return;
+    }
+    var url = scriptUrl + '?action=template_models&dir=' + encodeURIComponent(dir);
+    fetch(url, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { fillModelSelect(sel, row, (d && d.models) || []); })
+      .catch(function () { fillModelSelect(sel, row, modelsFor(section, dir)); });
+  }
+  function refreshAllModelSelects() {
+    var sels = form.querySelectorAll('.tpl-model-select');
+    for (var i = 0; i < sels.length; i++) refreshModelSelect(sels[i]);
+  }
+  // Re-evaluate on load and whenever a template_dir field is left (blur/change).
+  // Keep the gray expanded-path label next to a directory alias dropdown in
+  // sync, and clear its "not allowed" warning once a real alias is chosen.
+  function updateAliasPath(sel) {
+    if (!sel || !sel.classList.contains('dir-alias-select')) return;
+    var opt = sel.options[sel.selectedIndex];
+    var path = (opt && opt.getAttribute('data-path')) || '';
+    var field = sel.closest ? sel.closest('.opt-field') : null;
+    var pathEl = field ? field.querySelector('.dir-alias-path') : null;
+    if (pathEl) pathEl.textContent = path;
+    var warnEl = field ? field.querySelector('.dir-alias-warn') : null;
+    if (warnEl) warnEl.style.display = (sel.value && !path) ? '' : 'none';
+  }
+  // Combine an on_fetch_run row's directory dropdown + command field into its
+  // hidden field ("<alias>/<command>").
+  function joinFetchRun(field) {
+    if (!field) return;
+    var dir = field.querySelector('.fr-dir');
+    var cmd = field.querySelector('.fr-cmd');
+    var hid = field.querySelector('.fr-hidden');
+    if (!dir || !cmd || !hid) return;
+    var d = dir.value || '', c = cmd.value || '';
+    hid.value = (d === '' && c === '') ? '' : (d.replace(/\/+$/, '') + '/' + c);
+  }
+  form.addEventListener('change', function (e) {
+    var el = e.target;
+    if (!el || !el.getAttribute) return;
+    if (el.classList && el.classList.contains('dir-alias-select')) updateAliasPath(el);
+    if (el.getAttribute('data-tpl-role') === 'template_dir') refreshAllModelSelects();
+    if (el.classList && (el.classList.contains('fr-dir') || el.classList.contains('fr-cmd'))) {
+      var f = el.closest ? el.closest('.opt-field') : null;
+      joinFetchRun(f);
+    }
+  });
+  form.addEventListener('input', function (e) {
+    var el = e.target;
+    if (el && el.classList && el.classList.contains('fr-cmd')) {
+      var f = el.closest ? el.closest('.opt-field') : null;
+      joinFetchRun(f);
+    }
+  });
+  form.addEventListener('blur', function (e) {
+    if (e.target && e.target.getAttribute &&
+        e.target.getAttribute('data-tpl-role') === 'template_dir') {
+      refreshAllModelSelects();
+    }
+  }, true);
+  refreshAllModelSelects();
 
   // --- tabs ---
   var tabs = form.querySelectorAll('.tab');
@@ -7531,7 +8636,13 @@ sub edit_table_script {
   form.addEventListener('click', function (e) {
     if (e.target.classList.contains('opt-del')) {
       var field = e.target.closest('.opt-field');
-      if (field) field.parentNode.removeChild(field);
+      if (!field) return;
+      // If a template_dir (or model) field is being removed, re-evaluate the
+      // model dropdowns afterwards (a device with no template_dir falls back to
+      // the default directory).
+      var removed = field.querySelector('[data-tpl-role="template_dir"], .tpl-model-select');
+      field.parentNode.removeChild(field);
+      if (removed) refreshAllModelSelects();
     }
   });
 
@@ -7564,6 +8675,12 @@ sub edit_table_script {
     var rk = card.getAttribute('data-rk');
     var list = card.querySelector('.opt-list');
     var name = rk + '_opt_' + key;
+    // Repeatable options (report_hide) need a unique indexed name so several
+    // can be added; use a high index based on a timestamp to avoid collisions
+    // with server-rendered __0.._N fields.
+    if (key === 'report_hide') {
+      name = rk + '_opt_report_hide__' + (1000 + (window.__fcRepIdx = (window.__fcRepIdx || 0) + 1));
+    }
     // Build the control matching the option's type, so enum options (tls,
     // debug) become drop-downs rather than free-text fields.
     var control;
@@ -7578,16 +8695,16 @@ sub edit_table_script {
         '<option value="telnet">telnet</option>' +
         '<option value="auto">auto</option></select>';
     } else if (type === 'enum_template') {
-      if (TEMPLATES.length) {
-        var o = '<select name="' + name + '"><option value="">(choose template)</option>';
-        for (var ti = 0; ti < TEMPLATES.length; ti++) {
-          o += '<option value="' + TEMPLATES[ti] + '">' + TEMPLATES[ti] + '</option>';
-        }
-        control = o + '</select>';
-      } else {
-        control = '<input type="text" name="' + name + '" value="" size="20"> ' +
-          '<span class="opt-unit">no templates found (fetchconfig -t)</span>';
-      }
+      var kind = card.getAttribute('data-kind') || '';
+      var sec  = (kind === 'default') ? 'default' : 'device';
+      control = '<select name="' + name + '" class="tpl-model-select" ' +
+        'data-tpl-role="model" data-tpl-section="' + sec + '" data-tpl-current="">' +
+        '<option value="">(choose template)</option></select>' +
+        ' <span class="tpl-model-warn error" style="display:none;">No templates in this directory</span>' +
+        ' <span class="tpl-info" title="Templates are read when the page loads; ' +
+        'changes on disk appear only after you reload this page.">&#128712;</span>';
+    } else if (type === 'template_dir_TEXT_HANDLED_BELOW') {
+      // (template_dir uses the generic text branch; tagged server-side)
     } else if (type === 'debug') {
       control = '<select name="' + name + '">' +
         '<option value="on">on</option>' +
@@ -7600,11 +8717,41 @@ sub edit_table_script {
       control = '<select name="' + name + '">' +
         '<option value="">(default)</option>' +
         '<option value="hide">hide</option></select>';
+    } else if (type === 'enum_onoff') {
+      control = '<select name="' + name + '">' +
+        '<option value="">(unset)</option>' +
+        '<option value="on">on</option>' +
+        '<option value="off">off</option></select>';
+    } else if (type === 'report_url') {
+      control = '<input type="text" name="' + name + '" value="" size="44">' +
+        ' <span class="opt-hint muted">http(s)://fqdn/.../fetchconfig-web.cgi?action=report</span>';
+    } else if (type === 'report_hide') {
+      control = '<input type="text" name="' + name + '" value="" size="40">' +
+        ' <span class="opt-hint muted">report_hide=(?&lt;=wpa-passphrase )\\S+ -&gt; "wpa-passphrase ****"</span>';
+    } else if (type === 'enum_report_dir' && DIR_PRESENT && !REPORT_DISABLED &&
+               (DIR_ENTRIES.report || []).length) {
+      control = dirAliasSelectHTML('report', name, '');
     } else if (type === 'int') {
       var unit = /_ms$/.test(key) || key === 'type_delay' ? 'ms'
                : /timeout$/.test(key) ? 's' : '';
       control = '<input type="text" inputmode="numeric" name="' + name + '" value="" size="8">' +
                 (unit ? ' <span class="opt-unit">' + unit + '</span>' : '');
+    } else if (key === 'on_fetch_run' && DIR_PRESENT && !FETCHRUN_DISABLED &&
+               (DIR_ENTRIES.fetch_run || []).length) {
+      // Two fields: directory dropdown + command; joined into the hidden field.
+      control = '<input type="hidden" name="' + name + '" value="" class="fr-hidden">' +
+                dirAliasSelectHTML('fetch_run', '', '') +
+                ' <input type="text" class="fr-cmd" size="24" placeholder="command -options" value="">';
+    } else if (key === 'template_dir' && DIR_PRESENT && (DIR_ENTRIES.template || []).length) {
+      var ksecT = (card.getAttribute('data-kind') === 'default') ? 'default' : 'device';
+      control = dirAliasSelectHTML('template', name,
+                  ' data-tpl-role="template_dir" data-tpl-section="' + ksecT + '"');
+    } else if (key === 'repository' && DIR_PRESENT && (DIR_ENTRIES.repository || []).length) {
+      control = dirAliasSelectHTML('repository', name, '');
+    } else if (key === 'template_dir') {
+      var ksec = (card.getAttribute('data-kind') === 'default') ? 'default' : 'device';
+      control = '<input type="text" name="' + name + '" value="" size="30" ' +
+        'data-tpl-role="template_dir" data-tpl-section="' + ksec + '">';
     } else {
       control = '<input type="text" name="' + name + '" value="" size="30">';
     }
@@ -7613,9 +8760,14 @@ sub edit_table_script {
     div.innerHTML = '<label>' + key + '</label> ' + control + ' ' +
       '<button type="button" class="opt-del" title="Remove this option">\u00d7</button>';
     list.appendChild(div);
-    // remove the option from the select so it can't be added twice
-    opt.remove();
+    // Remove the option from the menu so it can't be added twice -- EXCEPT for
+    // repeatable options (report_hide), which may be added any number of times.
+    var repeatable = { report_hide: 1 };
+    if (!repeatable[key]) opt.remove();
     e.target.value = '';
+    // If a model= or template_dir field was just added, populate the model
+    // dropdown(s) from the -t snapshot.
+    if (key === 'model' || key === 'template_dir') refreshAllModelSelects();
   });
 
   // --- add a new device / default record ---
@@ -7967,6 +9119,230 @@ sub find_device_table_line {
 # We deliberately don't filter defaults by model -- fetchconfig.pl's own
 # model-matching applies the right ones, and passing unrelated directives
 # through is harmless, exactly as loading the full table on the CLI does.
+# Read the "directory:" allow-list straight from $DEVICE_TABLE (server side,
+# never from the browser, so it cannot be forged). Lines look like:
+#   directory: repository $REPO1     /usr/local/fetchconfig/config
+#   directory: template   $TEMPLATE1 /usr/local/fetchconfig/templates
+# The list, when present, restricts which repository / template directories a
+# device or default line may use. Returns a hashref (cached per request):
+#   { present, repository=>[{alias,path}], template=>[{alias,path}],
+#     alias2path=>{ '$REPO1'=>'/path', ... }, path2alias=>{ '/path'=>'$REPO1' },
+#     raw=>[ verbatim directory: lines, in file order ] }
+# The allow-list is read via `fetchconfig.pl --list-allowed-dirs`, whose
+# tab-separated output is  id <tab> kind <tab> $alias <tab> path  with kind in
+# repository|template|fetch_run. A "fetch_run none none" row means on_fetch_run
+# is disabled; no fetch_run row at all means on_fetch_run is unrestricted. The
+# command validates the directories on disk: rc 0 = all present, rc 2 = one
+# missing (with an error: line). Returns a hashref (cached per request):
+#   { present, rc, raw, repository=>[{alias,path}], template=>[...],
+#     fetch_run=>[...], fetch_run_configured, fetch_run_disabled,
+#     alias2path=>{ kind => { '$A'=>'/p' } } }
+my $_allowed_dirs_cache;
+sub read_allowed_dirs {
+    return $_allowed_dirs_cache if defined $_allowed_dirs_cache;
+    my %al = (present => 0, rc => 0, raw => '',
+              repository => [], template => [], fetch_run => [], report => [],
+              fetch_run_configured => 0, fetch_run_disabled => 0,
+              report_configured => 0, report_disabled => 0,
+              alias2path => { repository => {}, template => {},
+                              fetch_run => {}, report => {} });
+    my ($out, $err, $status, $fork_err) =
+        run_fetchconfig('-devices=' . $DEVICE_TABLE, '--list-allowed-dirs');
+    $al{raw} = collapse_model_registration(
+        join("\n", grep { defined && $_ ne '' }
+              (defined $err ? $err : ''), (defined $out ? $out : '')));
+    $al{rc}  = $fork_err ? undef : (defined $status ? $status : undef);
+    for my $line (split /\n/, (defined $out ? $out : '')) {
+        next if $line =~ /^\s*#/;
+        my @f = split /\t/, $line;
+        next unless @f >= 4;
+        my ($id, $kind, $alias, $path) = @f;
+        $kind = lc $kind;
+        next unless $kind eq 'repository' || $kind eq 'template'
+                 || $kind eq 'fetch_run' || $kind eq 'report';
+        $al{present} = 1;
+        # fetch_run and report are "disable-able": a "none" row means the
+        # feature is configured-but-off (the option cannot be used).
+        if ($kind eq 'fetch_run' || $kind eq 'report') {
+            $al{"${kind}_configured"} = 1;
+            if (lc($alias) eq 'none' || lc($path) eq 'none') {
+                $al{"${kind}_disabled"} = 1;
+                next;                              # no selectable entry
+            }
+        }
+        push @{ $al{$kind} }, { alias => $alias, path => $path };
+        $al{alias2path}{$kind}{$alias} = $path;
+    }
+    $_allowed_dirs_cache = \%al;
+    return $_allowed_dirs_cache;
+}
+
+# The verbatim "directory:" lines from the device table, for re-emitting the
+# armored block on save (read straight from disk, never from the form).
+sub directory_raw_block {
+    my @raw;
+    if (open(my $fh, '<', $DEVICE_TABLE)) {
+        while (my $line = <$fh>) {
+            chomp $line;
+            push @raw, $line if $line =~ /^\s*directory\s*:/i;
+        }
+        close($fh);
+    }
+    return \@raw;
+}
+
+# Resolve a stored repository/template/fetch_run directory value (a $alias or a
+# literal path) to its expanded path. Returns the path, or undef if it is not an
+# allowed entry for $kind.
+sub resolve_allowed_path {
+    my ($kind, $val) = @_;
+    return undef unless defined $val && $val ne '';
+    my $al = read_allowed_dirs();
+    return undef unless $al->{present};
+    if ($val =~ /^\$/) {
+        for my $e (@{ $al->{$kind} || [] }) {
+            return $e->{path} if $e->{alias} eq $val;
+        }
+        return undef;
+    }
+    (my $v = $val) =~ s{/+$}{};
+    for my $e (@{ $al->{$kind} || [] }) {
+        (my $p = $e->{path}) =~ s{/+$}{};
+        return $e->{path} if $p eq $v;
+    }
+    return undef;
+}
+
+# Normalise a directory value to its $alias for saving: a literal path that
+# matches an allowed path becomes its alias; a $alias stays; unresolvable stays
+# (validation rejects it). No-op when the allow-list is absent.
+sub alias_for_value {
+    my ($kind, $val) = @_;
+    return $val unless defined $val && $val ne '';
+    my $al = read_allowed_dirs();
+    return $val unless $al->{present};
+    return $val if $val =~ /^\$/;
+    (my $v = $val) =~ s{/+$}{};
+    for my $e (@{ $al->{$kind} || [] }) {
+        (my $p = $e->{path}) =~ s{/+$}{};
+        return $e->{alias} if $p eq $v;
+    }
+    return $val;
+}
+
+# If `--list-allowed-dirs` reported a missing directory (rc 2) or could not run,
+# return an error message + raw output to show instead of the editor / list.
+# Returns '' when ok.
+sub allowed_dirs_error_html {
+    my $al = read_allowed_dirs();
+    return '' unless $al->{present};
+    my $raw_html = ($al->{raw} ne '')
+        ? qq{<div class="config-wrap"><pre class="config">} . esc($al->{raw}) . qq{</pre></div>\n}
+        : '';
+    if (!defined $al->{rc}) {
+        return qq{<p class="error">Could not run <code>fetchconfig.pl --list-allowed-dirs</code>.</p>\n} . $raw_html;
+    }
+    if ($al->{rc} == 2) {
+        return qq{<p class="error">An allowed directory does not exist on disk }
+             . qq{(<code>directory:</code> allow-list). Fix it on the server, then reload.</p>\n} . $raw_html;
+    }
+    return '';
+}
+
+# Validate a prospective device-table (the exact content about to be written)
+# by having fetchconfig parse it: run `-t` and `--list-allowed-dirs` against a
+# temporary copy. Returns an error string (message + fetchconfig output) if
+# either aborts (rc > 0) or cannot run, or undef if both succeed. This is what
+# stops an invalid table (missing/renamed directory, unusable template) from
+# being written to disk.
+sub validate_table_with_fetchconfig {
+    my ($content) = @_;
+    my ($tfh, $tmp) = eval {
+        File::Temp::tempfile('fcweb-save-XXXXXXXX', DIR => $BACKUP_TMP_DIR, SUFFIX => '.tbl');
+    };
+    return undef unless $tfh;                 # cannot validate -> don't block
+    binmode($tfh); print $tfh $content; close($tfh);
+    chmod(0600, $tmp);
+    my $err;
+    for my $probe (['-t', 'templates'], ['--list-allowed-dirs', 'allowed directories']) {
+        my ($flag, $what) = @$probe;
+        my ($out, $eout, $status, $fork_err) =
+            run_fetchconfig('-devices=' . $tmp, $flag);
+        next if $fork_err;                    # could not run this probe -> skip
+        if (defined $status && $status != 0) {
+            my $raw = collapse_model_registration(
+                join("\n", grep { defined && $_ ne '' }
+                      (defined $eout ? $eout : ''), (defined $out ? $out : '')));
+            $err = "The saved device table was rejected by fetchconfig ($what check, "
+                 . "exit $status). No changes were written. Fix the problem and try again:\n\n"
+                 . $raw;
+            last;
+        }
+    }
+    unlink($tmp);
+    return $err;
+}
+
+# Expand a directory value to a real filesystem path: a $alias becomes its
+# allowed path (if resolvable); anything else is returned unchanged. Used
+# wherever the web code accesses a repository/template/fetch_run directory
+# directly on disk, since the stored value may be an allow-list alias.
+sub resolve_dir_alias {
+    my ($kind, $val) = @_;
+    return $val unless defined $val && $val ne '' && $val =~ /^\$/;
+    my $p = resolve_allowed_path($kind, $val);
+    return defined $p ? $p : $val;
+}
+
+# The expanded path for display (gray) beside a value, or '' if not resolvable.
+sub expanded_path_for {
+    my ($kind, $val) = @_;
+    my $p = resolve_allowed_path($kind, $val);
+    return defined $p ? $p : '';
+}
+
+# on_fetch_run is "<dir>/<command with options>". Split it into (dir, cmd):
+# dir = the leading directory (alias or path), cmd = the command + options after
+# the first "/" that ends the directory. Returns ('','') if empty.
+sub split_fetch_run {
+    my ($val) = @_;
+    return ('', '') unless defined $val && $val ne '';
+    # A $alias directory: "$CMD1/rest..."
+    if ($val =~ m{^(\$\S+?)/(.*)$}) { return ($1, $2); }
+    # A literal path: split at the "/" that ends the longest allowed fetch_run
+    # path prefix; else fall back to dirname/basename.
+    my $al = read_allowed_dirs();
+    for my $e (@{ $al->{fetch_run} || [] }) {
+        (my $p = $e->{path}) =~ s{/+$}{};
+        if ($val =~ m{^\Q$p\E/(.+)$}) { return ($e->{path}, $1); }
+    }
+    if ($val =~ m{^(.*)/([^/]+.*)$}) { return ($1, $2); }
+    return ('', $val);
+}
+
+# Join a fetch_run directory (alias/path) and command+options back into the
+# stored value "<dir>/<cmd>".
+sub join_fetch_run {
+    my ($dir, $cmd) = @_;
+    $dir = '' unless defined $dir; $cmd = '' unless defined $cmd;
+    return '' if $dir eq '' && $cmd eq '';
+    $dir =~ s{/+$}{};
+    return "$dir/$cmd";
+}
+
+# Reduce an on_fetch_run value's directory part to its $alias for saving.
+sub alias_for_fetch_run {
+    my ($val) = @_;
+    return $val unless defined $val && $val ne '';
+    my $al = read_allowed_dirs();
+    return $val unless $al->{present} && $al->{fetch_run_configured}
+                       && !$al->{fetch_run_disabled};
+    my ($dir, $cmd) = split_fetch_run($val);
+    return $val if $dir eq '';
+    my $alias = alias_for_value('fetch_run', $dir);
+    return join_fetch_run($alias, $cmd);
+}
+
 sub find_directive_lines {
     my @lines;
     open(my $fh, '<', $DEVICE_TABLE)
@@ -8417,50 +9793,130 @@ sub run_orphan_check {
 # Returns an arrayref of template names, sorted alphabetically, id stripped.
 # Called at most once per request (result cached in $_template_cache); returns
 # an empty arrayref on any failure so the caller can fall back to a text field.
-my $_template_cache;
-sub list_templates {
-    return $_template_cache if defined $_template_cache;
-    $_template_cache = [];
+# Run `fetchconfig.pl -devices=<table> -t` and parse its output. The data lines
+# are tab-separated:  ID <tab> section <tab> full_path <tab> model <tab> dir
+# (section is "default" or "device"); stderr debug/error lines and the trailing
+# "# found ..." line are not data. Returns a hashref (cached per request):
+#   { rc, rows, raw }
+#   rc   : 0 = at least one template; 1 = dirs ok but none found;
+#          2 = a needed directory is missing (takes precedence); undef = the
+#              command could not be run.
+#   rows : [ { section, path, model, dir } ]
+#   raw  : combined stdout+stderr, for display when rc is 1 or 2.
+my $_templates_t_cache;
+sub run_templates_t {
+    return $_templates_t_cache if defined $_templates_t_cache;
     my ($out, $err, $status, $fork_err) =
         run_fetchconfig('-devices=' . $DEVICE_TABLE, '-t');
-    return $_template_cache if $fork_err;
-    my %seen;
-    for my $line (split /\n/, (defined $out ? $out : '')) {
-        next if $line =~ /^\s*#/;                 # skip the summary trailer
-        # "<id> <name>" -- strip the leading id number and any whitespace.
-        if ($line =~ /^\s*\d+\s+(\S+)\s*$/) {
-            my $name = $1;
-            $seen{$name} = 1;
-        }
+    my $raw = collapse_model_registration(
+        join("\n", grep { defined && $_ ne '' }
+              (defined $err ? $err : ''), (defined $out ? $out : '')));
+    if ($fork_err) {
+        $_templates_t_cache = { rc => undef, rows => [], raw => $raw };
+        return $_templates_t_cache;
     }
-    $_template_cache = [ sort keys %seen ];
-    return $_template_cache;
+    my @rows;
+    for my $line (split /\n/, (defined $out ? $out : '')) {
+        next if $line =~ /^\s*#/;                 # trailer
+        my @f = split /\t/, $line;
+        next unless @f >= 5;                      # ID section path model dir
+        my ($id, $section, $path, $model, $dir) = @f;
+        next unless defined $section && ($section eq 'default' || $section eq 'device');
+        push @rows, { section => $section, path => $path, model => $model, dir => $dir };
+    }
+    my $rc = defined $status ? $status : undef;
+    $_templates_t_cache = { rc => $rc, rows => \@rows, raw => $raw };
+    return $_templates_t_cache;
 }
 
-# The template directories fetchconfig actually uses, parsed from the debug
-# lines that `fetchconfig.pl -t` emits, e.g.:
-#   fetchconfig.pl: debug: 1. template dir: /usr/local/fetchconfig/templates
-# fetchconfig owns directory resolution, so we take the list verbatim (ordered,
-# de-duplicated). Cached per request. Returns an arrayref of directory paths.
-my $_template_dirs_cache;
-sub list_template_dirs {
-    return $_template_dirs_cache if defined $_template_dirs_cache;
-    $_template_dirs_cache = [];
-    my ($out, $err, $status, $fork_err) =
-        run_fetchconfig('-devices=' . $DEVICE_TABLE, '-t');
-    return $_template_dirs_cache if $fork_err;
-    my $combined = (defined $err ? $err : '') . "\n" . (defined $out ? $out : '');
-    my (@dirs, %seen);
-    for my $line (split /\n/, $combined) {
-        # "...: debug: N. template dir: /path"
-        if ($line =~ /template\s+dir:\s*(\S.*?)\s*$/) {
-            my $d = $1;
-            next if $seen{$d}++;
-            push @dirs, $d;
-        }
+# Render the raw `fetchconfig.pl -t` output (stdout+stderr) in a config box,
+# shown to the operator when -t fails (rc 1 or 2) so they can see why.
+sub template_t_raw_html {
+    my ($t) = @_;
+    my $raw = defined $t->{raw} ? $t->{raw} : '';
+    return '' if $raw eq '';
+    return qq{<div class="config-wrap"><pre class="config">} . esc($raw) . qq{</pre></div>\n};
+}
+
+# If `fetchconfig -t` failed (could not run, rc 2 = missing dir, rc 1 = none
+# found), return the error message + raw output to show instead of a template
+# list / the device-table editor. Returns '' when -t is ok (rc 0). The message
+# matches the template viewer's wording.
+sub template_t_error_html {
+    my ($t) = @_;
+    if (!defined $t->{rc}) {
+        return qq{<p class="error">Could not run <code>fetchconfig.pl -t</code>.</p>\n}
+             . template_t_raw_html($t);
     }
-    $_template_dirs_cache = \@dirs;
-    return $_template_dirs_cache;
+    if ($t->{rc} == 2) {
+        return qq{<p class="error">A configured template directory does not exist }
+             . qq{on disk. Fix the <code>template_dir</code> settings, then reload.</p>\n}
+             . template_t_raw_html($t);
+    }
+    if ($t->{rc} == 1) {
+        return qq{<p class="error">No templates found in the configured template }
+             . qq{directories.</p>\n}
+             . template_t_raw_html($t);
+    }
+    return '';
+}
+
+# The single default-section directory (Q-A: the default section is always
+# exactly one directory), or '' if there is none.
+sub template_default_dir {
+    my $t = run_templates_t();
+    for my $r (@{ $t->{rows} }) {
+        return $r->{dir} if $r->{section} eq 'default';
+    }
+    return '';
+}
+
+# Scan a template directory directly for *.tmpl files and return the sorted,
+# distinct model names (filename without the .tmpl suffix). Used to discover
+# the models in a directory the user just typed, which `fetchconfig -t` does
+# not yet know about (it only lists configured directories). Non-plain files
+# (symlinks, hard links) are skipped for safety, as in the viewer/editor.
+# Rejects a path containing ".." and any non-absolute path.
+sub scan_dir_models {
+    my ($dir) = @_;
+    return [] unless defined $dir && $dir ne '';
+    # A $alias may be passed (e.g. template_dir=$TEMPLATE1); expand it to the
+    # real path before scanning.
+    $dir = resolve_dir_alias('template', $dir);
+    return [] if $dir =~ /\.\./;
+    return [] unless $dir =~ m{^/};
+    $dir =~ s{/+$}{};
+    my $dh;
+    opendir($dh, $dir) or return [];
+    my %seen;
+    for my $entry (readdir($dh)) {
+        next unless $entry =~ /\.tmpl$/;
+        my $path = "$dir/$entry";
+        next unless template_file_problem($path) eq '';   # skip links / non-files
+        (my $name = $entry) =~ s/\.tmpl$//;
+        $seen{$name} = 1 if $name ne '';
+    }
+    closedir($dh);
+    return [ sort keys %seen ];
+}
+
+# Distinct model names available for a given section + directory, sorted. When
+# $dir is undef/empty the filter is section-only.
+sub template_models_for {
+    my ($section, $dir) = @_;
+    my $t = run_templates_t();
+    my $want = defined $dir ? $dir : '';
+    $want =~ s{/+$}{};                           # tolerate a trailing slash
+    my %seen;
+    for my $r (@{ $t->{rows} }) {
+        next unless $r->{section} eq $section;
+        if ($want ne '') {
+            (my $rdir = defined $r->{dir} ? $r->{dir} : '') =~ s{/+$}{};
+            next if $rdir ne $want;
+        }
+        $seen{$r->{model}} = 1 if defined $r->{model} && $r->{model} ne '';
+    }
+    return [ sort keys %seen ];
 }
 
 # Is $path a template file the viewer/editor may touch? It must be a plain
@@ -8478,44 +9934,30 @@ sub template_file_problem {
     return '';
 }
 
-# Scan the template directories for *.tmpl entries. Returns an arrayref of
-# hashrefs { name, dir, path, size, mtime, problem }, de-duplicated by full
-# path only (the same template name in different directories yields separate
-# entries), sorted by template name (then directory). Entries that are not
-# plain regular files (symlinks, hard links, ...) are still listed so the
-# operator can see them, with `problem` set to the reason; the viewer and
-# editor refuse to open them. $errref, if given, receives a list of
-# directories that could not be read.
+# Template list for the viewer, built from the -t rows and de-duplicated by
+# full_path (Q4/Q5) -- a template that appears in both the default and device
+# sections is listed once. Returns an arrayref of hashrefs
+# { name, dir, path, size, mtime, problem }, sorted by name then dir. Non-plain
+# files (symlinks, hard links) are listed with `problem` set so the operator
+# sees the warning; the viewer and editor refuse to open them.
 sub list_template_files {
-    my ($errref) = @_;
-    my $dirs = list_template_dirs();
+    my $t = run_templates_t();
     my (@files, %seen);
-    for my $dir (@$dirs) {
-        my $dh;
-        unless (opendir($dh, $dir)) {
-            push @$errref, $dir if $errref;
-            next;
-        }
-        for my $entry (readdir($dh)) {
-            next unless $entry =~ /\.tmpl$/;
-            my $path = "$dir/$entry";
-            next if $seen{$path}++;              # de-dup by full path only
-            my $problem = template_file_problem($path);
-            # skip things that aren't even file-like (directories etc.) unless
-            # they're a link -- links are listed so they can be warned about.
-            next if $problem ne '' && !-l $path && !-f $path;
-            (my $name = $entry) =~ s/\.tmpl$//;
-            my @st = stat($path);
-            push @files, {
-                name    => $name,
-                dir     => $dir,
-                path    => $path,
-                size    => (@st ? $st[7] : 0),
-                mtime   => (@st ? $st[9] : 0),
-                problem => $problem,
-            };
-        }
-        closedir($dh);
+    for my $r (@{ $t->{rows} }) {
+        my $path = $r->{path};
+        next unless defined $path && $path ne '';
+        next if $seen{$path}++;                  # de-dup by full path only
+        (my $name = $path) =~ s{.*/}{}; $name =~ s/\.tmpl$//;
+        my $problem = template_file_problem($path);
+        my @st = stat($path);
+        push @files, {
+            name    => $name,
+            dir     => $r->{dir},
+            path    => $path,
+            size    => (@st ? $st[7] : 0),
+            mtime   => (@st ? $st[9] : 0),
+            problem => $problem,
+        };
     }
     @files = sort { $a->{name} cmp $b->{name} || $a->{dir} cmp $b->{dir} } @files;
     return \@files;
@@ -8937,7 +10379,10 @@ sub color_comment_lines {
     my @out;
     for my $line (split /\n/, $text, -1) {
         my $e = esc($line);
-        if ($line =~ /^\s*#/) {
+        if ($line =~ /^\s*#\s*directory allow list/i) {
+            # The security-sensitive armor comment -- shown in red, not green.
+            push @out, qq{<span class="cfg-comment-danger">$e</span>};
+        } elsif ($line =~ /^\s*#/) {
             push @out, qq{<span class="cfg-comment">$e</span>};
         } else {
             push @out, $e;
@@ -9003,6 +10448,7 @@ sub page_head {
         $menu = qq{<nav class="menu">}
               . qq{<a href="$home">Devices</a>}
               . qq{<a href="} . esc(script_url() . '?action=status') . qq{">Status</a>}
+              . qq{<a href="} . esc(script_url() . '?action=report') . qq{">Reports</a>}
               . $setup_link
               . $tools_link
               . qq{<a href="$user_page">User</a>}
@@ -9111,6 +10557,11 @@ $backdrop_css
      a plain config view, so additions/removals read against it. */
   pre.config .d-add { color: #6ee787; }
   pre.config .cfg-comment { color: #6ee787; }
+  pre.config .cfg-comment-danger { color: #ff7b72; font-weight: 700; }
+  .dir-alias-path { margin-left: 0.4em; }
+  .dir-alias-warn { margin-left: 0.4em; font-weight: 600; }
+  .fr-cmd { margin-left: 0.4em; }
+  .opt-hint { margin-left: 0.4em; font-size: 0.9em; }
   pre.config .d-del { color: #ff7b72; }
   pre.config .d-hunk { color: #79c0ff; }
   /* Syntax highlighting (backup content view). Dark-theme palette on the
@@ -9133,6 +10584,8 @@ $backdrop_css
   .tpl-title { margin: 0.2em 0 0.4em; }
   .tpl-title .tpl-path { font-weight: normal; font-size: 0.7em; }
   .tpl-dirty { color: #c0362c; font-weight: 700; }
+  .tpl-info { cursor: help; color: #0075be; margin-left: 0.3em; }
+  .tpl-model-warn { margin-left: 0.4em; font-weight: 600; }
   /* Tighten the result box so the panes sit right under it. */
   .tpl-edit-form .config-wrap { margin: 0.4em 0; }
   .tpl-edit-form .config-wrap p { margin: 0.2em 0; }
@@ -9315,6 +10768,21 @@ $backdrop_css
   /* fetchconfig log viewer */
   .log-view { margin-top: 0.6em; }
   .log-section { margin: 0.15em 0; }
+  /* Reports page */
+  .prune-box { margin: 1.2em 0; padding: 0.8em 1em; border: 1px solid #ddd;
+    border-radius: 6px; background: #fafafa; }
+  .state { font-family: monospace; font-size: 0.78em; padding: 0.05em 0.4em;
+    border-radius: 3px; }
+  .state-changed { color: #fff; background: #2451c4; }
+  .state-new { color: #fff; background: #0e7c8c; }
+  .state-unchanged { color: #666; border: 1px solid #ccc; }
+  .state-failed, .state-diff-unavailable, .state-worker-failed { color: #fff; background: #c4432b; }
+  pre.diff.rep-diff { background: #10171c; color: #dce8ec; padding: 0.8em 1em;
+    border-radius: 6px; overflow-x: auto; font-family: monospace; font-size: 0.82em;
+    line-height: 1.4; white-space: pre; }
+  pre.diff.rep-diff .d-old  { color: #ff6b6b; }
+  pre.diff.rep-diff .d-new  { color: #51d88a; }
+  pre.diff.rep-diff .d-hunk { color: #7f929b; }
   .log-head { cursor: pointer; font-family: Consolas, Menlo, monospace;
               padding: 0.15em 0.3em; border-radius: 4px; user-select: none; }
   .log-head:hover { background: #d7f0e2; }

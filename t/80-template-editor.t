@@ -27,7 +27,7 @@ if (defined \$ct) {
   exit 0;
 }
 my \$t=0; for (\@ARGV){ \$t=1 if \$_ eq '-t'; }
-if (\$t) { print STDERR "debug: 1. template dir: $tdir\\n"; print "1 cisco-ios\\n"; exit 0; }
+if (\$t) { print "1\\tdevice\\t$tmpl\\tcisco-ios\\t$tdir\\n"; print "# found 1 template(s): 0 default, 1 device\\n"; exit 0; }
 exit 0;
 STUB
 close($w); chmod 0755, $stub;
@@ -62,8 +62,7 @@ unlike($now, qr/edited/, 'revert restored the pre-save content');
     my $link = File::Spec->catfile($tdir, 'evil.tmpl');
   SKIP: {
         skip 'symlinks not supported here', 3 unless eval { symlink($outside, $link) };
-        my ($e) = grep { $_->{name} eq 'evil' } @{ main::list_template_files() };
-        ok($e && $e->{problem} =~ /symbolic link/, 'symlinked .tmpl listed with a warning');
+        is(main::template_file_problem($link), 'symbolic link', 'symlink flagged by template_file_problem');
         ok(!main::template_path_ok($link),          'symlinked .tmpl refused by the whitelist');
         like(main::template_refusal_message($link), qr/symbolic link/, 'refusal names the problem');
         unlink($link);
@@ -73,10 +72,24 @@ unlike($now, qr/edited/, 'revert restored the pre-save content');
     open($o, '>', $hard) or die $!; print $o "x\n"; close($o);
   SKIP: {
         skip 'hard links not supported here', 2 unless eval { link($hard, $hard2) };
-        my ($h) = grep { $_->{name} eq 'hard' } @{ main::list_template_files() };
-        ok($h && $h->{problem} =~ /hard-linked/, 'hard-linked .tmpl listed with a warning');
+        like(main::template_file_problem($hard), qr/hard-linked/, 'hard link flagged by template_file_problem');
         ok(!main::template_path_ok($hard),       'hard-linked .tmpl refused by the whitelist');
         unlink($hard, $hard2);
+    }
+}
+
+
+# --- a symlink REPORTED by -t is still refused (path-level enforcement) ---
+{
+    my $sfcp = (main::run_templates_t());  # ensure loaded
+    my $link = File::Spec->catfile($tdir, 'reported-link.tmpl');
+    my $outside = File::Spec->catfile($tdir, 'outside2.txt');
+    open(my $o,'>',$outside) or die $!; print $o "s\n"; close($o);
+  SKIP: {
+        skip 'symlinks not supported', 1 unless eval { symlink($outside, $link) };
+        # even if a caller passes this exact path, template_path_ok stat-checks it
+        ok(!main::template_path_ok($link), 'reported symlink path still refused (stat-level)');
+        unlink($link);
     }
 }
 

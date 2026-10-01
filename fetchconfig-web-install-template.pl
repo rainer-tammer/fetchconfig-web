@@ -31,9 +31,46 @@ use File::Copy ();
 use File::Basename ();
 use File::Temp qw(tempfile);
 
-my $PROG = 'fetchconfig-web-install-template.pl';
+my $PROG    = 'fetchconfig-web-install-template.pl';
+my $VERSION = '1.0';
+my $COPYRIGHT = 'Copyright (C) 2026 Rainer Tammer. GNU GPL v3 or later.';
 
 sub fail { print STDERR "$PROG: error: $_[0]\n"; exit 2; }
+
+sub print_version { print "$PROG $VERSION\n"; }
+
+sub print_help {
+    my ($fh) = @_;
+    $fh ||= \*STDOUT;
+    print $fh <<"HELP";
+$PROG $VERSION -- privileged helper that installs an edited fetchconfig
+template file for fetchconfig-web, run via sudo.
+
+USAGE:
+    $PROG install <srcfile> <target.tmpl>
+    $PROG revert  <target.tmpl>
+
+COMMANDS:
+    install   Back up <target.tmpl> to <target.tmpl.bak> (overwriting any
+              previous .bak), then copy <srcfile> over <target.tmpl>.
+    revert    Copy <target.tmpl.bak> back over <target.tmpl>.
+
+The target must be an ABSOLUTE path, must NOT contain "..", must end in
+".tmpl", and must be a plain regular file (not a symbolic or hard link).
+Copies are atomic (temp file in the target directory, then rename).
+
+OPTIONS:
+    -h, --help, -?    Show this help and exit.
+    -v, --version     Show the version and exit.
+
+It is meant to be run through sudo, e.g. from /etc/sudoers:
+
+    www ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig-web-install-template.pl
+
+$COPYRIGHT
+HELP
+    return;
+}
 
 sub check_target {
     my ($t) = @_;
@@ -82,6 +119,12 @@ sub atomic_copy {
     return 1;
 }
 
+# Help / version (accepted as the first argument, before the command).
+for my $a (@ARGV) {
+    if ($a eq '-h' || $a eq '--help' || $a eq '-?') { print_help(\*STDOUT); exit 0; }
+    if ($a eq '-v' || $a eq '--version')            { print_version();       exit 0; }
+}
+
 my $cmd = shift @ARGV;
 $cmd = '' unless defined $cmd;
 
@@ -110,8 +153,8 @@ elsif ($cmd eq 'revert') {
     exit 0;
 }
 else {
-    print STDERR "$PROG: usage:\n"
-        . "  $PROG install <srcfile> <target.tmpl>\n"
-        . "  $PROG revert  <target.tmpl>\n";
+    print STDERR "$PROG: error: unknown or missing command"
+        . ($cmd ne '' ? " '$cmd'" : '') . ".\n";
+    print_help(\*STDERR);
     exit 2;
 }

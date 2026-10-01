@@ -5,9 +5,9 @@ title bar and logo shown on every page, and a Devices / Status / User / Help
 menu (plus a Setup item for accounts with the edit or admin right) in the
 title bar's nav row:
 
-> **Requires fetchconfig 9.64 or newer.** fetchconfig-web reads the installed
+> **Requires fetchconfig 9.65 or newer.** fetchconfig-web reads the installed
 > version from `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and shows a
-> warning banner (on every page, after login) if it is older than 9.64 or
+> warning banner (on every page, after login) if it is older than 9.65 or
 > cannot be determined. The minimum is set by the `MIN_FETCHCONFIG_VERSION`
 > constant in `fetchconfig-web.cgi`.
 
@@ -59,7 +59,69 @@ exactly and command injection isn't possible via the web parameters.
 User accounts (and the per-user device-table edit right) live in a
 PostgreSQL database; no `htpasswd` binary or password file is used.
 
-## Files
+## Contents
+
+**Part 1 -- Overview**
+- [What fetchconfig-web is](#what-fetchconfig-web-is)
+- [How it works](#how-it-works)
+- [Files](#files)
+
+**Part 2 -- Installation and configuration**
+- [Quick start](#quick-start)
+- [Requirements](#requirements)
+- [Configuration](#configuration)
+- [The user database](#the-user-database)
+- [Deploying](#deploying)
+- [Backup Now and repository write permissions](#backup-now-and-repository-write-permissions)
+
+**Part 3 -- Using fetchconfig-web**
+- [Devices and backups](#devices-and-backups)
+- [Viewing and comparing backups](#viewing-and-comparing-backups)
+- [The Setup page and device-table editor](#setup-page-and-device-table-editor)
+- [Tools](#tools-admins-only)
+- [User management](#user-management-via-the-web-ui)
+- [The Help page](#help-page)
+- [User-interface conveniences](#user-interface-conveniences)
+
+**Part 4 -- Reference**
+- [How fetchconfig.pl is invoked](#how-fetchconfigpl-is-invoked)
+- [Supported password hash formats](#supported-hash-formats)
+
+**Part 5 -- [Security model](#security-model)**
+
+**Part 6 -- [Development](#development)**
+
+[License](#license)
+
+## Part 1 -- Overview
+
+### What fetchconfig-web is
+
+fetchconfig-web is a web front-end for
+[fetchconfig](https://github.com/udhos/fetchconfig), the network-device
+configuration-backup tool. It lets operators browse devices, view and compare
+saved configurations, trigger an on-demand backup, edit the device table, and
+run housekeeping tools -- all from a browser, without shell access to the
+backup host.
+
+### How it works
+
+fetchconfig-web is a **single stateless Perl CGI script**
+(`fetchconfig-web.cgi`). It holds no long-running state of its own: every
+operation either shells out to `fetchconfig.pl` (to list templates, list or
+fetch backups, run a backup, check directories) or reads the repository and
+device table directly on disk. User accounts and login sessions are stored in a
+small **PostgreSQL** database. Because it is a plain CGI, it runs under any
+standard web server (Apache `mod_cgi` and comparable setups) with no
+application server or daemon to manage.
+
+A running instance is made up of: the CGI script, a configuration file
+(`/etc/fetchconfig-web.cfg`), the PostgreSQL `users` table (created by the
+bundled setup script), an installed copy of fetchconfig, and -- optionally -- a
+sudo helper for privileged template writes. The rest of this document covers
+each of these in turn.
+
+### Files
 
 - `fetchconfig-web.cgi` -- the entire application (one file, easy to deploy).
   Its images (the title-bar logo and the login-box icon) are embedded as
@@ -80,7 +142,28 @@ PostgreSQL database; no `htpasswd` binary or password file is used.
   library only) that regenerates `fetchconfig-web-documentation.html` from
   this README, and its short description. Not needed at runtime.
 
-## Requirements
+## Part 2 -- Installation and configuration
+
+### Quick start
+
+For an experienced operator, the shortest path to a running instance:
+
+1. **Install the prerequisites** -- Perl with DBI/DBD::Pg, CGI and
+   Algorithm::Diff; PostgreSQL; and fetchconfig 9.65+ (see
+   [Requirements](#requirements)).
+2. **Create the user database** -- run `perl fetchconfig-web-dbsetup.pl`
+   (see [The user database](#the-user-database)).
+3. **Write the configuration** -- copy the sample in
+   [Configuration](#configuration) to `/etc/fetchconfig-web.cfg` and adjust the
+   paths for your fetchconfig install.
+4. **Install the CGI** -- copy `fetchconfig-web.cgi` into your web server's
+   `cgi-bin` and make it executable (see [Deploying](#deploying)).
+5. **Log in** -- browse to the script and sign in as the default admin, then
+   change the password immediately.
+
+Each step is detailed below.
+
+### Requirements
 
 - Perl 5 with core modules: `CGI`, `CGI::Cookie`, `Digest::MD5`,
   `Digest::SHA`, `MIME::Base64`, `Fcntl`, `File::Path`, `File::Temp`,
@@ -100,7 +183,7 @@ PostgreSQL database; no `htpasswd` binary or password file is used.
 - Read access to your fetchconfig device table and execute access to
   `fetchconfig.pl`.
 
-### Non-core Perl modules
+#### Non-core Perl modules
 
 Every module the two scripts use *except* the following ships with Perl 5
 (core) on both Linux and AIX. These are the only ones that may need
@@ -133,7 +216,7 @@ zypper install perl-DBI perl-DBD-Pg perl-Algorithm-Diff perl-CGI
 The standalone `fetchconfig-web-dbsetup.pl` needs only `DBI` + `DBD::Pg`
 (plus core `Digest::MD5`).
 
-### CGI 4.53 patch for `start_html()` (AIX, and possibly Linux)
+#### CGI 4.53 patch for `start_html()` (AIX, and possibly Linux)
 
 On AIX with CGI 4.53, `CGI::Util::_rearrange_params` warns
 
@@ -174,7 +257,7 @@ log. The file location differs by platform (use the `perl -MCGI::Util` command
 above to find it), but the change is identical. If your CGI is a newer version
 that has already fixed this, the patch is not needed.
 
-## Configuration
+### Configuration
 
 All site-specific settings live in an external config file,
 **`/etc/fetchconfig-web.cfg`** (`key = value`), so credentials and paths are not
@@ -392,7 +475,58 @@ it to display something else. `COPYRIGHT` is read from the config file.
   whitespace inside is stripped before use, so the 100-column wrapping is
   cosmetic.
 
-## Deploying
+### The user database
+
+The bundled `fetchconfig-web-dbsetup.pl` script creates the PostgreSQL role, database and `users` table.
+
+A standalone helper that creates the database and table and (optionally)
+imports existing accounts. Every step is a Y/N prompt, so it's safe to
+re-run. Run it once before first use:
+
+```sh
+perl fetchconfig-web-dbsetup.pl
+```
+
+It will, in order:
+
+1. Ask for the application **database name** (default `fetchconfig`) and
+   **host**.
+2. Offer to **create the database**: it connects to the `postgres`
+   maintenance database with a maintenance login (typically the `postgres`
+   superuser, which needs `CREATEDB`/`CREATEROLE` rights), creates the
+   application role if missing, and `CREATE DATABASE ... OWNER <app-user>`.
+   Skip this if the database already exists.
+3. Reconnect as the **application login** and create the `users` table
+   (PostgreSQL 9.2-compatible DDL).
+4. Offer to **import** accounts from `/www/passwd/fetchconfig` if that old
+   htpasswd file is present -- hashes are copied verbatim, so everyone's
+   current password keeps working, all with `edit_device_table = false` and
+   `admin_function = false` (except `admin`, which gets both true).
+5. **Bootstrap admin**: if no `admin` account exists after import (or you
+   skipped import), create `admin` with the password `fetchconfig`. If
+   `admin` was imported, it is left untouched (and imported `admin` is given
+   both the edit and admin-function rights, since `admin` always has them
+   anyway).
+6. **Write `/etc/fetchconfig-web.cfg`** (optional): writes the config file the
+   CGI reads, mode 0600, with the database values filled in from the answers
+   above and the other settings at their defaults for you to review. Skip
+   this to create the file by hand (see "Configuration").
+
+Migrating from an earlier (htpasswd) version means everyone re-logs in once,
+since sessions are new.
+
+**Upgrading an existing database** (adding `admin_function` to a `users`
+table created by an earlier version) is a one-time manual step:
+
+```sql
+ALTER TABLE users ADD COLUMN admin_function BOOLEAN NOT NULL DEFAULT FALSE;
+UPDATE users SET admin_function = TRUE WHERE username = 'admin';
+```
+
+Set it `TRUE` for any other accounts that should have full admin rights (or
+do that from the User page afterward).
+
+### Deploying
 
 ```sh
 cp fetchconfig-web.cgi /www/cgi-bin/
@@ -437,64 +571,7 @@ exact commands).
 cookie is a bearer token; both should travel encrypted. Once HTTPS is in
 place, uncomment `-secure => 1` on the cookie in `do_login()`.
 
-## How `fetchconfig.pl` is invoked
-
-Every interaction with fetchconfig goes through its command-line interface;
-the application never reads the repository or the device table's backups
-directly. The executable is `<FETCHCONFIG_PATH>/<FETCHCONFIG_BIN>` and is
-always invoked in **list form** (`open3()` or, for the two privileged writes,
-`exec()` after `fork`) -- never through a shell -- so no argument is subject to
-shell interpretation.
-
-Two execution paths exist:
-
-- **Read paths** run as the web-server user through `run_fetchconfig()`, which
-  captures stdout and stderr separately via `IO::Select` (no deadlock on large
-  output) and returns `(stdout, stderr, exit_status, fork_error)`.
-- **Write paths** (Backup now, orphaned-backup delete) run through
-  `sudo -n` when `USE_SUDO_FOR_BACKUP_NOW` is set, because the web-server user
-  typically cannot write the repository. These use `run_command_capture()`,
-  which merges stdout and stderr into one transcript.
-
-`T` below is the configured device table (`-devices=$DEVICE_TABLE`), `DEV` a
-validated Device-ID, and `N`/`M` validated backup indices.
-
-| Caller | Command | stdout consumed | Exit codes |
-|--------|---------|-----------------|------------|
-| `list_backups` | `-devices=T -l DEV` | `index<TAB>size<TAB>path` per backup | `0` = listed; `1` with `no backed up config files found` = treated as "no backups yet" (empty list, not an error); other non-zero = error |
-| `get_backup_content` | `-devices=T -g DEV -n N` | raw config bytes of backup `N` (served through unchanged) | `0` = ok; non-zero = error |
-| `compare_backups` | `-devices=T -g DEV -n N -m M` | unified diff of backup `N` against older backup `M` (`M > N`) | `0` = identical; `1` = differs; `>1` = error (the underlying diff's code) |
-| `device_empty_status`, `run_check_empty` | `-devices=T -z DEV` | `index<TAB>0<TAB>path` for each zero-byte backup | `0` = clean (all non-empty, or none exist); `1` = at least one zero-byte backup found (an expected result, not an error); other = error |
-| `device_suffix_status`, `run_check_suffix` | `-devices=T -s DEV` | per-file suffix breakdown when inconsistent | `0` = suffixes consistent and match the configured `filename_append_suffix`; `1` = suffixes inconsistent between backups; `2` = consistent but do not match the configured suffix; other = error |
-| `run_orphan_check` | `-devices=T -o` | listing of orphaned repository entries | passed through to the transcript |
-| `run_orphan_delete` | `[sudo -n] BIN -devices=T -o -D` | listing; stderr logs `rm`/`rmdir` per removed item | passed through to the transcript |
-| `run_empty_check` | `-devices=T -e` | `device`/`day`/`month`<TAB>path per empty directory | `0` = none found; `1` = empty directories found (an expected result, not an error); other = error |
-| `run_empty_delete` | `[sudo -n] BIN -devices=T -e -D` | each listed directory with `deleted` appended, plus a `removed N of M` summary | `0` = success; non-zero = at least one removal failed |
-| `run_backup_now` | `[sudo -n] BIN -devices=<tmp>` | full run transcript (stdout+stderr merged) | reported to the user as-is; result state is read from the device's `.status` file |
-
-Notes on specific paths:
-
-- **`-z` and `-s` return `1` for a found condition, not an error.** The
-  wrappers classify on the exit code first and cross-check the log text, so a
-  found-empties (`-z` = 1) or inconsistent-suffix (`-s` = 1/2) result is
-  reported as a normal outcome, while any other non-zero exit becomes an error.
-- **Backup now does not use `-devices=T`.** It writes a temporary,
-  single-device table (mode 0600) containing that device's own line verbatim
-  plus a `default: <model> repository=$REPOSITORY` line, and runs
-  `-devices=<tmp>`. The device line is copied verbatim -- `repository=` is
-  never appended to it -- because appending onto a line whose last field is
-  `pass=...` folded the repository path into the password. The temp table is
-  created with `File::Temp` and `UNLINK => 1` so it is removed even if the
-  process dies.
-- **Compare uses fetchconfig's own diff.** `-g DEV -n N -m M` retrieves and
-  diffs entirely inside fetchconfig; the application creates no temp files and
-  never touches the repository for a compare.
-- **Version detection** does not invoke the CLI. It reads
-  `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and calls
-  `fetchconfig::Constants::version()`, caching the result against that file's
-  mtime (see the version banner and footer).
-
-## "Backup Now" and the repository's write permissions
+### Backup Now and repository write permissions
 
 Your existing backups are written by a privileged process (typically a
 root cron job) and end up owned `root:system`, mode `0744` on files and
@@ -568,7 +645,11 @@ Either way, no change is needed for viewing, listing, or comparing
 backups -- those already work under the web server's own unprivileged
 user, since the existing files are world-readable.
 
-## Web-UI (binary) backups
+## Part 3 -- Using fetchconfig-web
+
+### Devices and backups
+
+#### Web-UI (binary) backups
 
 Some switches have no CLI at all -- TP-Link Easy Smart (`tplink-web-sg105e`,
 e.g. TL-SG105E) and the HP ProCurve 1700 series (`procurve-web-1700`).
@@ -595,7 +676,53 @@ the same way:
   `application/octet-stream`. Models are recognised by
   `is_web_binary_model()`, and the filename by `web_config_filename()`.
 
-## Config syntax highlighting (backup content view)
+#### Backup list: date & time columns
+
+Each row of a device's backup list shows, in order: a compare checkbox,
+the backup **index** (`#`), the **date**, the **time**, the **size**, and
+the full **path**. The date and time are parsed out of the backup file's
+own name rather than from its filesystem mtime, so they reflect when
+`fetchconfig.pl` actually captured that backup.
+
+fetchconfig names each saved config in the repository as
+`<dev_id>.<tag>.YYYYMMDD.HHMMSS<TZ>`, e.g.
+
+```
+/usr/local/fetchconfig/config/202608/20260825/V1-SW1/V1-SW1.run.20260825.143556CEST
+```
+
+`parse_backup_timestamp()` takes only the basename and anchors to the
+trailing `.YYYYMMDD.HHMMSS` plus an optional alphabetic timezone suffix.
+That means:
+
+- The `202608/20260825/` year-month / date directories earlier in the path
+  are ignored -- only the filename's own timestamp is used.
+- A `dev_id` that contains dots or digits (e.g. an FQDN like
+  `switch01.acme.com`) doesn't throw the match off, because the
+  pattern is anchored to the end of the name.
+- The date is shown ISO-formatted as `YYYY-MM-DD`; the time as `HH:MM:SS`
+  with the timezone appended when present (e.g. `14:35:56 CEST`), so CET
+  and CEST backups are distinguishable.
+- The timezone suffix is assumed to be a short **alphabetic** abbreviation
+  (`CEST`, `CET`, `MET`, `GMT`, `UTC`, ...). This holds for fetchconfig running
+  on **AIX, Linux and Solaris**, whose C library returns such abbreviations
+  from `strftime`'s `%Z`. On **Windows**, `%Z` instead returns a long
+  descriptive name (e.g. `W. Europe Daylight Time`), so only its leading
+  letters would be shown as the timezone label -- the **date and time
+  themselves are still parsed correctly** (they precede the timezone), and
+  `timezone=hide` avoids the label entirely. Running fetchconfig on
+  AIX/Linux/Solaris needs no special handling.
+- If a filename ever doesn't match this pattern, that row simply shows
+  blank date/time cells rather than a wrong or misleading value.
+
+If your fetchconfig build names backup files differently, that one
+`parse_backup_timestamp()` sub is the only thing to adjust -- the regex is
+isolated there. Table cells use `white-space: nowrap`, so the date, time,
+and path columns stay on a single line each instead of wrapping.
+
+### Viewing and comparing backups
+
+#### Config syntax highlighting (backup content view)
 
 When you view a single backup, the config is syntax-highlighted if a
 highlighter is registered for the device's model. This is **extensible**:
@@ -650,60 +777,33 @@ stripping the `<span>`s from the output yields byte-for-byte the plain view
 The copy button copies the DOM's text content, so it copies the plain
 config, not the highlight markup.
 
-## Floating Top / Bottom navigation
+### Reports
 
-Long-scrolling pages -- the device list, Setup, the device-table editor, the
-backup content view, and the side-by-side diff -- carry a small pair of
-floating **&#9650; Top** / **&#9660; Bottom** buttons (`top_bottom_nav()`),
-`position: fixed` in the **bottom-right** corner so they never overlap the
-title bar's Log out link. They smooth-scroll to either end of the page (with
-a plain-jump fallback for older browsers) and are hidden when printing.
+The **Reports** page (top menu, between Status and Setup; all logged-in users)
+lists the HTML change-reports fetchconfig writes into the report directory --
+the `report_dir` set on the `email:` line, resolved through the `directory:`
+allow-list. The reports are listed newest first, with **View**, **Download**
+and **Delete** per report, and a **"Delete reports older than N days"** control
+(always keeps the newest), mirroring the device-table backup cleanup.
 
-## Backup list: date & time columns
+Because the web server has no direct access to the report directory, every
+operation is handled by the CGI behind the fetchconfig-web login:
 
-Each row of a device's backup list shows, in order: a compare checkbox,
-the backup **index** (`#`), the **date**, the **time**, the **size**, and
-the full **path**. The date and time are parsed out of the backup file's
-own name rather than from its filesystem mtime, so they reflect when
-`fetchconfig.pl` actually captured that backup.
+* **View** opens a page (like *View fetchconfig log*) that parses the report's
+  `device-diff` blocks and shows each device as a collapsible section
+  (collapsed initially, with *Expand all* / *Collapse all*), re-rendering the
+  diff with escaped text -- the report's own markup/styles are never injected.
+  A report with no device sections shows a short note instead.
+* **Download** streams the original self-contained `.html` file as an
+  attachment (it is not rendered in the fetchconfig-web origin).
+* **Delete** / prune remove `report-*.html` files from the report directory
+  (strict `report-*.html` basename validation, no traversal).
 
-fetchconfig names each saved config in the repository as
-`<dev_id>.<tag>.YYYYMMDD.HHMMSS<TZ>`, e.g.
+Only files named `report-*.html` are listed or touched; the directory is
+expected to be group-writable with the set-group-id bit so fetchconfig and the
+web user share it.
 
-```
-/usr/local/fetchconfig/config/202608/20260825/V1-SW1/V1-SW1.run.20260825.143556CEST
-```
-
-`parse_backup_timestamp()` takes only the basename and anchors to the
-trailing `.YYYYMMDD.HHMMSS` plus an optional alphabetic timezone suffix.
-That means:
-
-- The `202608/20260825/` year-month / date directories earlier in the path
-  are ignored -- only the filename's own timestamp is used.
-- A `dev_id` that contains dots or digits (e.g. an FQDN like
-  `switch01.acme.com`) doesn't throw the match off, because the
-  pattern is anchored to the end of the name.
-- The date is shown ISO-formatted as `YYYY-MM-DD`; the time as `HH:MM:SS`
-  with the timezone appended when present (e.g. `14:35:56 CEST`), so CET
-  and CEST backups are distinguishable.
-- The timezone suffix is assumed to be a short **alphabetic** abbreviation
-  (`CEST`, `CET`, `MET`, `GMT`, `UTC`, ...). This holds for fetchconfig running
-  on **AIX, Linux and Solaris**, whose C library returns such abbreviations
-  from `strftime`'s `%Z`. On **Windows**, `%Z` instead returns a long
-  descriptive name (e.g. `W. Europe Daylight Time`), so only its leading
-  letters would be shown as the timezone label -- the **date and time
-  themselves are still parsed correctly** (they precede the timezone), and
-  `timezone=hide` avoids the label entirely. Running fetchconfig on
-  AIX/Linux/Solaris needs no special handling.
-- If a filename ever doesn't match this pattern, that row simply shows
-  blank date/time cells rather than a wrong or misleading value.
-
-If your fetchconfig build names backup files differently, that one
-`parse_backup_timestamp()` sub is the only thing to adjust -- the regex is
-isolated there. Table cells use `white-space: nowrap`, so the date, time,
-and path columns stay on a single line each instead of wrapping.
-
-## Setup page and device-table editor
+### Setup page and device-table editor
 
 The **Setup** menu item -- shown in the title bar for the `admin` account
 (`$PROTECTED_USER`) or any user granted the device-table edit right --
@@ -720,7 +820,7 @@ sensitive: the menu link and the actions are available only to `admin` or a
 user with the edit right, re-checked server-side (`user_may_edit_table()`),
 since `?action=setup`/`?action=edit_table` are reachable directly by URL.
 
-### The structured editor
+#### The structured editor
 
 The editor (`action=edit_table`, gated as above, POST + CSRF on save) works
 on the table as three tabs -- **Devices**, **Defaults (per model)**, and
@@ -891,7 +991,7 @@ and the Compare / Side by Side diffs (no syntax highlighter). The
 `community=` option value is masked (as `?***?`) wherever config text is
 shown, like `pass=`/`enable=`.
 
-### The generic (template-driven) model
+#### The generic (template-driven) model
 
 `generic` is fetchconfig's template-driven model: its device interaction is
 described by a template file rather than built into the module. In the device
@@ -907,13 +1007,32 @@ option that names the template (e.g. `model=cisco-ios` loads
 the template file).
 
 In the editor the `model=` option is rendered as a **drop-down of the
-available templates** rather than a free-text field. The list comes from
-`fetchconfig.pl -devices=<table> -t`, which prints the templates found in the
-default `templates/` directory and any `template_dir=` a loaded device (or a
-`default: generic` line) configures, one numbered name per line; the editor
-runs it once per Setup page, strips the leading number, and sorts the names
-alphabetically. If `-t` finds no templates (or cannot run) the field falls
-back to a plain text box.
+available templates** rather than a free-text field, scoped to the directory in
+effect for that row. The list comes from `fetchconfig.pl -devices=<table> -t`,
+whose tab-separated output gives, for every template, its section
+(`default`/`device`), full path, model and directory:
+
+* on the **Defaults (per model)** tab the dropdown offers the models in the
+  `default` section (that single default directory);
+* on the **Devices** tab it offers the models in the `device` section for the
+  device's own `template_dir`, or -- when the device sets none -- for the
+  directory the `default: generic` line uses.
+
+When you set or change a row's `template_dir` and leave the field, the model
+list is re-evaluated. For a directory fetchconfig already lists it comes from
+the snapshot taken at page load; for a directory you just typed that `-t` does
+not yet list -- the common case, since `-t` only reports *configured*
+directories -- the editor asks the server to scan that directory for `*.tmpl`
+files (the read-only `?action=template_models` endpoint), so its templates are
+immediately selectable without having to save a device that uses the directory
+first. A red warning appears when no templates match the directory, and a
+stored model that is not present in the current directory is shown disabled
+(not selectable) so you notice it. An information icon notes that templates
+*added on disk* to an already-listed directory appear after a page reload.
+
+If `-t` cannot run, reports a missing template directory (exit 2) or finds no
+templates at all (exit 1), the whole device-table editor shows the fetchconfig
+output instead (the same error as the template viewer).
 
 `model=` may be set on a `default: generic` line so all generic devices
 sharing one template need not repeat it; a device line can still override it.
@@ -921,7 +1040,106 @@ Accordingly the editor requires `model=` on a generic **device** line only
 when no `default: generic` line supplies it -- otherwise the device inherits
 the default. The dropdown appears on both the `default:` and device forms.
 
-### Bulk edit
+#### Directory allow-list (`directory:`)
+
+The device table may carry an optional **allow-list** that restricts which
+repository and template directories a device or `default:` line may use. It is
+a set of `directory:` lines in the DEFAULT OPTIONS SECTION:
+
+```
+# DEFAULT OPTIONS SECTION
+
+# directory
+
+# directory allow list - must be directly edited on the server
+directory: repository $REPO1     /usr/local/fetchconfig/config
+directory: template   $TEMPLATE1 /usr/local/fetchconfig/templates
+directory: template   $TEMPLATE2 /usr/local/fetchconfig/templates_alt
+# directory allow list - must be directly edited on the server
+
+# eMail
+...
+```
+
+Each line is `directory: <kind> <$ALIAS> <path>`, where `kind` is
+`repository`, `template`, `fetch_run` or `report`. fetchconfig expands the `$ALIAS` at run
+time, so a device or default line may write either the full path or the alias
+(`repository=$REPO1`, `template_dir=$TEMPLATE2`).
+
+The allow-list is read via **`fetchconfig.pl --list-allowed-dirs`**, which also
+verifies the directories exist on disk: exit 0 = all present, exit 2 = one is
+missing (named in an error line). On exit 2 the template viewer and the
+device-table editor show the fetchconfig output and refuse to proceed, exactly
+like a missing template directory.
+
+`fetch_run` controls the `on_fetch_run` device option (a command line run after
+a fetch). `directory: fetch_run none` **disables** `on_fetch_run` entirely
+(it cannot be added, and an existing one blocks saving); otherwise
+`directory: fetch_run $CMD1 /path` allows commands under that directory. Because
+`on_fetch_run` is `<directory>/<command with options>`, the editor shows it as
+**two fields** -- a directory drop-down (the `$ALIAS`, with the expanded path in
+gray) and a command-plus-options text field -- combined into
+`$CMD1/command -options` on save. A full path in the command is reduced to its
+alias on save, like the other directories. If no `fetch_run` line exists at all,
+`on_fetch_run` is unrestricted (free text).
+
+`report` controls the HTML-report feature (fetchconfig writes a report into an
+allow-listed report directory). `directory: report none` disables reporting
+(the `report_dir` email option cannot be used); otherwise
+`directory: report $REP /path` allows a report directory. The Email-notification
+tab exposes the report options: `report_dir` (a drop-down of the allowed report
+aliases), `write_report` (on/off), `email_max_diff` (device-count threshold for
+including diffs in the e-mail; 0 = none), `web_report_url` (the URL of the
+fetchconfig-web Report page, e.g. `http(s)://host/.../fetchconfig-web.cgi?action=report`),
+`report_logo` (a logo file name inside the report directory, embedded at
+250x50 px), and `report_days` (prune reports older than N days; 0/unset = no
+prune). `report_dir` stores its `$ALIAS` and is enforced against the allow-list
+exactly like `repository`/`template_dir`. A further option, `report_hide`, is a
+regex applied to mask matching text in the report; it may be given more than
+once (one per `email:` line), is edited as repeatable ~40-character fields, and
+is parsed rest-of-line verbatim (no quoting; e.g.
+`report_hide=(?<=wpa-passphrase )\S+`). Each pattern is checked on save for valid regex
+syntax and balanced brackets; two `report_hide=` on one line is a parse error and that line is
+ignored.
+
+**Security.** fetchconfig-web reads the `directory:` block **directly from the
+device table on the server** -- never from the browser -- so it cannot be
+forged. The block is intentionally **not editable in the web UI**: it is
+wrapped in the `# directory allow list - must be directly edited on the server`
+armor comments (shown in **red** in the Setup config view), and on save it is
+written back verbatim from disk. When the allow-list is present:
+
+* On the device-table editor, `repository=` and `template_dir=` become
+  **drop-downs of the allowed entries** (labelled by their `$ALIAS`), with the
+  expanded path shown in gray beside the field. A stored value that is not on
+  the list is shown as a disabled *"(current, not allowed)"* option.
+* Saved lines always store the **`$ALIAS`** (a literal path that matches an
+  allowed path is rewritten to its alias), so changing a directory only means
+  editing the `directory:` section -- every device follows automatically.
+* A table that references a directory not on the list can still be opened in
+  the editor (so it can be fixed), with a red banner naming each violation, but
+  **the save is blocked** until the violations are resolved.
+* Generic-model template lookups use the alias's **expanded path**.
+
+When no `directory:` lines exist, the allow-list is inactive and the path
+fields stay free-text, exactly as before.
+
+User accounts live in a PostgreSQL table, `users`:
+
+| Column              | Type    | Notes |
+|---------------------|---------|-------|
+| `username`          | TEXT    | primary key |
+| `pass_hash`         | TEXT    | Apache MD5 (`$apr1$`) or any format `verify_password()` accepts |
+| `edit_device_table` | BOOLEAN | per-user right to view and edit the device table |
+| `admin_function`    | BOOLEAN | per-user "full admin" right (behaves like the built-in `admin`) |
+
+Point `fetchconfig-web.cgi` at it with the four `$DB*` config values, which
+must match the application login created during setup. A fresh connection
+is opened per request. Password hashes are generated in **pure Perl**
+(`apr1_hash()`, byte-for-byte identical to `openssl passwd -apr1`), so no
+`htpasswd` binary -- and no sudo rule for one -- is needed anymore.
+
+#### Bulk edit
 
 The **Bulk Edit** button on the Setup page (`?action=bulk_edit`, **admin
 only** -- stricter than the edit-device-table right) opens a plain-text
@@ -945,7 +1163,7 @@ Saving goes through the same safe path as the editor -- mtime concurrency
 guard, timestamped backup to `$BACKUP_DEVICE_TABLE`, in-place overwrite,
 POST + CSRF.
 
-## Tools (admins only)
+### Tools (admins only)
 
 The **Tools** menu item -- shown in the title bar between Setup and User to
 any **admin** (the built-in `admin` account or a user with `admin_function`)
@@ -953,7 +1171,7 @@ any **admin** (the built-in `admin` account or a user with `admin_function`)
 the admin requirement server-side (not just menu hiding), since they're
 reachable directly by URL.
 
-### Orphaned Configuration Cleanup
+#### Orphaned Configuration Cleanup
 
 Orphaned backups are backed-up configurations on disk whose device is no
 longer in the device table (a decommissioned or renamed device leaving its
@@ -975,7 +1193,7 @@ The check is a read-only GET; the delete is a POST + CSRF state-changing
 action and, like Backup Now, runs `fetchconfig.pl` through `sudo` when
 `USE_SUDO_FOR_BACKUP_NOW` is set (it writes into the repository).
 
-### Empty Directory Cleanup
+#### Empty Directory Cleanup
 
 Empty directories are the date (`YYYYMM`/`YYYYMMDD`) or per-device directories
 left in the repository with no files in them. A normal aged-config delete run
@@ -1000,7 +1218,7 @@ The check is a read-only GET; the delete is a POST + CSRF state-changing
 action and, like the orphaned-configuration delete, runs through `sudo` when
 `USE_SUDO_FOR_BACKUP_NOW` is set.
 
-### Restore device table
+#### Restore device table
 
 Lists the timestamped device-table backups kept in `$BACKUP_DEVICE_TABLE`
 (the `.bak` files written before every editor/bulk-edit save), newest first.
@@ -1059,7 +1277,7 @@ when there are at least two backups (with one or none there is nothing this
 could remove). The result -- how many were deleted and which backup was kept
 -- is reported as a flash message on the Tools page.
 
-### Devices without backups
+#### Devices without backups
 
 Scans every Device-ID in the device table and lists those that have no
 stored backups yet (never backed up). Press **Start scan** (which becomes
@@ -1076,7 +1294,7 @@ config files found"), or `error`. The device IDs to scan are emitted into
 the page from `read_device_ids()`, and the endpoint validates `dev` against
 `^[\w.\-]+$`.
 
-### Check devices for empty backups
+#### Check devices for empty backups
 
 Works the same way, but flags devices that have one or more **empty**
 (zero-byte) backup files -- a fetch that connected but saved nothing. Each
@@ -1090,7 +1308,7 @@ scan tools share one implementation (`render_scan_tool`), with each box's
 element IDs namespaced so they coexist on the Tools page, and both list any
 devices that could not be checked by name.
 
-### Check devices for consistent backup suffixes
+#### Check devices for consistent backup suffixes
 
 Flags devices whose stored backups have a filename-suffix problem. Each device
 is checked with `fetchconfig.pl -s <dev>` via the
@@ -1114,7 +1332,7 @@ output -- including the per-file suffix breakdown -- in a copyable block and
 spells out which of the three cases applies, the same way the empty-backup
 check does.
 
-### View fetchconfig log
+#### View fetchconfig log
 
 The Tools page has a **View fetchconfig log** section with a **Display log**
 button that opens the log on its own page (`?action=view_log`, admin only).
@@ -1133,14 +1351,16 @@ time** line is shown below the output. At most `LOG_MAX_DEVICES` sections are
 rendered (default **1000**); if the log has more, a warning is shown above the
 output and only the first `LOG_MAX_DEVICES` are displayed.
 
-### Template viewer
+#### Template viewer
 
 The Tools page has a **Template viewer** section with a **Show templates**
 button that opens a list of the generic-model templates on its own page
-(`?action=view_templates`, admin only). The template directories come from the
-`template dir:` lines that `fetchconfig.pl -devices=<table> -t` reports (so the
-list matches exactly what fetchconfig itself uses); each directory is scanned
-for `*.tmpl` files. Every file is listed once, de-duplicated by full path only:
+(`?action=view_templates`, admin only). The list comes from
+`fetchconfig.pl -devices=<table> -t`, whose tab-separated output gives the full
+path, model and directory of every template (in both the `default` and `device`
+sections). If `-t` reports a missing directory (exit 2) or finds no templates
+(exit 1) the page shows the fetchconfig output instead of a list. Every template
+is listed once, de-duplicated by full path only:
 the same template name may legitimately exist in more than one directory (in
 the device table a generic model is the combination of `template_dir` and the
 template name), so same-named files in different directories appear as separate
@@ -1155,7 +1375,7 @@ template list -- it must contain no `..` and must exactly match a scanned
 template path -- so the viewer can never read files outside the template
 directories.
 
-### Template editor
+#### Template editor
 
 Each row in the template list also has an **Edit** link
 (`?action=edit_template`, admin only). The editor is a vertical split: the left
@@ -1184,6 +1404,13 @@ through a small privileged helper, **`fetchconfig-web-install-template.pl`**
 ```
 TEMPLATE_HELPER = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 ```
+
+> **Note on write access.** If `TEMPLATE_HELPER` is set, saves and reverts
+> go through that sudo helper; if it is empty, the web user must be able to
+> write the template directories directly. The helper path is independent of
+> `USE_SUDO_FOR_BACKUP_NOW` (which only governs Backup Now), so a template
+> write can use sudo even when Backup Now does not, and vice-versa.
+
 
 and grant the web-server user permission to run just that helper, e.g. via
 `visudo`:
@@ -1221,71 +1448,7 @@ base under which that documentation is served; put `README.template_engine.html`
 there (e.g. alongside the other served assets). If the file is not installed the
 button simply leads to a 404.
 
-User accounts live in a PostgreSQL table, `users`:
-
-| Column              | Type    | Notes |
-|---------------------|---------|-------|
-| `username`          | TEXT    | primary key |
-| `pass_hash`         | TEXT    | Apache MD5 (`$apr1$`) or any format `verify_password()` accepts |
-| `edit_device_table` | BOOLEAN | per-user right to view and edit the device table |
-| `admin_function`    | BOOLEAN | per-user "full admin" right (behaves like the built-in `admin`) |
-
-Point `fetchconfig-web.cgi` at it with the four `$DB*` config values, which
-must match the application login created during setup. A fresh connection
-is opened per request. Password hashes are generated in **pure Perl**
-(`apr1_hash()`, byte-for-byte identical to `openssl passwd -apr1`), so no
-`htpasswd` binary -- and no sudo rule for one -- is needed anymore.
-
-### User database setup -- `fetchconfig-web-dbsetup.pl`
-
-A standalone helper that creates the database and table and (optionally)
-imports existing accounts. Every step is a Y/N prompt, so it's safe to
-re-run. Run it once before first use:
-
-```sh
-perl fetchconfig-web-dbsetup.pl
-```
-
-It will, in order:
-
-1. Ask for the application **database name** (default `fetchconfig`) and
-   **host**.
-2. Offer to **create the database**: it connects to the `postgres`
-   maintenance database with a maintenance login (typically the `postgres`
-   superuser, which needs `CREATEDB`/`CREATEROLE` rights), creates the
-   application role if missing, and `CREATE DATABASE ... OWNER <app-user>`.
-   Skip this if the database already exists.
-3. Reconnect as the **application login** and create the `users` table
-   (PostgreSQL 9.2-compatible DDL).
-4. Offer to **import** accounts from `/www/passwd/fetchconfig` if that old
-   htpasswd file is present -- hashes are copied verbatim, so everyone's
-   current password keeps working, all with `edit_device_table = false` and
-   `admin_function = false` (except `admin`, which gets both true).
-5. **Bootstrap admin**: if no `admin` account exists after import (or you
-   skipped import), create `admin` with the password `fetchconfig`. If
-   `admin` was imported, it is left untouched (and imported `admin` is given
-   both the edit and admin-function rights, since `admin` always has them
-   anyway).
-6. **Write `/etc/fetchconfig-web.cfg`** (optional): writes the config file the
-   CGI reads, mode 0600, with the database values filled in from the answers
-   above and the other settings at their defaults for you to review. Skip
-   this to create the file by hand (see "Configuration").
-
-Migrating from an earlier (htpasswd) version means everyone re-logs in once,
-since sessions are new.
-
-**Upgrading an existing database** (adding `admin_function` to a `users`
-table created by an earlier version) is a one-time manual step:
-
-```sql
-ALTER TABLE users ADD COLUMN admin_function BOOLEAN NOT NULL DEFAULT FALSE;
-UPDATE users SET admin_function = TRUE WHERE username = 'admin';
-```
-
-Set it `TRUE` for any other accounts that should have full admin rights (or
-do that from the User page afterward).
-
-## User management via the web UI
+### User management via the web UI
 
 The **User** menu item (every page's title bar) lets any logged-in user
 change their own password, and lets any **admin** (the built-in `admin`
@@ -1324,7 +1487,7 @@ against the database, no shell access required.
 - All of these actions redirect back to the User page with a short flash
   message (`?msg=`/`?err=`), so refreshing never resubmits the form.
 
-### Default-password warning
+#### Default-password warning
 
 An account still using the literal password `$DEFAULT_PASSWORD`
 (`fetchconfig`) gets a persistent banner after login until it changes to
@@ -1334,21 +1497,7 @@ flag is set at login (recorded as a 4th line in the session file, never in
 the cookie) and cleared automatically when the password is changed away
 from the default.
 
-### Supported hash formats
-
-New passwords are always written as `$apr1$` (Apache MD5). Imported hashes
-are read back by `verify_password()`, which accepts:
-
-| Format               | Example prefix | Supported |
-|-----------------------|-----------------|-----------|
-| `{SHA}` (SHA1)         | `{SHA}...`       | **No** -- unsalted, trivially brute-forced; removed in 1.12. Reset such users' passwords via the User page. |
-| Apache MD5 (apr1)     | `$apr1$...`      | Yes (pure-Perl, verified against `openssl passwd -apr1`) -- what the app now writes |
-| glibc MD5 crypt       | `$1$...`         | Yes (pure-Perl, same algorithm as apr1) |
-| glibc SHA-256/512     | `$5$...` / `$6$...` | Only if the *web server's* system `crypt()` supports it (true on most Linux; not guaranteed on AIX) |
-| Traditional DES crypt | 2-char salt      | Yes, via system `crypt()` |
-| bcrypt                | `$2a$`/`$2b$`/`$2y$` | **Not supported** -- add `Crypt::Eksblowfish::Bcrypt` and extend `verify_password()` if you need it |
-
-## Help page
+### Help page
 
 The **Help** menu item shows a short description of the application. It
 reads `$HELP_FILE` as an HTML *fragment* -- no `<html>`/`<head>`/`<body>`
@@ -1378,6 +1527,90 @@ where to put it. Since this content is operator-authored, not user input,
 it is included verbatim (not run through `esc()`) -- treat it the same as
 any other file you place on the server, i.e. don't let untrusted parties
 write to it.
+
+### User-interface conveniences
+
+#### Floating Top / Bottom navigation
+
+Long-scrolling pages -- the device list, Setup, the device-table editor, the
+backup content view, and the side-by-side diff -- carry a small pair of
+floating **&#9650; Top** / **&#9660; Bottom** buttons (`top_bottom_nav()`),
+`position: fixed` in the **bottom-right** corner so they never overlap the
+title bar's Log out link. They smooth-scroll to either end of the page (with
+a plain-jump fallback for older browsers) and are hidden when printing.
+
+## Part 4 -- Reference
+
+### How `fetchconfig.pl` is invoked
+
+Every interaction with fetchconfig goes through its command-line interface;
+the application never reads the repository or the device table's backups
+directly. The executable is `<FETCHCONFIG_PATH>/<FETCHCONFIG_BIN>` and is
+always invoked in **list form** (`open3()` or, for the two privileged writes,
+`exec()` after `fork`) -- never through a shell -- so no argument is subject to
+shell interpretation.
+
+Two execution paths exist:
+
+- **Read paths** run as the web-server user through `run_fetchconfig()`, which
+  captures stdout and stderr separately via `IO::Select` (no deadlock on large
+  output) and returns `(stdout, stderr, exit_status, fork_error)`.
+- **Write paths** (Backup now, orphaned-backup delete) run through
+  `sudo -n` when `USE_SUDO_FOR_BACKUP_NOW` is set, because the web-server user
+  typically cannot write the repository. These use `run_command_capture()`,
+  which merges stdout and stderr into one transcript.
+
+`T` below is the configured device table (`-devices=$DEVICE_TABLE`), `DEV` a
+validated Device-ID, and `N`/`M` validated backup indices.
+
+| Caller | Command | stdout consumed | Exit codes |
+|--------|---------|-----------------|------------|
+| `list_backups` | `-devices=T -l DEV` | `index<TAB>size<TAB>path` per backup | `0` = listed; `1` with `no backed up config files found` = treated as "no backups yet" (empty list, not an error); other non-zero = error |
+| `get_backup_content` | `-devices=T -g DEV -n N` | raw config bytes of backup `N` (served through unchanged) | `0` = ok; non-zero = error |
+| `compare_backups` | `-devices=T -g DEV -n N -m M` | unified diff of backup `N` against older backup `M` (`M > N`) | `0` = identical; `1` = differs; `>1` = error (the underlying diff's code) |
+| `device_empty_status`, `run_check_empty` | `-devices=T -z DEV` | `index<TAB>0<TAB>path` for each zero-byte backup | `0` = clean (all non-empty, or none exist); `1` = at least one zero-byte backup found (an expected result, not an error); other = error |
+| `device_suffix_status`, `run_check_suffix` | `-devices=T -s DEV` | per-file suffix breakdown when inconsistent | `0` = suffixes consistent and match the configured `filename_append_suffix`; `1` = suffixes inconsistent between backups; `2` = consistent but do not match the configured suffix; other = error |
+| `run_orphan_check` | `-devices=T -o` | listing of orphaned repository entries | passed through to the transcript |
+| `run_orphan_delete` | `[sudo -n] BIN -devices=T -o -D` | listing; stderr logs `rm`/`rmdir` per removed item | passed through to the transcript |
+| `run_empty_check` | `-devices=T -e` | `device`/`day`/`month`<TAB>path per empty directory | `0` = none found; `1` = empty directories found (an expected result, not an error); other = error |
+| `run_empty_delete` | `[sudo -n] BIN -devices=T -e -D` | each listed directory with `deleted` appended, plus a `removed N of M` summary | `0` = success; non-zero = at least one removal failed |
+| `run_backup_now` | `[sudo -n] BIN -devices=<tmp>` | full run transcript (stdout+stderr merged) | reported to the user as-is; result state is read from the device's `.status` file |
+
+Notes on specific paths:
+
+- **`-z` and `-s` return `1` for a found condition, not an error.** The
+  wrappers classify on the exit code first and cross-check the log text, so a
+  found-empties (`-z` = 1) or inconsistent-suffix (`-s` = 1/2) result is
+  reported as a normal outcome, while any other non-zero exit becomes an error.
+- **Backup now does not use `-devices=T`.** It writes a temporary,
+  single-device table (mode 0600) containing that device's own line verbatim
+  plus a `default: <model> repository=$REPOSITORY` line, and runs
+  `-devices=<tmp>`. The device line is copied verbatim -- `repository=` is
+  never appended to it -- because appending onto a line whose last field is
+  `pass=...` folded the repository path into the password. The temp table is
+  created with `File::Temp` and `UNLINK => 1` so it is removed even if the
+  process dies.
+- **Compare uses fetchconfig's own diff.** `-g DEV -n N -m M` retrieves and
+  diffs entirely inside fetchconfig; the application creates no temp files and
+  never touches the repository for a compare.
+- **Version detection** does not invoke the CLI. It reads
+  `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and calls
+  `fetchconfig::Constants::version()`, caching the result against that file's
+  mtime (see the version banner and footer).
+
+### Supported hash formats
+
+New passwords are always written as `$apr1$` (Apache MD5). Imported hashes
+are read back by `verify_password()`, which accepts:
+
+| Format               | Example prefix | Supported |
+|-----------------------|-----------------|-----------|
+| `{SHA}` (SHA1)         | `{SHA}...`       | **No** -- unsalted, trivially brute-forced; removed in 1.12. Reset such users' passwords via the User page. |
+| Apache MD5 (apr1)     | `$apr1$...`      | Yes (pure-Perl, verified against `openssl passwd -apr1`) -- what the app now writes |
+| glibc MD5 crypt       | `$1$...`         | Yes (pure-Perl, same algorithm as apr1) |
+| glibc SHA-256/512     | `$5$...` / `$6$...` | Only if the *web server's* system `crypt()` supports it (true on most Linux; not guaranteed on AIX) |
+| Traditional DES crypt | 2-char salt      | Yes, via system `crypt()` |
+| bcrypt                | `$2a$`/`$2b$`/`$2y$` | **Not supported** -- add `Crypt::Eksblowfish::Bcrypt` and extend `verify_password()` if you need it |
 
 ## Security model
 
@@ -1494,7 +1727,7 @@ below are grouped by concern.
   entry to exactly the `fetchconfig.pl` command, and keep the repository owned
   by the account fetchconfig runs as.
 
-## Development -- running the tests
+## Development
 
 The project ships a `Makefile.PL` and a `t/` unit-test suite (using the core
 `Test::More`). Generate the Makefile and run the tests the usual way:

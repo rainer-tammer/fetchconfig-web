@@ -776,10 +776,10 @@ page = (u"""<!DOCTYPE html>
       <h1>fetchconfig-web</h1>
       <p class="lede">{lede}</p>
       <div class="callout warn" style="margin-top:1rem">
-        <p><strong>Requires fetchconfig 9.64 or newer.</strong> The installed
+        <p><strong>Requires fetchconfig 9.65 or newer.</strong> The installed
         version is read from <code>&lt;FETCHCONFIG_PATH&gt;/fetchconfig/Constants.pm</code>;
         a warning banner is shown on every page (after login) if it is older
-        than 9.64 or cannot be determined.</p>
+        than 9.65 or cannot be determined.</p>
       </div>
       <div class="hero-stats">
         <div class="hero-stat"><span class="num">1.15</span><span class="label">version</span></div>

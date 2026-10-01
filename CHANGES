@@ -7,55 +7,54 @@
 
 1.15
 ====
-* Security: the template viewer/editor and the install helper now refuse .tmpl
-  entries that are symbolic links, hard links or otherwise not plain regular
-  files (they are listed with a warning instead), so a link cannot lead a read
-  or write outside the template directories. FONT_BASE_URL, IMAGE_BASE_URL and
-  HELP_BASE_URL are validated to a safe absolute URL-path shape at startup.
-+ New template-driven "generic" model. In the device table it is selected as
-  model=generic plus a model=<template> option; the editor shows model= as a
-  drop-down of the templates fetchconfig reports (fetchconfig.pl -t), on both
-  the default: and device forms. model= is required on a generic device line
-  unless a "default: generic" line supplies it.
-+ Tools: new "Template viewer" -- lists the generic-model *.tmpl templates in
-  the directories fetchconfig.pl -t reports (de-duplicated by full path, sorted
-  by name) and opens each read-only with template syntax highlighting. Paths are
-  whitelisted (no "..", must match a scanned template), so it cannot read
-  outside the template directories.
-+ Tools: new "Template editor" (Edit next to each template) -- a split view with
-  an editable pane and a syntax-highlighted "Checked version" refreshed by
-  "Check syntax" (fetchconfig.pl --check-template). Save is blocked if the check
-  fails and keeps one <template>.tmpl.bak; "Revert to last backup version"
-  restores it. The Editor pane flags unsaved changes and confirms before leaving
-  with unsaved edits; a "Help templates" button opens the template-engine manual
-  from HELP_BASE_URL. Content is saved with LF line endings. Writing goes through
-  a new privileged helper, fetchconfig-web-install-template.pl, run via sudo and
-  configured by TEMPLATE_HELPER (which validates: absolute path, no "..", .tmpl
-  only).
-* Model-option audit against the fetchconfig README: timeout is now optional on
-  every model (fetchconfig defaults it to 30s); added optional enable + show_cmd
-  to cisco-sg300, enable to procurve/procurve-ssh, show_cmd to dell, debug to
-  comware-ssh, pager_cmd to mediant-sbc; removed an erroneous mandatory enable
-  from mikrotik.
-* Custom confirmation dialogs (styled like the Backup-Now box) replace the
-  browser's native confirm(): a red warning icon + red Confirm for destructive
-  actions, a green check + blue Confirm otherwise. Applied to every confirmation.
-* Wider, full-width layout for the config view, the unified-diff compare, the
-  backup list, the fetchconfig-log viewer and the device-table backup view; the
-  Help page uses 80% width.
-+ New config keys HELP_BASE_URL (docs URL base) and, from 1.12, FONT_BASE_URL /
-  IMAGE_BASE_URL (see below); all URL-path bases, added to
-  fetchconfig-web-dbsetup.pl's generated config.
-+ Added a Makefile.PL and a t/ unit-test suite (Test::More): "perl Makefile.PL
-  && make test" (or "prove -I t/lib t/"). Makefile.PL checks the required
-  modules and fails clearly if any is missing or too old (DBI >= 1.641,
-  DBD::Pg >= 3.15.0, CGI >= 4.53, Algorithm::Diff). "make doc" regenerates the
-  HTML manual; "make install" only prints a note (deploy by copying files). The
-  README documents an AIX (and possibly Linux) CGI 4.53 CGI::Util patch for a
-  harmless start_html() warning.
-+ Added imageconvert.pl (with README.imageconvert): encodes an image as a
-  base64 "my $VAR = do {...};" Perl snippet for embedding in the CGI.
-* Minimum required fetchconfig version is now 9.64; fetchconfig-web is 1.15.
+* The Status page table is wrapped in the same green "tool-section" box as the
+  Tools pages, for a consistent look.
++ The template viewer (Tools) and the new Reports page use the backup-table
+  style: the green "tool-section" box with a bordered list and View/Edit/
+  Download/Delete as buttons.
++ New "Reports" page (top menu, between Status and Setup): lists the HTML
+  change-reports fetchconfig writes into the email: report_dir, newest first,
+  with styled table and button actions; View (collapsible per-device diffs, parsed and escaped, Expand/Collapse
+  all), Download (streamed as an attachment through the CGI), Delete, and a
+  "delete reports older than N days" prune. All file access goes through the
+  login since the web server cannot read the report directory directly.
+* Removed the per-device "Check backup suffixes" button from the backups page;
+  the Tools page "Check devices for consistent backup suffixes" covers this.
++ New template-driven "generic" model: a device selects model=generic and a
+  model=<template> option, with model= rendered as a drop-down of the templates
+  fetchconfig reports. Adopts fetchconfig's tab-separated --list-allowed-dirs /
+  -t output and its exit codes (a missing directory blocks the editor and
+  viewer with the fetchconfig output; "stay" is highlighted as a transition).
++ Tools: "Template viewer" lists the generic-model templates read-only with
+  syntax highlighting, and "Template editor" edits them in a split view with a
+  syntax check, single .tmpl.bak backup, revert, and unsaved-changes guard.
+  Template writes go through a new privileged helper
+  (fetchconfig-web-install-template.pl, run via sudo, configured by
+  TEMPLATE_HELPER); non-regular files (symlinks, hard links) are refused.
++ Directory allow-list: the device table may carry "directory:" lines
+  (repository / template / fetch_run / report, each $ALIAS + path), read server-side from
+  the table so they cannot be forged and written back verbatim, armored with
+  "must be edited on the server" comments (shown red in the Setup view). When
+  present, the editor's repository=, template_dir= and on_fetch_run fields
+  become drop-downs of the allowed aliases (expanded path shown in gray;
+  on_fetch_run splits into a directory + a command field), saved lines store the
+  $ALIAS, and a table using a directory not on the list cannot be saved.
++ New config keys FONT_BASE_URL, IMAGE_BASE_URL, HELP_BASE_URL (URL-path bases,
+  validated at startup) and TEMPLATE_HELPER; integer config keys now report a
+  clear configuration error on an invalid value instead of silently defaulting.
++ A device-table save is now validated by fetchconfig (-t and
+  --list-allowed-dirs against the exact bytes) before being written, so an
+  invalid table never reaches disk; the Bulk edit page runs the same checks.
++ Added a Makefile.PL and a t/ unit-test suite (Test::More), plus imageconvert.pl
+  (encodes an image as a base64 Perl snippet, with README.imageconvert).
+* Model-option audit against the fetchconfig README (timeout optional
+  everywhere, plus per-model option corrections).
+* Custom confirmation dialogs replace the browser's confirm(); wider,
+  full-width layout for the config/compare/log/backup views; editor, preview
+  and bulk-edit action buttons moved to the top of the page.
+* Documentation restructured into parts with a table of contents and quick
+  start. Minimum required fetchconfig version is now 9.65; fetchconfig-web is
+  1.15.
 
 1.12
 ====
