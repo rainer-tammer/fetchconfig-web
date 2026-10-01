@@ -753,7 +753,8 @@ sub main {
     } else {
         my ($sid, $user, $csrf) = current_session();
         if (!defined $user) {
-            show_login_form();
+            # Remember where they were headed, so login returns them there.
+            show_login_form(undef, $action);
         }
         # CSRF check for the authenticated state-changing actions (login/logout
         # are handled separately: login has no session yet, and logout is
@@ -1262,6 +1263,25 @@ sub csrf_field {
 # Actions
 # =============================================================================
 
+# Landing pages an unauthenticated user may be redirected back to after login.
+# Only read-only (GET) "view a page" actions are allowed -- never a
+# state-changing action and never an off-site URL -- so login can neither be
+# tricked into performing an action nor used as an open redirect.
+my %LOGIN_LANDING = map { $_ => 1 } qw(
+    devices status report setup tools user help
+    view_templates view_template view_log view_report
+);
+
+# Build the post-login redirect URL from a submitted "next" action name. Returns
+# the default (bare script_url) unless $next is one of the safe landing actions.
+sub login_next_url {
+    my ($next) = @_;
+    return script_url() unless defined $next && $next =~ /^[a-z_]+$/
+                              && $LOGIN_LANDING{$next};
+    return script_url() if $next eq 'devices';   # bare URL is the devices page
+    return script_url() . '?action=' . $next;
+}
+
 sub do_login {
     my $username = $cgi->param('username') // '';
     my $password = $cgi->param('password') // '';
@@ -1297,7 +1317,11 @@ sub do_login {
             -path     => '/',
             # -secure => 1,   # uncomment once served over HTTPS
         );
-        print $cgi->header(-cookie => $cookie, -location => script_url(), -status => '302 Found');
+        # Return the user to the page they originally asked for (captured as a
+        # hidden "next" in the login form), if it is a safe landing action;
+        # otherwise the default Devices page.
+        my $dest = login_next_url($cgi->param('next'));
+        print $cgi->header(-cookie => $cookie, -location => $dest, -status => '302 Found');
     } else {
         # Slow down online brute-force attempts. Applied on every failure --
         # unknown user or wrong password alike -- so timing doesn't reveal
@@ -1336,7 +1360,9 @@ sub script_url {
 # --------------------------------------------------------------------------
 
 sub show_login_form {
-    my ($error) = @_;
+    my ($error, $next) = @_;
+    # Fall back to the "next" the browser submitted (e.g. a failed login retry).
+    $next = $cgi->param('next') unless defined $next;
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Login');
     print qq{<div class="login-box">\n};
@@ -1348,6 +1374,11 @@ sub show_login_form {
     }
     print $cgi->start_form(-method => 'POST', -action => script_url());
     print qq{<input type="hidden" name="action" value="login">\n};
+    # Carry the originally-requested landing action across the login, so the
+    # user returns there afterwards. Only validated action names are kept.
+    if (defined $next && $next =~ /^[a-z_]+$/ && $LOGIN_LANDING{$next}) {
+        print qq{<input type="hidden" name="next" value="} . esc($next) . qq{">\n};
+    }
     print qq{<label>Username<br>};
     print $cgi->textfield(-name => 'username', -autocomplete => 'username');
     print qq{</label><br>\n};

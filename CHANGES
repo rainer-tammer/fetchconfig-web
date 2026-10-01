@@ -7,6 +7,10 @@
 
 1.15
 ====
+* After logging in, an unauthenticated user who opened a specific page URL
+  (e.g. ?action=report) is returned to that page instead of always landing on
+  Devices. Only a whitelist of read-only landing actions is honoured (no
+  open redirect, no state-changing action).
 * The Status page table is wrapped in the same green "tool-section" box as the
   Tools pages, for a consistent look.
 + The template viewer (Tools) and the new Reports page use the backup-table
