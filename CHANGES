@@ -5,6 +5,100 @@
 # configuration backup tool. Newest changes first.
 #
 
+1.50
+====
+* Normalised .btn so <button> and <a> buttons render at the same height (e.g.
+  Save vs Cancel on the Assign-sites page were slightly mismatched).
+* Fixed back links that led to the empty User landing instead of the users
+  table: the Edit-sites breadcrumb/Cancel, the reset-password breadcrumb, and
+  the change-password warning link now go to the right page.
+* Fixed the login box size/centering that the sticky-footer layout change had
+  disturbed (box is now flex-centered with a fixed width).
+* CRITICAL FIX: saving the device table as a site-limited editor could wipe the
+  pass= of the edited devices (the masked-password write-back resolved the
+  original by a sequential field index that did not match the table position).
+  Editor field indices now use the record's real table position, so masked
+  passwords are always restored to their correct value on save.
+* Users table: the Grant/Revoke and Edit sites buttons now come first in their
+  cell, before the current-state text / site list, and the yes/no tag matches the button height.
+* Fixed narrow-window layout: the 900px minimum is now enforced on the body (so
+  the whole page scrolls horizontally below 900px instead of clipping); green
+  section boxes now grow (fit-content) to fully contain a wide table instead of
+  the table spilling past the box edge, and no longer clip content that is wider (the box grows and the whole page scrolls horizontally),
+  and a red banner appears below the menu when the window is under 900px.
+* Fixed: the "Users list" menu item (and the redirects after user-management
+  actions) now show the users table again instead of the "pick from the menu"
+  landing message.
+* The orphaned-backup / empty-directory delete tools now report the number of
+  items deleted (parsed from fetchconfig's summary) instead of a vague "nothing
+  needed deleting, or ... removed successfully" message.
+* Fixed stale messages that referred to the removed "Tools page": the orphan /
+  empty-directory check results now name the specific cleanup tool.
+* Renamed "Orphaned Configuration Cleanup" to "Orphaned Backup Cleanup".
+* Fixed: comparing/viewing device-table backups in the Restore tool no longer
+  fails with "device not available" (the per-device guard applied only when a
+  device is actually referenced). Dropdown menus now float above page content;
+  the orphan/empty-cleanup result
+  pages use a green "<- <tool>" breadcrumb at the top instead of a bottom button and
+  the restore compare/view pages label their back button "Restore device table".
+  The copyright footer sticks to the bottom of short pages and follows the
+  content on long pages.
+* Editor: "Cancel" is now "Reject all changes" (red) and reloads the table
+  from disk after a confirm. Preview shows only "Back to editor". Tools/User
+  landing pages prompt to pick from the menu; every tool sub-screen returns to
+  its own tool. Add-user / change-password errors return to that page with the
+  message above the form. Removed leftover back buttons (Sites, Check site
+  assignment, log/template viewers).
+* The title bar now uses application-style drop-down menus (Devices, Setup
+  devices, Tools, User); Status/Reports moved under Devices; the Setup page is
+  the read-only highlighted view (edit/bulk are menu entries). Each Tools and User
+  menu item is now its own single-function page (one page per tool / per user
+  action, no overview page, no back buttons). New Tools entry "Check site
+  assignment" lists devices with no site=. Edit device table and Bulk edit lost
+  their back button; the device list no longer nests a second scrollbar.
+* site= is now a mandatory, non-deletable, auto-added device option rendered as
+  a drop-down; saving a device with no site is blocked. For a site-limited user
+  the requirement applies only to their own devices (others are preserved). The
+  read-only Defaults view shows one merged box per model (last value wins). The
+  Users Sites column wraps long lists; the layout keeps a 900px minimum with a
+  horizontal scrollbar on narrower windows.
+* A site code can no longer be deleted while it is used by a device (previously
+  only a user assignment blocked deletion); enforced in the UI and server-side.
+* Green section boxes now inset their content equally on the left and right
+  (padding on the box, tables at full content width), so wide tables are no
+  longer flush/clipped on the right. The User page also uses the full-width
+  layout.
+* The User page Users table has a "Full Report" column (the download-full-report
+  right, with a grant/revoke toggle for site-limited users) between "Edit device"
+  and "Sites"; the edit-right heading is shortened to "Edit device". (Fixed the
+  column so the granted state is actually shown.)
+* The Status page shows the site code as its first column; the Devices page
+  shows it as the second column and adds a site filter drop-down (like the
+  model filter), with a "(no site)" choice.
+* Device editor: site= is a drop-down (code + description). Devices without a
+  site show a red "no site assigned" and get the option added automatically on
+  load; an unassigned site is not written back. The "no site assigned" entry is a red placeholder shown only until a real site is picked, after which it is no longer selectable; dropdown colours are consistent. The "+ add option" site entry
+  is a drop-down too.
+* Fixed: saving a user's site assignment crashed (undefined redirect helper);
+  site_id now uses multi_param and the login "next" is read in scalar context,
+  clearing the CGI "param called in list context" warnings.
++ Per-site device access: a device may carry a site=<code> tag, site codes are
+  defined in the database (new sites / user_sites tables) and users are assigned
+  one or more codes. A site-limited user sees and edits only their devices --
+  the Devices/Status/Reports pages are filtered, direct device URLs are guarded,
+  Setup opens the device editor only (Devices tab; Defaults view-only; no
+  Email/Reporting, Bulk edit or raw view), Tools stays admin-only, and saves are
+  merged into the full table server-side (other devices/sections preserved).
+  Site 0 ("any site"/All sites) means unrestricted; admin always has it. Reports
+  show only the user's device sections, and downloading the full report needs a
+  per-user right. Admins manage site codes (add/edit/delete, with atomic code
+  rename that updates site= in the device table) and per-user assignments from
+  the User page. The site-management and assign-sites pages use the same green section box as the rest of the User page. Run the PostgreSQL 8.2-compatible fetchconfig-web-dbupdate.sql to enable it on
+  an existing install (all users start unrestricted). fetchconfig.pl ignores site=. The update script grants the web user privileges
+  on the new tables, and site add/edit/delete now report database errors (and
+  recreate a missing sites_id_seq) instead of failing silently. The initial setup
+  script also grants the web user access to the new site tables.
+
 1.15
 ====
 * After logging in, an unauthenticated user who opened a specific page URL

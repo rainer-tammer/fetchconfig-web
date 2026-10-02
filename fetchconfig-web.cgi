@@ -60,7 +60,7 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.15';
+use constant APP_VERSION => '1.50';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
@@ -725,7 +725,7 @@ if (!-d $SESSION_DIR) {
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
 my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete check_template save_template revert_template delete_report prune_reports);
+    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report);
 
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
@@ -764,6 +764,29 @@ sub main {
             print "Invalid or missing CSRF token. Go back, reload the page, and try again.\n";
             return;
         }
+        # Per-site guard: a device-scoped action may only touch a device the user
+        # is allowed to see. Checked centrally here so no handler can be reached
+        # for an out-of-site device by typing a URL.
+        elsif (do {
+                    # Per-device actions may only touch a device the user can
+                    # see. compare/sidebyside/view_backup are dual-purpose: with
+                    # a dev= they compare a device's configs (device-scoped);
+                    # with only sel= they compare device-TABLE backups (the
+                    # Restore tool), which is not device-scoped -- so the guard
+                    # applies only when a dev= is actually present.
+                    my %dev_scoped = map { $_ => 1 } qw(
+                        compare sidebyside checkempty backup_now view_backup
+                        download_config download_latest
+                        check_backups_one check_empty_one check_suffix_one);
+                    my $dev = $cgi->param('dev');
+                    $dev_scoped{$action} && defined $dev && $dev ne ''
+                        && !device_accessible($user, scalar $dev); }) {
+            print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+            print page_head('Not available', $user);
+            print qq{<p class="error">That device is not available to you.</p>\n};
+            print page_foot();
+            return;
+        }
         elsif ($action eq 'compare') {
             show_compare($user);
         } elsif ($action eq 'sidebyside') {
@@ -774,12 +797,32 @@ sub main {
             show_backup_now($user);
         } elsif ($action eq 'user') {
             show_user_page($user);
+        } elsif ($action eq 'user_list') {
+            show_user_page($user, 'users');
+        } elsif ($action eq 'user_add') {
+            show_user_add($user);
+        } elsif ($action eq 'change_password_form') {
+            show_change_password_form($user);
         } elsif ($action eq 'change_password') {
             do_change_password($user);
         } elsif ($action eq 'reset_password_form') {
             show_reset_password_form($user);
         } elsif ($action eq 'reset_password') {
             do_reset_password($user);
+        } elsif ($action eq 'sites') {
+            show_sites_page($user);
+        } elsif ($action eq 'add_site') {
+            do_add_site($user);
+        } elsif ($action eq 'edit_site') {
+            do_edit_site($user);
+        } elsif ($action eq 'delete_site') {
+            do_delete_site($user);
+        } elsif ($action eq 'user_sites_form') {
+            show_user_sites_form($user);
+        } elsif ($action eq 'set_user_sites') {
+            do_set_user_sites($user);
+        } elsif ($action eq 'set_download_full_report') {
+            do_set_download_full_report($user);
         } elsif ($action eq 'add_user') {
             do_add_user($user);
         } elsif ($action eq 'delete_user') {
@@ -806,6 +849,20 @@ sub main {
             show_status_page($user);
         } elsif ($action eq 'tools') {
             show_tools($user);
+        } elsif ($action eq 'tool_orphan') {
+            show_tool_orphan($user);
+        } elsif ($action eq 'tool_empty_dir') {
+            show_tool_empty_dir($user);
+        } elsif ($action eq 'tool_restore') {
+            show_tool_restore($user);
+        } elsif ($action eq 'tool_nobackup') {
+            show_tool_nobackup($user);
+        } elsif ($action eq 'tool_empty_bk') {
+            show_tool_empty_bk($user);
+        } elsif ($action eq 'tool_suffix') {
+            show_tool_suffix($user);
+        } elsif ($action eq 'check_site_assignment') {
+            show_check_site_assignment($user);
         } elsif ($action eq 'view_log') {
             show_fetchconfig_log($user);
         } elsif ($action eq 'view_templates') {
@@ -897,7 +954,8 @@ sub db_connect {
 sub db_get_user {
     my ($dbh, $username) = @_;
     my $row = $dbh->selectrow_hashref(
-        'SELECT username, pass_hash, edit_device_table, admin_function FROM users WHERE username = ?',
+        'SELECT username, pass_hash, edit_device_table, admin_function, '
+      . 'download_full_report FROM users WHERE username = ?',
         undef, $username);
     return $row;
 }
@@ -907,7 +965,8 @@ sub db_get_user {
 sub db_all_users {
     my ($dbh) = @_;
     my $rows = $dbh->selectall_arrayref(
-        'SELECT username, pass_hash, edit_device_table, admin_function FROM users ORDER BY username',
+        'SELECT username, pass_hash, edit_device_table, admin_function, '
+      . 'download_full_report FROM users ORDER BY username',
         { Slice => {} });
     return $rows || [];
 }
@@ -980,6 +1039,278 @@ sub user_may_edit_table {
     return 1 if user_is_admin($dbh, $username);
     my $u = db_get_user($dbh, $username);
     return ($u && $u->{edit_device_table}) ? 1 : 0;
+}
+
+# =============================================================================
+# Per-site device access (v1.50). A device carries an optional "site=<code>"
+# option; a user is assigned one or more site codes in user_sites. Site id 0
+# (code '*', "All sites") means unrestricted. A device with no site= belongs to
+# site 0 ("any site"), so only unrestricted users see it. admin is always
+# unrestricted. All access decisions are computed here, server-side, from the
+# database and the device table -- never from the browser.
+# =============================================================================
+
+use constant SITE_ALL_CODE => '*';     # reserved id-0 code, shown as "any site"
+
+# Request-scoped context for rendering the site= dropdown in the editor:
+#   { options => [ {code, description} ... allowed for this user ],
+#     all => all sites arrayref, unrestricted => 0|1 }
+# Populated by show_edit_table() so render_option_field() need not take a user.
+our %SITE_CTX;
+sub site_ctx_init {
+    my ($dbh, $username) = @_;
+    my $acc = user_site_access($dbh, $username);
+    my $all = db_all_sites($dbh);
+    my @opts;
+    if ($acc->{unrestricted}) {
+        @opts = map { { code => $_->{code}, description => $_->{description} } } @$all;
+    } else {
+        @opts = map { { code => $_->{code}, description => $_->{description} } }
+                grep { $acc->{codes}{ $_->{code} } } @$all;
+    }
+    %SITE_CTX = (options => \@opts, all => $all, unrestricted => $acc->{unrestricted});
+}
+
+# All sites as an arrayref of { id, code, description }, ordered (id 0 first,
+# then by code). Cached per request.
+my $_sites_cache;
+sub db_all_sites {
+    my ($dbh) = @_;
+    return $_sites_cache if defined $_sites_cache;
+    $_sites_cache = [];
+    return $_sites_cache unless $dbh;
+    my $rows = $dbh->selectall_arrayref(
+        'SELECT id, code, description FROM sites ORDER BY (id <> 0), code',
+        { Slice => {} });
+    $_sites_cache = $rows || [];
+    return $_sites_cache;
+}
+
+# The set of site CODES a user may access (as a hashref { code => 1 }), plus a
+# flag. Cached per (username) per request. admin / holding site 0 => unrestricted.
+my %_user_sites_cache;
+sub user_site_access {
+    my ($dbh, $username) = @_;
+    return $_user_sites_cache{$username} if exists $_user_sites_cache{$username};
+    my %acc = (unrestricted => 0, codes => {});
+    if (user_is_admin($dbh, $username)) {
+        $acc{unrestricted} = 1;
+        $_user_sites_cache{$username} = \%acc;
+        return \%acc;
+    }
+    if ($dbh && defined $username) {
+        my $rows = $dbh->selectall_arrayref(
+            q{SELECT s.id, s.code FROM user_sites us
+                JOIN sites s ON s.id = us.site_id
+               WHERE us.username = ?}, { Slice => {} }, $username);
+        for my $r (@{ $rows || [] }) {
+            $acc{unrestricted} = 1 if $r->{id} == 0;
+            $acc{codes}{ $r->{code} } = 1;
+        }
+    }
+    $_user_sites_cache{$username} = \%acc;
+    return \%acc;
+}
+
+sub user_is_unrestricted {
+    my ($dbh, $username) = @_;
+    return user_site_access($dbh, $username)->{unrestricted} ? 1 : 0;
+}
+
+# --- site management DB helpers ------------------------------------------
+
+sub db_site_by_id {
+    my ($dbh, $id) = @_;
+    return $dbh->selectrow_hashref('SELECT id, code, description FROM sites WHERE id = ?',
+                                   undef, $id);
+}
+sub db_site_code_in_use_by_device {
+    my ($code) = @_;    # device table is the source of truth for device usage
+    my ($content, $err) = slurp_device_table();
+    return 0 if $err;
+    for my $r (@{ parse_device_table($content) }) {
+        next unless $r->{kind} eq 'device';
+        return 1 if device_site_code($r) eq $code;
+    }
+    return 0;
+}
+sub db_site_assigned_to_user {
+    my ($dbh, $id) = @_;
+    my ($n) = $dbh->selectrow_array('SELECT COUNT(*) FROM user_sites WHERE site_id = ?', undef, $id);
+    return $n ? 1 : 0;
+}
+# Add a site. Returns (1) on success or (0, $error) on failure. Robust against a
+# missing sites_id_seq (a partial upgrade): it is created on demand, and the id
+# is derived from MAX(id)+1 as a fallback so adding a site always works.
+sub db_add_site {
+    my ($dbh, $code, $desc) = @_;
+    # Ensure the sequence exists (ignore error if it already does).
+    my ($have_seq) = $dbh->selectrow_array(
+        "SELECT 1 FROM pg_class WHERE relkind = 'S' AND relname = 'sites_id_seq'");
+    unless ($have_seq) {
+        $dbh->do('CREATE SEQUENCE sites_id_seq START WITH 1 MINVALUE 1');
+    }
+    # Next id: the greater of the sequence and MAX(id)+1, so it is always free.
+    my ($maxid) = $dbh->selectrow_array('SELECT COALESCE(MAX(id), 0) FROM sites');
+    my $id = (defined $maxid ? $maxid : 0) + 1;
+    $id = 1 if $id < 1;
+    # Keep the sequence in step (best effort).
+    $dbh->do("SELECT setval('sites_id_seq', ?)", undef, $id);
+    my $rc = $dbh->do('INSERT INTO sites (id, code, description) VALUES (?, ?, ?)',
+                      undef, $id, $code, defined $desc ? $desc : '');
+    return $rc ? (1) : (0, 'INSERT failed: ' . ($dbh->errstr // 'unknown error'));
+}
+sub db_update_site {
+    my ($dbh, $id, $code, $desc) = @_;
+    my $rc = $dbh->do('UPDATE sites SET code = ?, description = ? WHERE id = ?',
+                      undef, $code, defined $desc ? $desc : '', $id);
+    return $rc ? (1) : (0, $dbh->errstr // 'UPDATE failed');
+}
+sub db_delete_site {
+    my ($dbh, $id) = @_;
+    my $rc = $dbh->do('DELETE FROM sites WHERE id = ?', undef, $id);
+    return $rc ? (1) : (0, $dbh->errstr // 'DELETE failed');
+}
+# The site_ids assigned to a user (arrayref).
+sub db_user_site_ids {
+    my ($dbh, $username) = @_;
+    my $rows = $dbh->selectcol_arrayref('SELECT site_id FROM user_sites WHERE username = ?',
+                                        undef, $username);
+    return $rows || [];
+}
+# Replace a user's site assignments (transaction). admin always keeps site 0.
+sub db_set_user_sites {
+    my ($dbh, $username, $ids) = @_;
+    my %want = map { $_ => 1 } @$ids;
+    $want{0} = 1 if $username eq $PROTECTED_USER;    # admin pinned to All sites
+    $dbh->begin_work if $dbh->can('begin_work');
+    $dbh->do('DELETE FROM user_sites WHERE username = ?', undef, $username);
+    my $ins = $dbh->prepare('INSERT INTO user_sites (username, site_id) VALUES (?, ?)');
+    for my $id (sort { $a <=> $b } keys %want) {
+        # validate the site exists
+        next unless db_site_by_id($dbh, $id);
+        $ins->execute($username, $id);
+    }
+    $dbh->commit if $dbh->can('commit');
+    return 1;
+}
+
+# May this user download the full (unfiltered) report HTML? Unrestricted users
+# always may; a site-limited user needs the download_full_report flag.
+sub user_may_download_full_report {
+    my ($dbh, $username) = @_;
+    return 1 if user_is_unrestricted($dbh, $username);
+    my $u = db_get_user($dbh, $username);
+    return ($u && $u->{download_full_report}) ? 1 : 0;
+}
+
+# The site code stored on a device record (its site= option), or the reserved
+# "all sites" sentinel when none is set (an untagged device belongs to site 0).
+sub device_site_code {
+    my ($rec) = @_;
+    for my $pair (@{ $rec->{opts} || [] }) {
+        return $pair->[1] if defined $pair->[0] && $pair->[0] eq 'site'
+                             && defined $pair->[1] && $pair->[1] ne '';
+    }
+    return SITE_ALL_CODE;   # untagged => "any site" (id 0) => unrestricted-only
+}
+
+# Is a device (by its record) visible to this user?
+sub device_visible_to {
+    my ($dbh, $username, $rec) = @_;
+    my $acc = user_site_access($dbh, $username);
+    return 1 if $acc->{unrestricted};
+    my $code = device_site_code($rec);
+    return 0 if $code eq SITE_ALL_CODE;   # untagged / all-sites: unrestricted only
+    return $acc->{codes}{$code} ? 1 : 0;
+}
+
+# Central guard for a per-device action reached by URL (view/compare/download a
+# backup, Backup Now, ...): is $devid visible to $username? Looks the device up
+# in the table and applies the site filter. An unrestricted user always passes;
+# a device that does not exist returns false. Use this before acting on any
+# ?dev=... parameter so the list filter cannot be bypassed by typing a URL.
+sub device_accessible {
+    my ($username, $devid) = @_;
+    return 0 unless defined $devid && $devid ne '';
+    my $dbh = db_connect();
+    my $acc = $dbh ? user_site_access($dbh, $username) : { unrestricted => 1 };
+    $dbh->disconnect if $dbh;
+    return 1 if $acc->{unrestricted};
+    my ($content, $err) = slurp_device_table();
+    return 0 if $err;
+    for my $r (@{ parse_device_table($content) }) {
+        next unless $r->{kind} eq 'device';
+        next unless defined $r->{id} && $r->{id} eq $devid;
+        return device_visible_to_acc($acc, $r);
+    }
+    return 0;   # device not found
+}
+
+# Emit a 403-style "not allowed / not found" page and return true when a
+# per-device action must be refused; callers do: return if deny_device(...).
+sub deny_device {
+    my ($user, $devid) = @_;
+    return 0 if device_accessible($user, $devid);
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Not available', $user);
+    print qq{<p class="error">That device is not available to you.</p>\n};
+    print page_foot();
+    return 1;
+}
+
+# Visibility using a pre-fetched access hashref (from user_site_access), to
+# avoid a DB round-trip per device in a loop.
+sub device_visible_to_acc {
+    my ($acc, $rec) = @_;
+    return 1 if $acc->{unrestricted};
+    my $code = device_site_code($rec);
+    return 0 if $code eq SITE_ALL_CODE;
+    return $acc->{codes}{$code} ? 1 : 0;
+}
+
+# A set { code => 1 } of all known site codes (excluding the '*' sentinel,
+# which is only ever the implicit untagged value, never written as site=*).
+sub known_site_codes {
+    my ($dbh) = @_;
+    my %c;
+    for my $s (@{ db_all_sites($dbh) }) {
+        next if $s->{code} eq SITE_ALL_CODE;
+        $c{ $s->{code} } = 1;
+    }
+    return \%c;
+}
+
+# Validation errors for the device table's site= tags and device-id uniqueness.
+# Returns a list of human-readable messages. Used both at editor load (shown as
+# a red banner) and at save (to block an invalid write). A site= value that is
+# not a known code is reported; so is a duplicate device-id.
+sub site_table_errors {
+    my ($dbh, $records, $require_site) = @_;
+    my @err;
+    my $known = known_site_codes($dbh);
+    my %seen_id;
+    for my $r (@$records) {
+        next unless $r->{kind} eq 'device';
+        my $id = defined $r->{id} ? $r->{id} : '';
+        if ($id ne '') {
+            push @err, "Duplicate device-id '$id' (device-ids must be unique)."
+                if $seen_id{$id}++;
+        }
+        my $code = device_site_code($r);
+        if ($code eq SITE_ALL_CODE) {
+            # Untagged. Allowed at load (shown red), but on SAVE a site is
+            # mandatory -- the device table cannot be saved without one.
+            push @err, "Device '$id': you must select a site before the "
+                     . "device table can be saved."
+                if $require_site;
+            next;
+        }
+        push @err, "Device '$id': site '$code' is not a known site code "
+                 . "(add it under Setup -> Sites, or pick an existing one)."
+            unless $known->{$code};
+    }
+    return @err;
 }
 
 # Verify a plaintext password against an htpasswd hash. Supports the
@@ -1320,7 +1651,7 @@ sub do_login {
         # Return the user to the page they originally asked for (captured as a
         # hidden "next" in the login form), if it is a safe landing action;
         # otherwise the default Devices page.
-        my $dest = login_next_url($cgi->param('next'));
+        my $dest = login_next_url(scalar $cgi->param('next'));
         print $cgi->header(-cookie => $cookie, -location => $dest, -status => '302 Found');
     } else {
         # Slow down online brute-force attempts. Applied on every failure --
@@ -1396,7 +1727,7 @@ sub show_device_list {
     # Time how long reading + parsing the device table takes, to show the
     # user as feedback in the statistics panel.
     my $t0 = [Time::HiRes::gettimeofday()];
-    my ($devices, $err) = read_device_ids();
+    my ($devices, $err) = read_device_ids($user);
     my $load_secs = Time::HiRes::tv_interval($t0);
 
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
@@ -1414,12 +1745,24 @@ sub show_device_list {
         my $total = scalar @$devices;
         my @models = sort keys %by_model;
 
+        # Distinct site codes present on the listed devices, for the site filter.
+        my %by_site;
+        $by_site{ $_->{site} }++ for grep { defined $_->{site} && $_->{site} ne '' } @$devices;
+        my @site_codes = sort keys %by_site;
+
         print qq{<div class="filter-row">\n};
         print qq{<select id="model-filter" class="filter-select">\n};
         print qq{<option value="">(all models)</option>\n};
         for my $m (@models) {
             print qq{<option value="} . esc(lc $m) . qq{">} . esc($m) . qq{</option>\n};
         }
+        print qq{</select>\n};
+        print qq{<select id="site-filter" class="filter-select">\n};
+        print qq{<option value="">(all sites)</option>\n};
+        for my $sc (@site_codes) {
+            print qq{<option value="} . esc(lc $sc) . qq{">} . esc($sc) . qq{</option>\n};
+        }
+        print qq{<option value="\0none">(no site)</option>\n};
         print qq{</select>\n};
         print qq{<input type="text" id="dev-filter" class="filter-box" }
             . qq{placeholder="Filter device&hellip;" autocomplete="off">\n};
@@ -1456,21 +1799,25 @@ sub show_device_list {
         print qq{<table class="list" id="dev-table">\n}
             . qq{<tr>}
             . qq{<th class="sortable" data-key="model">Model<span class="sort-ind"></span></th>}
+            . qq{<th class="sortable" data-key="site">Site<span class="sort-ind"></span></th>}
             . qq{<th class="sortable" data-key="dev">Device-ID<span class="sort-ind"></span></th>}
             . qq{<th class="sortable" data-key="host">Hostname<span class="sort-ind"></span></th>}
             . qq{<th>Comment</th>}
             . qq{</tr>\n};
         for my $d (@$devices) {
             my $link = script_url() . '?dev=' . CGI::escape($d->{id});
+            my $site = defined $d->{site} ? $d->{site} : '';
             # data-host = lowercased host for the substring filter;
             # data-host-key = a sort key that orders IPv4 numerically first,
             # then hostnames/FQDNs (and IPv6) alphabetically (see host_sort_key).
             print qq{<tr data-model="} . esc(lc $d->{model}) . qq{" }
+                . qq{data-site="} . esc($site ne '' ? lc $site : "\0none") . qq{" }
                 . qq{data-dev="} . esc(lc $d->{id}) . qq{" }
                 . qq{data-host="} . esc(lc $d->{host}) . qq{" }
                 . qq{data-host-key="} . esc(host_sort_key($d->{host})) . qq{" }
                 . qq{data-comment="} . esc(lc $d->{comment}) . qq{">}
                 . qq{<td>} . esc($d->{model}) . qq{</td>}
+                . qq{<td>} . ($site ne '' ? esc($site) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
                 . qq{<td><a href="} . esc($link) . qq{">} . esc($d->{id}) . qq{</a></td>}
                 . qq{<td>} . esc($d->{host}) . qq{</td>}
                 . qq{<td>} . esc($d->{comment}) . qq{</td>}
@@ -1522,6 +1869,7 @@ sub device_filter_script {
 <script>
 (function () {
     var modelInput   = document.getElementById('model-filter');   // <select>
+    var siteInput    = document.getElementById('site-filter');     // <select>
     var devInput     = document.getElementById('dev-filter');
     var hostInput    = document.getElementById('host-filter');
     var commentInput = document.getElementById('comment-filter');
@@ -1557,7 +1905,8 @@ sub device_filter_script {
         var hv = hostInput ? hostInput.value : '';
         var cv = commentInput ? commentInput.value : '';
         var ps = pageSizeSel ? pageSizeSel.value : '100';
-        setCookie([mv, dv, hv, cv, ps].map(encodeURIComponent).join('|'));
+        var sv = siteInput ? siteInput.value : '';
+        setCookie([mv, dv, hv, cv, ps, sv].map(encodeURIComponent).join('|'));
     }
     function restoreFilters() {
         var raw = getCookie();
@@ -1581,20 +1930,29 @@ sub device_filter_script {
                 if (pageSizeSel.options[j].value === ps) { pageSizeSel.value = ps; break; }
             }
         }
+        var sv = p[5] ? decodeURIComponent(p[5]) : '';
+        if (siteInput && sv) {
+            for (var k = 0; k < siteInput.options.length; k++) {
+                if (siteInput.options[k].value === sv) { siteInput.value = sv; break; }
+            }
+        }
     }
 
     // A row matches the current filter? Model = exact (empty = all);
     // device, host & comment = case-insensitive substring. Combined with AND.
     function matches(row) {
         var mq = modelInput ? modelInput.value : '';
+        var sq = siteInput ? siteInput.value : '';
         var dq = devInput ? devInput.value.trim().toLowerCase() : '';
         var hq = hostInput ? hostInput.value.trim().toLowerCase() : '';
         var cq = commentInput ? commentInput.value.trim().toLowerCase() : '';
         var model   = row.getAttribute('data-model') || '';
+        var site    = row.getAttribute('data-site') || '';
         var dev     = row.getAttribute('data-dev') || '';
         var host    = row.getAttribute('data-host') || '';
         var comment = row.getAttribute('data-comment') || '';
         return (mq === '' || model === mq) &&
+               (sq === '' || site === sq) &&
                (dq === '' || dev.indexOf(dq) !== -1) &&
                (hq === '' || host.indexOf(hq) !== -1) &&
                (cq === '' || comment.indexOf(cq) !== -1);
@@ -1647,6 +2005,7 @@ sub device_filter_script {
     // the top too.
     function onFilterChange() { page = 0; render(); saveFilters(); }
     if (modelInput)   modelInput.addEventListener('change', onFilterChange);
+    if (siteInput)    siteInput.addEventListener('change', onFilterChange);
     if (devInput)     devInput.addEventListener('input', onFilterChange);
     if (hostInput)    hostInput.addEventListener('input', onFilterChange);
     if (commentInput) commentInput.addEventListener('input', onFilterChange);
@@ -1654,6 +2013,7 @@ sub device_filter_script {
     if (clearBtn) {
         clearBtn.addEventListener('click', function () {
             if (modelInput)   modelInput.value = '';
+            if (siteInput)    siteInput.value = '';
             if (devInput)     devInput.value = '';
             if (hostInput)    hostInput.value = '';
             if (commentInput) commentInput.value = '';
@@ -1717,7 +2077,7 @@ sub show_status_page {
     print qq{<h1>Status</h1>\n};
 
     my $t0 = [Time::HiRes::gettimeofday()];
-    my ($rows, $err) = read_all_status();
+    my ($rows, $err) = read_all_status($user);
     my $load_secs = Time::HiRes::tv_interval($t0);
 
     if ($err) {
@@ -1775,6 +2135,7 @@ sub show_status_page {
 
     print qq{<table class="list" id="status-table">\n}
         . qq{<tr>}
+        . qq{<th class="sortable" data-key="site">Site<span class="sort-ind"></span></th>}
         . qq{<th class="sortable" data-key="dev">Device-ID<span class="sort-ind"></span></th>}
         . qq{<th class="sortable" data-key="sdate">Start Date<span class="sort-ind"></span></th>}
         . qq{<th class="sortable" data-key="stime">Start Time<span class="sort-ind"></span></th>}
@@ -1812,7 +2173,9 @@ sub show_status_page {
         # returns here instead of to Devices.
         my $link = script_url() . '?dev=' . CGI::escape($dev) . '&from=status';
 
+        my $site = defined $r->{site} ? $r->{site} : '';
         print qq{<tr }
+            . qq{data-site="}   . esc(lc $site)  . qq{" }
             . qq{data-dev="}    . esc(lc $dev)   . qq{" }
             . qq{data-sdate="}  . esc($sdate)    . qq{" }
             . qq{data-stime="}  . esc($stime)    . qq{" }
@@ -1821,6 +2184,7 @@ sub show_status_page {
             . qq{data-dur="}    . esc($dur_key)  . qq{" }
             . qq{data-state="}  . esc($state_key). qq{" }
             . qq{data-changed="}. esc($chg_key)  . qq{">}
+            . qq{<td>} . ($site ne '' ? esc($site) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
             . qq{<td><a href="} . esc($link) . qq{">} . esc($dev) . qq{</a></td>}
             . qq{<td>} . esc($sdate) . qq{</td>}
             . qq{<td>} . esc($stime) . qq{</td>}
@@ -2021,7 +2385,7 @@ sub show_backup_list {
         # alongside them (a device with no backups yet has nothing to check).
         print qq{<a class="btn" href="} . esc(script_url() . '?action=checkempty&dev=' . CGI::escape($dev))
             . qq{">Check for empty backups</a>\n};
-        # (The per-device backup-suffix check was removed; the Tools page's
+        # (The per-device backup-suffix check was removed; the Tools tool
         # "Check devices for consistent backup suffixes" covers all devices.)
         # Download the newest backup's configuration as a file.
         print qq{<a class="btn" href="} . esc(script_url() . '?action=download_latest&dev=' . CGI::escape($dev))
@@ -2956,9 +3320,17 @@ sub read_status_file {
 #   { id, info => {status fields} | undef }   (info undef = no status file)
 # in device-table order. Parses the device table once for efficiency.
 sub read_all_status {
+    my ($filter_user) = @_;
     my ($content, $err) = slurp_device_table();
     return ([], $err) if $err;
     my $recs = parse_device_table($content);
+
+    my $acc;
+    if (defined $filter_user) {
+        my $dbh = db_connect();
+        $acc = $dbh ? user_site_access($dbh, $filter_user) : { unrestricted => 1 };
+        $dbh->disconnect if $dbh;
+    }
 
     my %default_repo;   # model => default: repository
     for my $r (@$recs) {
@@ -2971,6 +3343,7 @@ sub read_all_status {
     my @rows;
     for my $r (@$recs) {
         next unless $r->{kind} eq 'device';
+        next if $acc && !device_visible_to_acc($acc, $r);   # per-site filter
         my $dev = $r->{id};
         my $repo;
         for my $p (@{ $r->{opts} }) { $repo = $p->[1] if $p->[0] eq 'repository'; }
@@ -2981,7 +3354,9 @@ sub read_all_status {
         if (defined $repo && $repo ne '' && valid_id($dev)) {
             $info = read_status_file("$repo/$dev.status");
         }
-        push @rows, { id => $dev, info => $info };
+        my $site = device_site_code($r);
+        $site = '' if $site eq SITE_ALL_CODE;   # untagged shows blank, not '*'
+        push @rows, { id => $dev, info => $info, site => $site };
     }
     return (\@rows, undef);
 }
@@ -3709,7 +4084,7 @@ sub show_check_empty {
 # Tools (admin only): orphaned-backup check and delete
 # =============================================================================
 
-# True if this user may use the Tools page: any admin (built-in
+# True if this user may use the Tools: any admin (built-in
 # $PROTECTED_USER or a user with admin_function). Opens its own DB handle.
 sub user_may_use_tools {
     my ($user) = @_;
@@ -3724,8 +4099,19 @@ sub user_may_use_tools {
 # The Tools landing page: two buttons. "Check for orphaned backups" is a
 # read-only GET; "Delete orphaned backups" is a POST (destructive) with a
 # JS confirm() prompt and a CSRF token.
+my %TOOL_TITLE = (
+    orphan     => 'Orphaned Backup Cleanup',
+    empty_dir  => 'Empty Directory Cleanup',
+    restore    => 'Restore device table',
+    nobackup   => 'Devices without backups',
+    empty_bk   => 'Check devices for empty backups',
+    suffix     => 'Check devices for consistent backup suffixes',
+);
+# Render a Tools tool. With $only set (one of %TOOL_TITLE keys) it shows just
+# that one tool as its own page; otherwise it would show them all (no longer
+# used -- every Tools menu item links to a single-tool page).
 sub show_tools {
-    my ($user) = @_;
+    my ($user, $only) = @_;
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
 
     unless (user_may_use_tools($user)) {
@@ -3735,17 +4121,26 @@ sub show_tools {
         return;
     }
 
-    print page_head('Tools', $user);
-    print qq{<h1>Tools</h1>\n};
+    my $title = ($only && $TOOL_TITLE{$only}) ? $TOOL_TITLE{$only} : 'Tools';
+    print page_head($title, $user, 'full');
+    print qq{<h1>} . esc($title) . qq{</h1>\n};
     my $flash_msg = $cgi->param('msg');
     my $flash_err = $cgi->param('err');
     if (defined $flash_msg && $flash_msg ne '') { print qq{<p class="success">} . esc($flash_msg) . qq{</p>\n}; }
     if (defined $flash_err && $flash_err ne '') { print qq{<p class="error">} . esc($flash_err) . qq{</p>\n}; }
 
-    # Each tool group lives in its own titled box, so more tools can be
-    # added later as separate boxes.
-    print qq{<div class="tool-section">\n};
-    print qq{<h2 class="tool-section-title">Orphaned Configuration Cleanup</h2>\n};
+    # No tool selected: prompt the user to pick one from the menu.
+    unless ($only) {
+        print qq{<p class="muted">Select a tool from the <strong>Tools</strong> }
+            . qq{menu above.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    if ($only eq 'orphan') {
+    # Each tool group lives in its own titled box.
+    print qq{<div class="tool-section" id="orphan-cleanup">\n};
+    print qq{<h2 class="tool-section-title">Orphaned Backup Cleanup</h2>\n};
     print qq{<p class="muted">Orphaned backups are backed-up configurations }
         . qq{on disk whose device is no longer in the device table (for example, }
         . qq{a device that was decommissioned or renamed). These tools run }
@@ -3766,15 +4161,17 @@ sub show_tools {
     print csrf_field();
     print qq{<p><button type="submit" class="btn btn-danger">Delete orphaned backups</button></p>\n};
     print $cgi->end_form;
-    print qq{</div>\n};   # .tool-section (Orphaned Configuration Cleanup)
+    print qq{</div>\n};   # .tool-section (Orphaned Backup Cleanup)
+    }
 
     # --- Empty Directory Cleanup ----------------------------------------
-    print qq{<div class="tool-section">\n};
+    if (!$only || $only eq 'empty_dir') {
+    print qq{<div class="tool-section" id="empty-cleanup">\n};
     print qq{<h2 class="tool-section-title">Empty Directory Cleanup</h2>\n};
     print qq{<p class="muted">Empty directories are date }
         . qq{(<code>YYYYMM</code>/<code>YYYYMMDD</code>) or per-device directories }
         . qq{left in the repository with no files in them. A normal aged-config }
-        . qq{delete run or the orphaned-configuration cleanup should remove these }
+        . qq{delete run or the orphaned-backup cleanup should remove these }
         . qq{on their own; this tool is for the occasional directory left behind }
         . qq{by something else, such as manual file operations. These tools run }
         . qq{<code>fetchconfig.pl -e</code>.</p>\n};
@@ -3795,9 +4192,11 @@ sub show_tools {
     print qq{<p><button type="submit" class="btn btn-danger">Delete empty directories</button></p>\n};
     print $cgi->end_form;
     print qq{</div>\n};   # .tool-section (Empty Directory Cleanup)
+    }
 
     # --- Restore device table -------------------------------------------
-    print qq{<div class="tool-section">\n};
+    if (!$only || $only eq 'restore') {
+    print qq{<div class="tool-section" id="restore-table">\n};
     print qq{<h2 class="tool-section-title">Restore device table</h2>\n};
     print qq{<p class="muted">Timestamped backups of the device table, written }
         . qq{before each save from the editor or bulk edit, are kept in }
@@ -3916,11 +4315,16 @@ JS
         }
     }
     print qq{</div>\n};   # .tool-section (Restore device table)
+    }
 
-    # Both scan tools iterate the device list; read it once.
-    my ($dev_list, $dev_err) = read_device_ids();
+    # The scan tools iterate the device list; read it once (only if needed).
+    my ($dev_list, $dev_err);
+    if (!$only || $only eq 'nobackup' || $only eq 'empty_bk' || $only eq 'suffix') {
+        ($dev_list, $dev_err) = read_device_ids();
+    }
 
     # --- Devices without backups ----------------------------------------
+    if (!$only || $only eq 'nobackup') {
     render_scan_tool(
         prefix   => 'nobk',
         title    => 'Devices without backups',
@@ -3934,8 +4338,10 @@ JS
         none_msg => 'device%s without backups',
         all_ok   => 'All %d device%s have at least one backup.',
     );
+    }
 
     # --- Check devices for empty backups --------------------------------
+    if (!$only || $only eq 'empty_bk') {
     render_scan_tool(
         prefix   => 'empty',
         title    => 'Check devices for empty backups',
@@ -3950,8 +4356,10 @@ JS
         none_msg => 'device%s with empty backups',
         all_ok   => 'No devices have empty backups (checked %d device%s).',
     );
+    }
 
     # --- Check devices for consistent backup suffixes -------------------
+    if (!$only || $only eq 'suffix') {
     render_scan_tool(
         prefix   => 'suffix',
         title    => 'Check devices for consistent backup suffixes',
@@ -3968,14 +4376,21 @@ JS
         none_msg => 'device%s with a backup-suffix problem',
         all_ok   => 'All %d device%s have consistent backup suffixes.',
     );
+    }
 
-    # --- fetchconfig log launcher ---------------------------------------
-    render_log_section();
-    render_template_section();
-
+    # The log viewer, template viewer and site-assignment check are their own
+    # standalone pages (reached from the Tools menu), not shown here.
     print top_bottom_nav();
     print page_foot();
 }
+
+# Thin per-tool page handlers: each shows just its one tool.
+sub show_tool_orphan     { show_tools($_[0], 'orphan'); }
+sub show_tool_empty_dir  { show_tools($_[0], 'empty_dir'); }
+sub show_tool_restore    { show_tools($_[0], 'restore'); }
+sub show_tool_nobackup   { show_tools($_[0], 'nobackup'); }
+sub show_tool_empty_bk   { show_tools($_[0], 'empty_bk'); }
+sub show_tool_suffix     { show_tools($_[0], 'suffix'); }
 
 # Tools-page section: just a launcher for the log viewer, which lives on its
 # own page (?action=view_log). No file read here.
@@ -3996,6 +4411,16 @@ sub render_log_section {
 }
 
 # Tools-page section: launcher for the template viewer (?action=view_templates).
+sub render_site_check_section {
+    print qq{<div class="tool-section" id="site-check">\n};
+    print qq{<h2 class="tool-section-title">Check site assignment</h2>\n};
+    print qq{<p class="muted">List devices that have no <code>site=</code> assigned. }
+        . qq{Every device needs a site for the per-site user access to work.</p>\n};
+    print qq{<p><a class="btn" href="} . esc(script_url() . '?action=check_site_assignment')
+        . qq{">Check site assignment</a></p>\n};
+    print qq{</div>\n};
+}
+
 sub render_template_section {
     print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">Template viewer</h2>\n};
@@ -4028,8 +4453,6 @@ sub show_fetchconfig_log {
     }
 
     print page_head('View fetchconfig log', $user, 'full');
-    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
     print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">View fetchconfig log</h2>\n};
 
@@ -4244,6 +4667,10 @@ sub show_reports {
     if (!@$reports) {
         print qq{<p class="muted">No reports found.</p>\n};
     } else {
+        my $may_download = do {
+            my $d = db_connect(); my $m = $d ? user_may_download_full_report($d, $user) : 0;
+            $d->disconnect if $d; $m;
+        };
         print qq{<table class="list">\n}
             . qq{<tr><th>Report</th><th>Date / time</th><th>Size</th><th></th></tr>\n};
         for my $r (@$reports) {
@@ -4263,7 +4690,8 @@ sub show_reports {
             print qq{<a class="btn" href="}
                 . esc(script_url() . '?action=view_report&file=' . $fenc) . qq{">View</a>\n};
             print qq{<a class="btn" href="}
-                . esc(script_url() . '?action=download_report&file=' . $fenc) . qq{">Download</a>\n};
+                . esc(script_url() . '?action=download_report&file=' . $fenc) . qq{">Download</a>\n}
+                if $may_download;
             # Delete (POST + CSRF + confirm)
             print $cgi->start_form(-method => 'POST', -action => script_url(),
                 -data_confirm => 'Delete report ' . esc($n) . '? This cannot be undone.',
@@ -4372,8 +4800,35 @@ sub show_view_report {
     if (open(my $fh, '<', "$dir/$file")) { local $/; $html = <$fh>; close($fh); }
     my @blocks = parse_report_blocks($html);
 
+    # Per-site filtering: a limited user only sees report sections for devices
+    # they may access. The report's data-device is the device id or host, so we
+    # match against both. Unrestricted users see everything.
+    my $filtered = 0;
+    {
+        my $gdbh = db_connect();
+        my $acc = $gdbh ? user_site_access($gdbh, $user) : { unrestricted => 1 };
+        $gdbh->disconnect if $gdbh;
+        if (!$acc->{unrestricted}) {
+            my %visible;   # id and host of every device the user can see
+            my ($content, $cerr) = slurp_device_table();
+            if (!$cerr) {
+                for my $r (@{ parse_device_table($content) }) {
+                    next unless $r->{kind} eq 'device';
+                    next unless device_visible_to_acc($acc, $r);
+                    $visible{ $r->{id} } = 1 if defined $r->{id};
+                    $visible{ $r->{host} } = 1 if defined $r->{host};
+                }
+            }
+            my @keep = grep { $visible{ $_->{device} } } @blocks;
+            $filtered = (@keep != @blocks);
+            @blocks = @keep;
+        }
+    }
+
     unless (@blocks) {
-        print qq{<p class="muted">This report contains no device sections / diffs.</p>\n};
+        print $filtered
+            ? qq{<p class="muted">This report contains no device sections for your sites.</p>\n}
+            : qq{<p class="muted">This report contains no device sections / diffs.</p>\n};
         print page_foot();
         return;
     }
@@ -4444,6 +4899,19 @@ JS
 # the login, as an attachment so the untrusted HTML never renders in our origin.
 sub do_download_report {
     my ($user) = @_;
+    # The raw file contains every device; a site-limited user may download it
+    # only with the "download full report" right.
+    my $gdbh = db_connect();
+    my $may  = $gdbh ? user_may_download_full_report($gdbh, $user) : 0;
+    $gdbh->disconnect if $gdbh;
+    unless ($may) {
+        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+        print page_head('Not allowed', $user);
+        print qq{<p class="error">You are not allowed to download the full report. }
+            . qq{Use <strong>View</strong> to see the sections for your sites.</p>\n};
+        print page_foot();
+        return;
+    }
     my $dir  = report_directory();
     my $file = $cgi->param('file');
     $file = '' unless defined $file;
@@ -4560,8 +5028,6 @@ sub show_view_templates {
     }
     my $t0 = Time::HiRes::time();
     print page_head('Templates', $user, 'full');
-    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
     print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">Templates</h2>\n};
 
@@ -5218,7 +5684,8 @@ sub _all_ok_js {
 
 
 # Compare two device-table configs (each either "current" -- the live table
-# -- or a backup, selected by checkbox on the Tools page). Whitespace outside
+# -- or a backup, selected by checkbox in the Restore device table tool).
+# Whitespace outside
 # quotes is normalized before diffing, so tab/space-only differences don't
 # show. Rendered side-by-side (red/green), admin-only, passwords masked.
 sub show_compare_backups {
@@ -5233,7 +5700,7 @@ sub show_compare_backups {
 
     print page_head('Compare configurations', $user, 'wide');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
+        . esc(script_url() . '?action=tool_restore') . qq{">&larr; Restore device table</a></p>\n};
     print qq{<h1>Compare configurations</h1>\n};
 
     # Exactly two selections; each is "current" or a valid backup name.
@@ -5417,7 +5884,7 @@ sub show_view_backup {
     my $path = resolve_backup_path($name);
     print page_head('View backup', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
+        . esc(script_url() . '?action=tool_restore') . qq{">&larr; Restore device table</a></p>\n};
     print qq{<h1>Backup: } . esc($name) . qq{</h1>\n};
     unless ($path) {
         print qq{<p class="error">No such backup.</p>\n};
@@ -5428,7 +5895,7 @@ sub show_view_backup {
     my $content = '';
     if (open(my $fh, '<', $path)) { local $/; $content = <$fh>; close($fh); }
     # Admin-only tool. Passwords are masked by default; the "Mask passwords"
-    # checkbox on the Tools page (unchecked) passes unmask=1 to show them in
+    # checkbox in the Restore device table tool (unchecked) passes unmask=1 to show them in
     # plain text. esc() masks + HTML-escapes; CGI::escapeHTML only escapes.
     my $unmask = ($cgi->param('unmask') // '') eq '1';
     my $body = $unmask ? CGI::escapeHTML($content) : esc($content);
@@ -5560,7 +6027,7 @@ sub show_orphan_check {
 
     print page_head('Check for orphaned backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
+        . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned Backup Cleanup</a></p>\n};
     print qq{<h1>Check for orphaned backups</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -o</code>. Nothing }
         . qq{is deleted.</p>\n};
@@ -5579,10 +6046,11 @@ sub show_orphan_check {
         print copy_button_script();
     } elsif (defined $status && $status == 1) {
         # Exit 1 from -o means "orphaned backups were found" -- expected, not
-        # an error. Use "Delete orphaned backups" on the Tools page to
+        # an error. Use "Delete orphaned backups" in the Orphaned Backup Cleanup tool to
         # remove them.
         print qq{<p class="success">Orphaned backups were found (listed below). }
-            . qq{Use <strong>Delete orphaned backups</strong> on the Tools page to remove them.</p>\n};
+            . qq{Use <strong>Delete orphaned backups</strong> in the }
+            . qq{<strong>Orphaned Backup Cleanup</strong> tool to remove them.</p>\n};
         print qq{<div class="config-wrap">\n};
         print copy_button_html();
         print qq{<pre class="config" id="config-content">} . esc($output) . qq{</pre>\n};
@@ -5598,8 +6066,6 @@ sub show_orphan_check {
         print copy_button_script();
     }
 
-    print qq{<p><a class="btn" href="} . esc(script_url() . '?action=tools')
-        . qq{">Return to Tools</a></p>\n};
     print page_foot();
 }
 
@@ -5617,7 +6083,7 @@ sub do_orphan_delete {
 
     print page_head('Delete orphaned backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
+        . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned Backup Cleanup</a></p>\n};
     print qq{<h1>Delete orphaned backups</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -o -D</code>.</p>\n};
 
@@ -5626,8 +6092,20 @@ sub do_orphan_delete {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
     } else {
         if (defined $status && $status == 0) {
-            print qq{<p class="success">Done. Nothing needed deleting, or every }
-                . qq{orphaned backup found was deleted successfully.</p>\n};
+            # Parse the count from fetchconfig's summary, e.g.
+            #   "removed 3 of 3 orphaned ..." (falls back to a generic message
+            #   if the wording differs).
+            my $removed = ($output =~ /removed\s+(\d+)\s+of\s+\d+\s+orphan/i)
+                        ? $1
+                        : (($output =~ /\bdeleted\b/i) ? undef : 0);
+            if (defined $removed && $removed == 0) {
+                print qq{<p class="success">No orphaned backups to delete.</p>\n};
+            } elsif (defined $removed) {
+                print qq{<p class="success">Deleted $removed orphaned backup}
+                    . ($removed == 1 ? '' : 's') . qq{.</p>\n};
+            } else {
+                print qq{<p class="success">Orphaned backup cleanup completed.</p>\n};
+            }
         } else {
             # With -o -D, exit 1 means at least one deletion failed.
             print qq{<p class="error">One or more deletions failed (exit }
@@ -5642,8 +6120,6 @@ sub do_orphan_delete {
         print copy_button_script();
     }
 
-    print qq{<p><a class="btn" href="} . esc(script_url() . '?action=tools')
-        . qq{">Return to Tools</a></p>\n};
     print page_foot();
 }
 
@@ -5660,7 +6136,7 @@ sub show_empty_check {
 
     print page_head('Check for empty directories', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
+        . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty Directory Cleanup</a></p>\n};
     print qq{<h1>Check for empty directories</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -e</code>. Nothing }
         . qq{is deleted.</p>\n};
@@ -5679,10 +6155,11 @@ sub show_empty_check {
         print copy_button_script();
     } elsif (defined $status && $status == 1) {
         # Exit 1 from -e means "empty directories were found" -- expected, not
-        # an error. Use "Delete empty directories" on the Tools page to remove
+        # an error. Use "Delete empty directories" in the Empty Directory Cleanup tool to remove
         # them.
         print qq{<p class="success">Empty directories were found (listed below). }
-            . qq{Use <strong>Delete empty directories</strong> on the Tools page to remove them.</p>\n};
+            . qq{Use <strong>Delete empty directories</strong> in the }
+            . qq{<strong>Empty Directory Cleanup</strong> tool to remove them.</p>\n};
         print qq{<div class="config-wrap">\n};
         print copy_button_html();
         print qq{<pre class="config" id="config-content">} . esc($output) . qq{</pre>\n};
@@ -5698,8 +6175,6 @@ sub show_empty_check {
         print copy_button_script();
     }
 
-    print qq{<p><a class="btn" href="} . esc(script_url() . '?action=tools')
-        . qq{">Return to Tools</a></p>\n};
     print page_foot();
 }
 
@@ -5716,7 +6191,7 @@ sub do_empty_delete {
 
     print page_head('Delete empty directories', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tools') . qq{">&larr; Tools</a></p>\n};
+        . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty Directory Cleanup</a></p>\n};
     print qq{<h1>Delete empty directories</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -e -D</code>.</p>\n};
 
@@ -5725,8 +6200,18 @@ sub do_empty_delete {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
     } else {
         if (defined $status && $status == 0) {
-            print qq{<p class="success">Done. Nothing needed deleting, or every }
-                . qq{empty directory found was removed successfully.</p>\n};
+            # Parse the count from fetchconfig's summary line, e.g.
+            #   "removed 1 of 1 empty directory"
+            my $removed = ($output =~ /removed\s+(\d+)\s+of\s+\d+\s+empty director/i)
+                        ? $1 : undef;
+            if (defined $removed && $removed == 0) {
+                print qq{<p class="success">No empty directories to delete.</p>\n};
+            } elsif (defined $removed) {
+                print qq{<p class="success">Deleted $removed empty director}
+                    . ($removed == 1 ? 'y' : 'ies') . qq{.</p>\n};
+            } else {
+                print qq{<p class="success">Empty directory cleanup completed.</p>\n};
+            }
         } else {
             print qq{<p class="error">One or more removals failed (exit }
                 . esc(defined $status ? $status : '?') . qq{) -- see the log below.</p>\n};
@@ -5740,26 +6225,362 @@ sub do_empty_delete {
         print copy_button_script();
     }
 
-    print qq{<p><a class="btn" href="} . esc(script_url() . '?action=tools')
-        . qq{">Return to Tools</a></p>\n};
     print page_foot();
 }
 sub redirect_to_user_page {
     my (%opts) = @_;
-    my $url = script_url() . '?action=user';
+    my $act = $opts{action} || 'user';   # which User sub-page to return to
+    my $url = script_url() . '?action=' . $act;
     $url .= '&msg=' . CGI::escape($opts{msg}) if defined $opts{msg} && $opts{msg} ne '';
     $url .= '&err=' . CGI::escape($opts{err}) if defined $opts{err} && $opts{err} ne '';
     print $cgi->header(-location => $url, -status => '302 Found');
 }
 
-sub show_user_page {
+# =============================================================================
+# Site management (admin only): CRUD the site codes. id 0 ("All sites") is the
+# fixed sentinel and cannot be edited or deleted. A code can be deleted only if
+# no user is assigned to it; editing a code also rewrites site= in the device
+# table so no device is orphaned (atomic).
+# =============================================================================
+# The Sites management page (admin only): list site codes with edit/delete and
+# an "Add a site" form, in the green section box. Has a client-side filter so a
+# large list (hundreds of sites) stays manageable.
+sub show_sites_page {
     my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
+    unless ($is_admin) {
+        $dbh->disconnect if $dbh;
+        print page_head('Error', $user);
+        print qq{<p class="error">Only an admin can manage sites.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Sites', $user, 'full');
+    print qq{<h1>Sites</h1>\n};
+    my $msg = $cgi->param('msg'); my $err = $cgi->param('err');
+    print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
+    print qq{<p class="error">}   . esc($err) . qq{</p>\n} if defined $err && $err ne '';
+
+    print qq{<div class="user-section">\n};
+    print qq{<h2>Site codes</h2>\n};
+    print qq{<h3>Add a site</h3>\n};
+    print $cgi->start_form(-method=>'POST', -action=>script_url(), -class=>'inline-form');
+    print qq{<input type="hidden" name="action" value="add_site">};
+    print csrf_field();
+    print qq{<label>Code <input type="text" name="code" size="10" required></label> };
+    print qq{<label>Description <input type="text" name="description" size="24"></label> };
+    print qq{<button type="submit" class="btn btn-green">Add site</button>};
+    print $cgi->end_form;
+    print qq{<p class="muted">A device's <code>site=</code> tag limits which users }
+        . qq{can see it; assign sites to a user with <strong>Edit sites</strong> on }
+        . qq{the User page. <strong>All sites</strong> (the reserved entry) means }
+        . qq{unrestricted.</p>\n};
+    print qq{<input type="text" id="site-mgmt-filter" class="filter-box" }
+        . qq{placeholder="Filter sites&hellip;" autocomplete="off">\n};
+    my $sites = db_all_sites($dbh);
+    print qq{<table class="list site-table" id="site-mgmt-table">}
+        . qq{<tr><th>Code</th><th>Description</th><th>Status</th><th></th></tr>\n};
+    for my $s (@$sites) {
+        my $is_sentinel = ($s->{id} == 0);
+        if ($is_sentinel) {
+            print qq{<tr class="site-row"><td><span class="site-any">any site</span></td>}
+                . qq{<td>} . esc($s->{description}) . qq{</td>}
+                . qq{<td class="muted">reserved</td><td></td></tr>\n};
+            next;
+        }
+        my $in_use   = db_site_code_in_use_by_device($s->{code});
+        my $assigned = db_site_assigned_to_user($dbh, $s->{id});
+        # One edit form per row: the Code and Description cells hold the inputs,
+        # Save sits in the actions cell. Delete is a separate small form.
+        my $fid = "site-edit-$s->{id}";
+        print qq{<tr class="site-row">};
+        print $cgi->start_form(-method=>'POST', -action=>script_url(), -class=>'contents-form', -id=>$fid);
+        print qq{<input type="hidden" name="action" value="edit_site">};
+        print qq{<input type="hidden" name="id" value="$s->{id}">};
+        print csrf_field();
+        print qq{<td><input type="text" name="code" value="} . esc($s->{code}) . qq{" class="site-code-in"></td>};
+        print qq{<td><input type="text" name="description" value="} . esc($s->{description}) . qq{" class="site-desc-in"></td>};
+        print $cgi->end_form;
+        # Status cell: whether the code is used by devices / assigned to users.
+        my @status;
+        push @status, 'used by devices' if $in_use;
+        push @status, 'assigned to a user' if $assigned;
+        print qq{<td class="muted">} . (@status ? esc(join(', ', @status)) : '&mdash;') . qq{</td>};
+        # Actions cell: Save (submits the row form) + Delete (own form).
+        # A site can only be deleted when it is neither assigned to a user nor
+        # used by a device (otherwise those references would be orphaned).
+        print qq{<td><div class="row-actions">};
+        print qq{<button type="submit" form="$fid" class="btn">Save</button>};
+        if ($assigned || $in_use) {
+            my $why = $assigned && $in_use ? 'assigned to a user and used by devices'
+                    : $assigned            ? 'assigned to one or more users'
+                    :                        'used by one or more devices';
+            print qq{<span class="muted" title="} . esc($why) . qq{">(in use)</span>};
+        } else {
+            print $cgi->start_form(-method=>'POST', -action=>script_url(), -class=>'inline-form',
+                -data_confirm=>'Delete site '.esc($s->{code}).'?', -data_confirm_danger=>'y');
+            print qq{<input type="hidden" name="action" value="delete_site">};
+            print qq{<input type="hidden" name="id" value="$s->{id}">};
+            print csrf_field();
+            print qq{<button type="submit" class="btn btn-danger">Delete</button>};
+            print $cgi->end_form;
+        }
+        print qq{</div></td></tr>\n};
+    }
+    print qq{</table>\n};
+    print qq{</div>\n};   # .user-section
+    # Filter: hide rows that don't match (reserved row always visible).
+    print qq{<script>
+(function(){var f=document.getElementById('site-mgmt-filter');if(!f)return;
+ f.addEventListener('input',function(){var q=f.value.toLowerCase();
+  var rows=document.querySelectorAll('#site-mgmt-table .site-row');
+  for(var i=0;i<rows.length;i++){var t=rows[i].textContent.toLowerCase();
+   rows[i].style.display=(t.indexOf(q)>=0)?'':'none';}});})();
+</script>\n};
+    $dbh->disconnect if $dbh;
+    print page_foot();
+}
+
+sub _sites_redirect { my (%o)=@_; my $u=script_url().'?action=sites';
+    $u.='&msg='.CGI::escape($o{msg}) if $o{msg}; $u.='&err='.CGI::escape($o{err}) if $o{err};
+    print $cgi->header(-location=>$u, -status=>'302 Found'); }
+
+sub do_add_site {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) { $dbh->disconnect if $dbh; _sites_redirect(err=>'Not allowed.'); return; }
+    my $code = $cgi->param('code') // ''; $code =~ s/^\s+|\s+$//g;
+    my $desc = $cgi->param('description') // '';
+    if ($code eq '' || $code =~ /\s/) { $dbh->disconnect; _sites_redirect(err=>'Code must be a single non-empty token.'); return; }
+    if ($code eq SITE_ALL_CODE) { $dbh->disconnect; _sites_redirect(err=>"Code '*' is reserved."); return; }
+    my $dup = $dbh->selectrow_array('SELECT 1 FROM sites WHERE code = ?', undef, $code);
+    if ($dup) { $dbh->disconnect; _sites_redirect(err=>"Site code '$code' already exists."); return; }
+    my ($ok, $dberr) = db_add_site($dbh, $code, $desc);
+    $dbh->disconnect;
+    if ($ok) { _sites_redirect(msg=>"Added site '$code'."); }
+    else     { _sites_redirect(err=>"Could not add site '$code': " . ($dberr // 'database error') . '.'); }
+}
+
+sub do_edit_site {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) { $dbh->disconnect if $dbh; _sites_redirect(err=>'Not allowed.'); return; }
+    my $id = $cgi->param('id'); my $code = $cgi->param('code') // ''; my $desc = $cgi->param('description') // '';
+    $code =~ s/^\s+|\s+$//g;
+    unless (defined $id && $id =~ /^\d+$/ && $id != 0) { $dbh->disconnect; _sites_redirect(err=>'Invalid site.'); return; }
+    my $site = db_site_by_id($dbh, $id);
+    unless ($site) { $dbh->disconnect; _sites_redirect(err=>'Site not found.'); return; }
+    if ($code eq '' || $code =~ /\s/ || $code eq SITE_ALL_CODE) { $dbh->disconnect; _sites_redirect(err=>'Invalid code.'); return; }
+    my $dup = $dbh->selectrow_array('SELECT 1 FROM sites WHERE code = ? AND id <> ?', undef, $code, $id);
+    if ($dup) { $dbh->disconnect; _sites_redirect(err=>"Site code '$code' already exists."); return; }
+    my $oldcode = $site->{code};
+    # Atomic: update the sites row AND rewrite site=<old> -> <new> in the device
+    # table (so no device is orphaned), under the mtime guard.
+    my ($uok, $uerr) = db_update_site($dbh, $id, $code, $desc);
+    unless ($uok) { $dbh->disconnect; _sites_redirect(err=>"Could not update site: " . ($uerr // 'database error') . '.'); return; }
+    if ($oldcode ne $code) {
+        my ($content, $cerr) = slurp_device_table();
+        if (!$cerr) {
+            my $recs = parse_device_table($content);
+            my $changed = 0;
+            for my $r (@$recs) {
+                next unless $r->{kind} eq 'device';
+                for my $pair (@{ $r->{opts} || [] }) {
+                    if (defined $pair->[0] && $pair->[0] eq 'site' && defined $pair->[1]
+                        && $pair->[1] eq $oldcode) { $pair->[1] = $code; $changed = 1; }
+                }
+            }
+            if ($changed) {
+                my $new = serialize_records($recs);
+                backup_and_write_table($content, $new);
+            }
+        }
+    }
+    $dbh->disconnect;
+    _sites_redirect(msg=>"Updated site '$code'.");
+}
+
+sub do_delete_site {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) { $dbh->disconnect if $dbh; _sites_redirect(err=>'Not allowed.'); return; }
+    my $id = $cgi->param('id');
+    unless (defined $id && $id =~ /^\d+$/ && $id != 0) { $dbh->disconnect; _sites_redirect(err=>'Invalid site.'); return; }
+    my $site = db_site_by_id($dbh, $id);
+    unless ($site) { $dbh->disconnect; _sites_redirect(err=>'Site not found.'); return; }
+    if (db_site_assigned_to_user($dbh, $id)) {
+        $dbh->disconnect; _sites_redirect(err=>"Site '$site->{code}' is assigned to a user and cannot be deleted."); return;
+    }
+    if (db_site_code_in_use_by_device($site->{code})) {
+        $dbh->disconnect; _sites_redirect(err=>"Site '$site->{code}' is used by one or more devices and cannot be deleted."); return;
+    }
+    my ($dok, $derr) = db_delete_site($dbh, $id);
+    $dbh->disconnect;
+    if ($dok) { _sites_redirect(msg=>"Deleted site '$site->{code}'."); }
+    else      { _sites_redirect(err=>"Could not delete site '$site->{code}': " . ($derr // 'database error') . '.'); }
+}
+
+# Per-user site assignment (admin only): a checkbox list of all site codes.
+sub show_user_sites_form {
+    my ($admin) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $admin)) {
+        $dbh->disconnect if $dbh;
+        print page_head('Error', $admin);
+        print qq{<p class="error">Only an admin can assign sites.</p>\n};
+        print page_foot(); return;
+    }
+    my $target = $cgi->param('username') // '';
+    my $trow = $target ne '' ? db_get_user($dbh, $target) : undef;
+    unless ($trow) { $dbh->disconnect; print page_head('Error',$admin);
+        print qq{<p class="error">User not found.</p>\n}; print page_foot(); return; }
+
+    print page_head('Assign sites', $admin, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=user_list') . qq{">&larr; Users</a></p>\n};
+    print qq{<h1>Sites for } . esc($target) . qq{</h1>\n};
+    print qq{<div class="user-section"><h2>Assigned sites</h2>\n};
+
+    if ($target eq $PROTECTED_USER) {
+        print qq{<p class="muted">The built-in <strong>admin</strong> account always has }
+            . qq{<strong>All sites</strong> and cannot be limited.</p>\n};
+        print qq{</div>\n}; $dbh->disconnect; print page_foot(); return;
+    }
+
+    my %have = map { $_ => 1 } @{ db_user_site_ids($dbh, $target) };
+    my $sites = db_all_sites($dbh);
+    print $cgi->start_form(-method=>'POST', -action=>script_url());
+    print qq{<input type="hidden" name="action" value="set_user_sites">};
+    print qq{<input type="hidden" name="username" value="} . esc($target) . qq{">};
+    print csrf_field();
+    print qq{<p class="muted">Tick <strong>All sites</strong> for an unrestricted user, }
+        . qq{or pick individual sites. Type to filter.</p>\n};
+    print qq{<input type="text" id="site-filter" class="filter-box" placeholder="Filter sites&hellip;" autocomplete="off">\n};
+    print qq{<div class="site-checklist">\n};
+    for my $s (@$sites) {
+        my $label = ($s->{id} == 0) ? 'All sites (unrestricted)'
+                  : $s->{code} . ($s->{description} ne '' ? " -- $s->{description}" : '');
+        my $chk = $have{ $s->{id} } ? ' checked' : '';
+        # The id-0 ("All sites") box is mutually exclusive with the specific
+        # ones; the JS below enforces it. data-site-all marks it; the specific
+        # boxes get data-site-specific.
+        my $extra = ($s->{id} == 0) ? ' data-site-all="1"' : ' data-site-specific="1"';
+        print qq{<label class="site-opt"><input type="checkbox" name="site_id" value="$s->{id}"$chk$extra> }
+            . esc($label) . qq{</label>\n};
+    }
+    print qq{</div>\n};
+    # download full report toggle
+    my $dfr = $trow->{download_full_report} ? ' checked' : '';
+    print qq{<p><label><input type="checkbox" name="download_full_report" value="1"$dfr> }
+        . qq{May download the full (unfiltered) report</label></p>\n};
+    print qq{<p><button type="submit" class="btn btn-green">Save</button> }
+        . qq{<a class="btn" href="} . esc(script_url().'?action=user_list') . qq{">Cancel</a></p>\n};
+    print $cgi->end_form;
+    print qq{</div>\n};
+    print qq{<script>
+(function(){
+ var f=document.getElementById('site-filter');
+ if(f){f.addEventListener('input',function(){var q=f.value.toLowerCase();
+  var opts=document.querySelectorAll('.site-opt');
+  for(var i=0;i<opts.length;i++){var t=opts[i].textContent.toLowerCase();
+   opts[i].style.display=(t.indexOf(q)>=0)?'':'none';}});}
+ // "All sites" (unrestricted) and specific sites are mutually exclusive, but
+ // the specific boxes are never disabled (so they stay usable):
+ //  - ticking a specific site silently unticks "All sites";
+ //  - ticking "All sites" while specific sites are selected asks for
+ //    confirmation before clearing them (so a large selection is not lost by
+ //    a misclick); cancelling re-unticks "All sites" and keeps the selection.
+ var allBox=document.querySelector('[data-site-all]');
+ var specific=document.querySelectorAll('[data-site-specific]');
+ function countChecked(){var n=0;for(var i=0;i<specific.length;i++){if(specific[i].checked)n++;}return n;}
+ function clearSpecific(){for(var i=0;i<specific.length;i++){specific[i].checked=false;}}
+ if(allBox){
+   allBox.addEventListener('change',function(){
+     if(allBox.checked){
+       var n=countChecked();
+       if(n>0){
+         // Revert immediately so the UI is never in a half-state, then ask via
+         // the styled dialog; apply only on confirm (cancel => keep selection).
+         allBox.checked=false;
+         var msg='Switch to "All sites" (unrestricted)? This will clear your '
+             +n+' selected site'+(n===1?'':'s')+'.';
+         var apply=function(){ allBox.checked=true; clearSpecific(); };
+         if(window.fcConfirm) window.fcConfirm(msg, apply, { danger:true });
+         else if(window.confirm(msg)) apply();
+       }
+     }
+   });
+ }
+ for(var i=0;i<specific.length;i++){
+   specific[i].addEventListener('change',function(){
+     if(this.checked&&allBox){allBox.checked=false;}
+   });
+ }
+})();
+</script>\n};
+    $dbh->disconnect;
+    print page_foot();
+}
+
+sub do_set_user_sites {
+    my ($admin) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $admin)) { $dbh->disconnect if $dbh;
+        print $cgi->header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
+    my $target = $cgi->param('username') // '';
+    my $trow = $target ne '' ? db_get_user($dbh, $target) : undef;
+    unless ($trow) { $dbh->disconnect; redirect_to_user_page(action=>"user_list", err=>'User not found.'); return; }
+    if ($target eq $PROTECTED_USER) { $dbh->disconnect; redirect_to_user_page(action=>"user_list", err=>'admin always has All sites.'); return; }
+    my @ids = grep { /^\d+$/ } $cgi->multi_param('site_id');
+    # "All sites" (id 0) is mutually exclusive with specific sites: if it is
+    # ticked, store only site 0 (unrestricted), ignoring any specific picks.
+    @ids = (0) if grep { $_ == 0 } @ids;
+    db_set_user_sites($dbh, $target, \@ids);
+    my $dfr = $cgi->param('download_full_report') ? 1 : 0;
+    $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $dfr, $target);
+    $dbh->disconnect;
+    redirect_to_user_page(action=>"user_list", msg=>"Updated sites for $target.");
+}
+
+sub do_set_download_full_report {
+    my ($admin) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $admin)) { $dbh->disconnect if $dbh;
+        print $cgi->header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
+    my $target = $cgi->param('username') // '';
+    my $val = $cgi->param('value') ? 1 : 0;
+    $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $val, $target)
+        if $target ne '';
+    $dbh->disconnect;
+    redirect_to_user_page(action=>"user_list", msg=>"Updated report-download right for $target.");
+}
+
+sub show_user_page {
+    my ($user, $only) = @_;
     my $msg = $cgi->param('msg');
     my $err = $cgi->param('err');
 
+    # Figure out admin status first (it decides routing and what is shown).
+    my $admin_dbh = db_connect();
+    my $is_admin = $admin_dbh ? user_is_admin($admin_dbh, $user) : 0;
+
+    # Default landing (?action=user): admins -> "pick from the menu" message;
+    # a non-admin has only the password page, so they go straight there.
+    my $landing = !(defined $only && $only ne '');
+    $only = 'password' if $landing && !$is_admin;
+    # A non-admin can only reach the password page.
+    $only = 'password' unless $is_admin || (defined $only && $only eq 'password');
+
+    my %utitle = (users => 'Users', add => 'Add user',
+                  password => 'Change your password');
+    my $title = ($landing && $is_admin) ? 'User' : ($utitle{$only} || 'User');
+
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('User', $user);
-    print qq{<h1>User</h1>\n};
+    print page_head($title, $user, 'full');
+    print qq{<h1>} . esc($title) . qq{</h1>\n};
 
     if (defined $msg && $msg ne '') {
         print qq{<p class="success">} . esc($msg) . qq{</p>\n};
@@ -5768,6 +6589,16 @@ sub show_user_page {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
     }
 
+    # Admin hitting ?action=user with nothing selected: prompt to use the menu.
+    if ($landing && $is_admin) {
+        print qq{<p class="muted">Select a function from the <strong>User</strong> }
+            . qq{menu above.</p>\n};
+        $admin_dbh->disconnect if $admin_dbh;
+        print page_foot();
+        return;
+    }
+
+    if ($only eq 'password') {
     print qq{<div class="user-section">\n};
     print qq{<h2>Change your password</h2>\n};
     print qq{<div class="form-narrow">\n};
@@ -5787,13 +6618,12 @@ sub show_user_page {
     print $cgi->end_form;
     print qq{</div>\n};
     print qq{</div>\n};   # .user-section (Change your password)
+    $admin_dbh->disconnect if $admin_dbh;
+    print page_foot();
+    return;
+    }
 
-    # Add/delete/manage other users is restricted to admins (built-in
-    # admin or any admin_function user); everyone else only sees their own
-    # "Change your password" form above.
-    my $admin_dbh = db_connect();
-    my $is_admin = $admin_dbh ? user_is_admin($admin_dbh, $user) : 0;
-    if ($is_admin) {
+    if ($only eq 'users' && $is_admin) {
         print qq{<div class="user-section">\n};
         print qq{<h2>Users</h2>\n};
         if (!$admin_dbh) {
@@ -5805,7 +6635,9 @@ sub show_user_page {
             } else {
                 print qq{<table class="list">\n}
                     . qq{<tr><th>Username</th><th>Admin functions</th>}
-                    . qq{<th>Can edit device table</th><th></th></tr>\n};
+                    . qq{<th>Edit device</th><th>Full Report</th><th>Sites</th><th></th></tr>\n};
+                # Preload all site codes by id for the display.
+                my %site_code; $site_code{$_->{id}} = $_->{code} for @{ db_all_sites($admin_dbh) };
                 for my $row (@$users) {
                     my $u = $row->{username};
                     print qq{<tr><td>} . esc($u) . qq{</td>};
@@ -5834,6 +6666,46 @@ sub show_user_page {
                     }
                     print qq{</td>};
 
+                    # Full-report download right. An unrestricted user always may
+                    # (the filtered view equals the full report), so it is shown
+                    # as "always"; a site-limited user gets a grant/revoke toggle.
+                    print qq{<td>};
+                    my @u_ids = ($u eq $PROTECTED_USER) ? (0) : @{ db_user_site_ids($admin_dbh, $u) };
+                    my $u_unrestricted = ($u eq $PROTECTED_USER || $row->{admin_function}
+                                          || grep { $_ == 0 } @u_ids) ? 1 : 0;
+                    if ($u_unrestricted) {
+                        print qq{<span class="muted">always</span>};
+                    } else {
+                        print _right_toggle_form('set_download_full_report', $u,
+                            $row->{download_full_report} ? 1 : 0);
+                    }
+                    print qq{</td>};
+
+                    # Sites column: "All sites" if unrestricted, else the first
+                    # 10 codes comma-separated with a tooltip listing all.
+                    print qq{<td class="user-sites-cell">};
+                    if ($u eq $PROTECTED_USER || $row->{admin_function}) {
+                        print qq{<span class="muted">All sites</span>};
+                    } else {
+                        # Edit sites button first, then the assigned-sites text.
+                        print qq{<a class="btn btn-small" href="}
+                            . esc(script_url() . '?action=user_sites_form&username=' . CGI::escape($u))
+                            . qq{">Edit sites</a> };
+                        my $ids = db_user_site_ids($admin_dbh, $u);
+                        if (grep { $_ == 0 } @$ids) {
+                            print qq{<span class="muted">All sites</span>};
+                        } elsif (!@$ids) {
+                            print qq{<span class="site-any">none</span>};
+                        } else {
+                            my @codes = sort map { $site_code{$_} // "#$_" } @$ids;
+                            my @first = @codes[0 .. ($#codes < 9 ? $#codes : 9)];
+                            my $shown = join(', ', map { esc($_) } @first);
+                            $shown .= ', &hellip;' if @codes > 10;
+                            print qq{<span title="} . esc(join(', ', @codes)) . qq{">$shown</span>};
+                        }
+                    }
+                    print qq{</td>};
+
                     # Change-password / delete actions.
                     print qq{<td>};
                     if ($u eq $PROTECTED_USER) {
@@ -5858,7 +6730,9 @@ sub show_user_page {
             }
         }
         print qq{</div>\n};   # .user-section (Users)
+    }
 
+    if ($only eq 'add' && $is_admin) {
         print qq{<div class="user-section">\n};
         print qq{<h2>Add user</h2>\n};
         print qq{<div class="form-narrow">\n};
@@ -5888,22 +6762,30 @@ sub show_user_page {
     print page_foot();
 }
 
+# Thin per-page handlers for the split User menu.
+sub show_user_add             { show_user_page($_[0], 'add'); }
+sub show_change_password_form { show_user_page($_[0], 'password'); }
+
 # A small grant/revoke toggle form for a right (edit_device_table or
 # admin_function): shows the current state as a tag and a button that
 # flips it. $action is the handler action name.
 sub _right_toggle_form {
     my ($action, $username, $has) = @_;
     my $new = $has ? 0 : 1;
-    my $field = ($action eq 'set_admin_right') ? 'admin' : 'edit';
+    my $field = ($action eq 'set_admin_right')          ? 'admin'
+              : ($action eq 'set_download_full_report') ? 'value'
+              :                                           'edit';
     my $h = $cgi->start_form(-method => 'POST', -action => script_url());
     $h .= qq{<input type="hidden" name="action" value="} . esc($action) . qq{">\n};
     $h .= qq{<input type="hidden" name="username" value="} . esc($username) . qq{">\n};
     $h .= qq{<input type="hidden" name="$field" value="$new">\n};
     $h .= csrf_field();
-    $h .= $has ? qq{<span class="tag-on">yes</span> }
-               : qq{<span class="tag-off">no</span> };
+    # Button first, then the current-state tag (per the table layout).
     $h .= qq{<button type="submit" class="btn btn-small">}
-        . ($has ? 'Revoke' : 'Grant') . qq{</button>\n};
+        . ($has ? 'Revoke' : 'Grant') . qq{</button> };
+    $h .= $has ? qq{<span class="tag-on">yes</span>}
+               : qq{<span class="tag-off">no</span>};
+    $h .= qq{\n};
     $h .= $cgi->end_form;
     return $h;
 }
@@ -5919,30 +6801,30 @@ sub do_change_password {
 
     my $dbh = db_connect();
     if (!$dbh) {
-        redirect_to_user_page(err => 'Cannot reach the user database.');
+        redirect_to_user_page(action=>"change_password_form", err => 'Cannot reach the user database.');
         return;
     }
     my $u = db_get_user($dbh, $user);
     unless ($u && verify_password($current, $u->{pass_hash})) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Current password is incorrect.');
+        redirect_to_user_page(action=>"change_password_form", err => 'Current password is incorrect.');
         return;
     }
     if (length($new) < $MIN_PASSWORD_LENGTH) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "New password must be at least $MIN_PASSWORD_LENGTH characters.");
+        redirect_to_user_page(action=>"change_password_form", err => "New password must be at least $MIN_PASSWORD_LENGTH characters.");
         return;
     }
     if ($new ne $confirm) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'New password and confirmation do not match.');
+        redirect_to_user_page(action=>"change_password_form", err => 'New password and confirmation do not match.');
         return;
     }
 
     my ($ok, $err) = db_set_password($dbh, $user, apr1_hash($new));
     $dbh->disconnect;
     if (!$ok) {
-        redirect_to_user_page(err => "Could not update password: " . ($err // 'unknown error'));
+        redirect_to_user_page(action=>"change_password_form", err => "Could not update password: " . ($err // 'unknown error'));
         return;
     }
 
@@ -5950,7 +6832,7 @@ sub do_change_password {
     # clear the "change it" warning on this session.
     clear_pw_warning_if_changed($new);
 
-    redirect_to_user_page(msg => 'Password changed.');
+    redirect_to_user_page(action=>"change_password_form", msg => 'Password changed.');
 }
 
 # Small form for $PROTECTED_USER to set a new password for ANOTHER user
@@ -5965,34 +6847,34 @@ sub show_reset_password_form {
 
     my $dbh = db_connect();
     if (!$dbh) {
-        redirect_to_user_page(err => 'Cannot reach the user database.');
+        redirect_to_user_page(action=>"user_list", err => 'Cannot reach the user database.');
         return;
     }
     unless (user_is_admin($dbh, $user)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "Only an admin can change other users' passwords.");
+        redirect_to_user_page(action=>"user_list", err => "Only an admin can change other users' passwords.");
         return;
     }
     unless (valid_id($target)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Invalid username.');
+        redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
     }
     if ($target eq $PROTECTED_USER) {
         $dbh->disconnect;
-        redirect_to_user_page(err => qq{Use "Change your password" above to change the '$PROTECTED_USER' account's own password.});
+        redirect_to_user_page(action=>"user_list", err => qq{Use "Change your password" above to change the '$PROTECTED_USER' account's own password.});
         return;
     }
     my $exists = db_user_exists($dbh, $target);
     $dbh->disconnect;
     unless ($exists) {
-        redirect_to_user_page(err => "User '$target' not found.");
+        redirect_to_user_page(action=>"user_list", err => "User '$target' not found.");
         return;
     }
 
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
     print page_head("Change password: $target", $user);
-    print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url() . '?action=user') . qq{">&larr; User</a></p>\n};
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url() . '?action=user_list') . qq{">&larr; User</a></p>\n};
     print qq{<h1>Set a new password for } . esc($target) . qq{</h1>\n};
     print qq{<p class="muted">As an admin you can set a new password for another }
         . qq{user without knowing their current one.</p>\n};
@@ -6027,47 +6909,47 @@ sub do_reset_password {
 
     my $dbh = db_connect();
     if (!$dbh) {
-        redirect_to_user_page(err => 'Cannot reach the user database.');
+        redirect_to_user_page(action=>"user_list", err => 'Cannot reach the user database.');
         return;
     }
     unless (user_is_admin($dbh, $user)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "Only an admin can change other users' passwords.");
+        redirect_to_user_page(action=>"user_list", err => "Only an admin can change other users' passwords.");
         return;
     }
     unless (valid_id($target)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Invalid username.');
+        redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
     }
     if ($target eq $PROTECTED_USER) {
         $dbh->disconnect;
-        redirect_to_user_page(err => qq{Use "Change your password" to change the '$PROTECTED_USER' account's own password.});
+        redirect_to_user_page(action=>"user_list", err => qq{Use "Change your password" to change the '$PROTECTED_USER' account's own password.});
         return;
     }
     if (length($new) < $MIN_PASSWORD_LENGTH) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "New password must be at least $MIN_PASSWORD_LENGTH characters.");
+        redirect_to_user_page(action=>"user_list", err => "New password must be at least $MIN_PASSWORD_LENGTH characters.");
         return;
     }
     if ($new ne $confirm) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'New password and confirmation do not match.');
+        redirect_to_user_page(action=>"user_list", err => 'New password and confirmation do not match.');
         return;
     }
     unless (db_user_exists($dbh, $target)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "User '$target' not found.");
+        redirect_to_user_page(action=>"user_list", err => "User '$target' not found.");
         return;
     }
 
     my ($ok, $err) = db_set_password($dbh, $target, apr1_hash($new));
     $dbh->disconnect;
     if (!$ok) {
-        redirect_to_user_page(err => "Could not update password: " . ($err // 'unknown error'));
+        redirect_to_user_page(action=>"user_list", err => "Could not update password: " . ($err // 'unknown error'));
         return;
     }
-    redirect_to_user_page(msg => "Password for '$target' changed.");
+    redirect_to_user_page(action=>"user_list", msg => "Password for '$target' changed.");
 }
 
 # Add a new user. Restricted to $PROTECTED_USER -- checked here as well as
@@ -6083,42 +6965,42 @@ sub do_add_user {
 
     my $dbh = db_connect();
     if (!$dbh) {
-        redirect_to_user_page(err => 'Cannot reach the user database.');
+        redirect_to_user_page(action=>"user_add", err => 'Cannot reach the user database.');
         return;
     }
     unless (user_is_admin($dbh, $user)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Only an admin can add users.');
+        redirect_to_user_page(action=>"user_add", err => 'Only an admin can add users.');
         return;
     }
     unless (valid_id($new_user)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Invalid username (letters, numbers, dot, dash, underscore only).');
+        redirect_to_user_page(action=>"user_add", err => 'Invalid username (letters, numbers, dot, dash, underscore only).');
         return;
     }
     if (length($password) < $MIN_PASSWORD_LENGTH) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "Password must be at least $MIN_PASSWORD_LENGTH characters.");
+        redirect_to_user_page(action=>"user_add", err => "Password must be at least $MIN_PASSWORD_LENGTH characters.");
         return;
     }
     if ($password ne $confirm) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Password and confirmation do not match.');
+        redirect_to_user_page(action=>"user_add", err => 'Password and confirmation do not match.');
         return;
     }
     if (db_user_exists($dbh, $new_user)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "User '$new_user' already exists.");
+        redirect_to_user_page(action=>"user_add", err => "User '$new_user' already exists.");
         return;
     }
 
     my ($ok, $err) = db_add_user($dbh, $new_user, apr1_hash($password), $edit, $admin);
     $dbh->disconnect;
     if (!$ok) {
-        redirect_to_user_page(err => "Could not add user: " . ($err // 'unknown error'));
+        redirect_to_user_page(action=>"user_add", err => "Could not add user: " . ($err // 'unknown error'));
         return;
     }
-    redirect_to_user_page(msg => "User '$new_user' added.");
+    redirect_to_user_page(action=>"user_list", msg => "User '$new_user' added.");
 }
 
 # Delete a user. Restricted to $PROTECTED_USER, and $PROTECTED_USER itself
@@ -6129,37 +7011,37 @@ sub do_delete_user {
 
     my $dbh = db_connect();
     if (!$dbh) {
-        redirect_to_user_page(err => 'Cannot reach the user database.');
+        redirect_to_user_page(action=>"user_list", err => 'Cannot reach the user database.');
         return;
     }
     unless (user_is_admin($dbh, $user)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Only an admin can delete users.');
+        redirect_to_user_page(action=>"user_list", err => 'Only an admin can delete users.');
         return;
     }
     unless (valid_id($target)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Invalid username.');
+        redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
     }
     if ($target eq $PROTECTED_USER) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "The '$PROTECTED_USER' account cannot be deleted.");
+        redirect_to_user_page(action=>"user_list", err => "The '$PROTECTED_USER' account cannot be deleted.");
         return;
     }
     unless (db_user_exists($dbh, $target)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "User '$target' not found.");
+        redirect_to_user_page(action=>"user_list", err => "User '$target' not found.");
         return;
     }
 
     my ($ok, $err) = db_delete_user($dbh, $target);
     $dbh->disconnect;
     if (!$ok) {
-        redirect_to_user_page(err => "Could not delete user: " . ($err // 'unknown error'));
+        redirect_to_user_page(action=>"user_list", err => "Could not delete user: " . ($err // 'unknown error'));
         return;
     }
-    redirect_to_user_page(msg => "User '$target' deleted.");
+    redirect_to_user_page(action=>"user_list", msg => "User '$target' deleted.");
 }
 
 # Grant or revoke a user's device-table edit right. Admin-only; never
@@ -6171,36 +7053,36 @@ sub do_set_edit_right {
 
     my $dbh = db_connect();
     if (!$dbh) {
-        redirect_to_user_page(err => 'Cannot reach the user database.');
+        redirect_to_user_page(action=>"user_list", err => 'Cannot reach the user database.');
         return;
     }
     unless (user_is_admin($dbh, $user)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Only an admin can change edit rights.');
+        redirect_to_user_page(action=>"user_list", err => 'Only an admin can change edit rights.');
         return;
     }
     unless (valid_id($target)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Invalid username.');
+        redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
     }
     if ($target eq $PROTECTED_USER) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "The '$PROTECTED_USER' account always has edit rights.");
+        redirect_to_user_page(action=>"user_list", err => "The '$PROTECTED_USER' account always has edit rights.");
         return;
     }
     unless (db_user_exists($dbh, $target)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "User '$target' not found.");
+        redirect_to_user_page(action=>"user_list", err => "User '$target' not found.");
         return;
     }
     my ($ok, $err) = db_set_edit_flag($dbh, $target, $edit);
     $dbh->disconnect;
     if (!$ok) {
-        redirect_to_user_page(err => "Could not update edit right: " . ($err // 'unknown error'));
+        redirect_to_user_page(action=>"user_list", err => "Could not update edit right: " . ($err // 'unknown error'));
         return;
     }
-    redirect_to_user_page(msg => $edit
+    redirect_to_user_page(action=>"user_list", msg => $edit
         ? "Granted device-table edit right to '$target'."
         : "Revoked device-table edit right from '$target'.");
 }
@@ -6216,36 +7098,36 @@ sub do_set_admin_right {
 
     my $dbh = db_connect();
     if (!$dbh) {
-        redirect_to_user_page(err => 'Cannot reach the user database.');
+        redirect_to_user_page(action=>"user_list", err => 'Cannot reach the user database.');
         return;
     }
     unless (user_is_admin($dbh, $user)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Only an admin can change admin functions.');
+        redirect_to_user_page(action=>"user_list", err => 'Only an admin can change admin functions.');
         return;
     }
     unless (valid_id($target)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => 'Invalid username.');
+        redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
     }
     if ($target eq $PROTECTED_USER) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "The '$PROTECTED_USER' account always has admin functions.");
+        redirect_to_user_page(action=>"user_list", err => "The '$PROTECTED_USER' account always has admin functions.");
         return;
     }
     unless (db_user_exists($dbh, $target)) {
         $dbh->disconnect;
-        redirect_to_user_page(err => "User '$target' not found.");
+        redirect_to_user_page(action=>"user_list", err => "User '$target' not found.");
         return;
     }
     my ($ok, $err) = db_set_admin_flag($dbh, $target, $admin);
     $dbh->disconnect;
     if (!$ok) {
-        redirect_to_user_page(err => "Could not update admin functions: " . ($err // 'unknown error'));
+        redirect_to_user_page(action=>"user_list", err => "Could not update admin functions: " . ($err // 'unknown error'));
         return;
     }
-    redirect_to_user_page(msg => $admin
+    redirect_to_user_page(action=>"user_list", msg => $admin
         ? "Granted admin functions to '$target'."
         : "Revoked admin functions from '$target'.");
 }
@@ -6288,7 +7170,7 @@ sub show_help {
     print page_foot();
 }
 
-# Setup page (Setup menu): shows $DEVICE_TABLE exactly as fetchconfig.pl
+# "Show device table" (Setup devices menu): shows $DEVICE_TABLE exactly as fetchconfig.pl
 # reads it -- verbatim, no parsing/filtering. That can include device
 # credentials carried on "default:" lines (see find_directive_lines()), so
 # it's gated to the protected admin OR any user granted the
@@ -6297,12 +7179,21 @@ sub show_help {
 sub show_setup {
     my ($user) = @_;
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
-
     my $dbh = db_connect();
     my $allowed  = $dbh ? user_may_edit_table($dbh, $user) : 0;
     my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
+    my $unrestricted = $dbh ? user_is_unrestricted($dbh, $user) : 1;
     $dbh->disconnect if $dbh;
+
+    # A site-limited editor sees only the graphical device editor (their
+    # devices), not the "Show device table" raw view.
+    # Done before any output so show_edit_table prints its own header.
+    if ($allowed && !$unrestricted) {
+        show_edit_table($user);
+        return;
+    }
+
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
     unless ($allowed) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to view the device table.</p>\n};
@@ -6321,15 +7212,8 @@ sub show_setup {
     print qq{<p class="muted">Raw contents of <code>} . esc($DEVICE_TABLE)
         . qq{</code>, exactly as fetchconfig.pl reads it. This may include }
         . qq{device credentials on <code>default:</code> lines &mdash; }
-        . qq{treat this page accordingly.</p>\n};
-    print qq{<p class="btn-row"><a class="btn" href="} . esc(script_url() . '?action=edit_table')
-        . qq{">Edit device table</a>};
-    # Bulk Edit is admin-only (stricter than the edit-device-table right).
-    if ($is_admin) {
-        print qq{ <a class="btn" href="} . esc(script_url() . '?action=bulk_edit')
-            . qq{">Bulk edit</a>};
-    }
-    print qq{</p>\n};
+        . qq{treat this page accordingly. Use <strong>Setup devices</strong> in }
+        . qq{the menu to edit or bulk-edit the table.</p>\n};
 
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
@@ -6376,6 +7260,7 @@ my %COMMON_OPTS = (
     filename_append_suffix => { type => 'text',   mandatory => 0 },
     comment                => { type => 'text',   mandatory => 0 },
     to                     => { type => 'recipients', mandatory => 0 },
+    site                   => { type => 'enum_site', mandatory => 0 },
 );
 
 # Merge helper: common options plus per-model extras/overrides.
@@ -6898,7 +7783,7 @@ sub device_table_mtime {
     return @st ? $st[9] : '';
 }
 
-# Read $DEVICE_TABLE verbatim for the Setup page -- no parsing, no
+# Read $DEVICE_TABLE verbatim for the "Show device table" view -- no parsing, no
 # filtering of comments/blank lines, unlike read_device_ids(). Returns
 # ($content, $error); $content is undef on error.
 sub slurp_device_table {
@@ -7065,6 +7950,36 @@ sub render_option_field {
         $control .= qq{ <span class="dir-alias-warn error"}
                   . (($cur_dir ne '' && !$dir_ok) ? '' : ' style="display:none;"')
                   . qq{>not in the allowed directory list</span>};
+    } elsif ($type eq 'enum_site') {
+        # Device site tag. Dropdown of the codes this user may assign (all codes
+        # for an unrestricted user). An unset value is the reserved "any site"
+        # (id 0), shown in red; a current value not in the allowed list is kept
+        # as a disabled "(current, not allowed)" option so it stays visible.
+        my $v = defined $val ? $val : '';
+        my @opts = @{ $SITE_CTX{options} || [] };
+        my %have = map { $_->{code} => 1 } @opts;
+        my $unset = ($v eq '' || $v eq SITE_ALL_CODE);
+        # The whole select is red while unset (the "no site assigned" placeholder
+        # is showing); it turns normal once a real site is chosen. Coloring comes
+        # ONLY from the select's state class, so it is consistent in every state.
+        $control = qq{<select name="} . esc($name) . qq{" class="site-select}
+                 . ($unset ? ' site-unset' : '') . qq{">};
+        # Placeholder: a dummy entry shown only while no site is assigned. It is
+        # selected when unset, but marked disabled once a real site is chosen so
+        # it can no longer be picked back (it is not a real value).
+        $control .= qq{<option value=""} . ($unset ? ' selected' : ' disabled')
+                  . qq{>-- no site assigned --</option>};
+        if ($v ne '' && $v ne SITE_ALL_CODE && !$have{$v}) {
+            $control .= qq{<option value="} . esc($v) . qq{" selected disabled>}
+                      . esc($v) . qq{ (current, not allowed)</option>};
+        }
+        for my $o (@opts) {
+            next if $o->{code} eq SITE_ALL_CODE;   # '*' handled as "any site" above
+            my $sel = ($v eq $o->{code}) ? ' selected' : '';
+            my $label = $o->{code} . ($o->{description} ne '' ? " -- $o->{description}" : '');
+            $control .= qq{<option value="} . esc($o->{code}) . qq{"$sel>} . esc($label) . qq{</option>};
+        }
+        $control .= qq{</select>};
     } elsif ($type eq 'enum_onoff') {
         # on / off selector (write_report).
         my $v = defined $val ? $val : '';
@@ -7129,9 +8044,12 @@ sub render_option_field {
         $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="30"$extra>};
     }
 
+    # "site" is mandatory and auto-managed -> no remove button.
+    my $del = ($key eq 'site' && !$is_email)
+            ? ''
+            : qq{ <button type="button" class="opt-del" title="Remove this option">&times;</button>};
     return qq{<div class="opt-field"><label>} . esc($key) . qq{$mand$unrecognized</label> }
-         . $control
-         . qq{ <button type="button" class="opt-del" title="Remove this option">&times;</button></div>\n};
+         . $control . $del . qq{</div>\n};
 }
 
 # Render the "+ add option" control for a record: a small select listing the
@@ -7157,6 +8075,9 @@ sub render_add_option {
     if ($is_email && $al->{present} && $al->{report_disabled}) {
         @avail = grep { $_ ne 'report_dir' } @avail;
     }
+    # "site" is always present on a device (added automatically, not deletable),
+    # so it is never offered in the "+ add option" menu.
+    @avail = grep { $_ ne 'site' } @avail unless $is_email;
     my $opts = join('', map {
         my $spec = $is_email ? $EMAIL_OPTS{$_} : option_spec($model_or_email, $_);
         my $t = $spec ? $spec->{type} : 'text';
@@ -7173,13 +8094,20 @@ sub show_edit_table {
 
     my $dbh = db_connect();
     my $allowed = $dbh ? user_may_edit_table($dbh, $user) : 0;
-    $dbh->disconnect if $dbh;
     unless ($allowed) {
+        $dbh->disconnect if $dbh;
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to edit the device table.</p>\n};
         print page_foot();
         return;
     }
+    # Per-site access: an unrestricted user (admin / site 0) gets the full editor
+    # (all tabs, bulk edit); a site-limited user gets the Devices tab only (their
+    # devices), a read-only Defaults tab, and no Email/Reporting or Bulk edit.
+    my $unrestricted = $dbh ? user_is_unrestricted($dbh, $user) : 1;
+    site_ctx_init($dbh, $user);
+    my $site_acc = user_site_access($dbh, $user);
+    $dbh->disconnect if $dbh;
 
     # Two ways in: normally we read the current table from disk. When
     # arriving from the Preview page's "Back to editor" button
@@ -7207,12 +8135,20 @@ sub show_edit_table {
         $records = parse_device_table($content);
     }
 
+    # Every device should carry a site= so the editor shows the (red) "no site
+    # assigned" dropdown. Add an empty site option to any device that lacks one,
+    # so it is visible and selectable (it serializes back only if a real site is
+    # chosen -- an empty site= is dropped on save, leaving the table unchanged).
+    for my $r (@$records) {
+        next unless $r->{kind} eq 'device';
+        next if grep { defined $_->[0] && $_->[0] eq 'site' } @{ $r->{opts} || [] };
+        push @{ $r->{opts} }, ['site', ''];
+    }
+
     my $msg = $cgi->param('msg');
     my $eerr = $cgi->param('err');
 
     print page_head('Edit device table', $user, 'wide');
-    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=setup') . qq{">&larr; Setup</a></p>\n};
     print qq{<h1>Edit device table</h1>\n};
 
     # The generic model's template dropdowns depend on `fetchconfig -t`. If it
@@ -7275,17 +8211,39 @@ sub show_edit_table {
     # Action buttons at the TOP, above the tab bar, so they're reachable
     # without scrolling past a long table. The form wraps all three tabs, so
     # a single button row here serves every tab.
+    # "Reject all changes" reloads the editor fresh from disk (discarding the
+    # in-progress edits), after a confirm. It is a form of its own so the
+    # confirm dialog + GET reload are not tangled with the edit form's POST.
     print qq{<div class="save-row">}
         . qq{<button type="submit" name="action" value="preview_table" class="btn">Preview raw table</button>}
         . qq{<button type="submit" name="action" value="save_table" class="btn btn-green">Save changes without preview</button>}
-        . qq{<a class="btn btn-green" href="} . esc(script_url() . '?action=setup') . qq{">Cancel</a>}
+        . qq{<a class="btn btn-danger" href="} . esc(script_url() . '?action=edit_table')
+        . qq{" data-confirm="Reject all changes and reload the table from disk?" }
+        . qq{data-confirm-danger="y">Reject all changes</a>}
         . qq{</div>\n};
 
     # Tab bar
+    # Site-code validation errors (unknown site= / duplicate id): shown as a
+    # red banner; the lines are still editable so they can be fixed.
+    {
+        my $sdbh = db_connect();
+        my @site_err = $sdbh ? site_table_errors($sdbh, $records) : ();
+        $sdbh->disconnect if $sdbh;
+        if (@site_err) {
+            print qq{<div class="error" style="border:2px solid #b00020;padding:0.7em 1em;">\n};
+            print qq{<strong>Site / device-id problems &mdash; fix before saving:</strong>\n<ul>\n};
+            print qq{<li>} . esc($_) . qq{</li>\n} for @site_err;
+            print qq{</ul></div>\n};
+        }
+    }
+
     print qq{<div class="tabbar">}
         . qq{<button type="button" class="tab active" data-tab="devices">Devices</button>}
-        . qq{<button type="button" class="tab" data-tab="defaults">Defaults (per model)</button>}
-        . qq{<button type="button" class="tab" data-tab="email">Email notification and reporting</button>}
+        . qq{<button type="button" class="tab" data-tab="defaults">Defaults (per model)}
+        . ($unrestricted ? '' : ' &mdash; view only') . qq{</button>}
+        . ($unrestricted
+            ? qq{<button type="button" class="tab" data-tab="email">Email notification and reporting</button>}
+            : '')
         . qq{</div>\n};
 
     # We iterate records once, emitting each into its tab panel while keeping
@@ -7293,12 +8251,42 @@ sub show_edit_table {
     # Comments/other records are carried as hidden fields (not shown) so they
     # round-trip untouched.
     my @models = known_models();
-    my $i = -1;
 
     my (@dev_html, @def_html, @email_html, @hidden_html);
+    # Read-only defaults for a limited user are merged per model (last value
+    # wins, as fetchconfig reads them), so one box shows all of a model's
+    # options rather than one box per device-table line.
+    my (@def_model_order, %def_merged);
+    my $orig_idx = -1;   # position of $r within @$records (== @$orig position)
     for my $r (@$records) {
-        $i++;
-        my $rk = "r$i";
+        $orig_idx++;
+        # Limited users: only their own device lines are rendered/submitted;
+        # everything else (other devices, comments, defaults, email, directory)
+        # is preserved server-side by the merge on save, so it is NOT carried in
+        # the form. Defaults are shown read-only; email/other are hidden.
+        # IMPORTANT: the field index must be the record's real position in the
+        # table ($orig_idx), not a sequential counter -- otherwise the secret
+        # (pass=) write-back looks up the wrong original record on save and
+        # wipes the password.
+        if (!$unrestricted) {
+            if ($r->{kind} eq 'device') {
+                next unless device_visible_to_acc($site_acc, $r);
+                my $rk = "r$orig_idx";
+                push @dev_html, render_record_card($rk, $r, 'device');
+            } elsif ($r->{kind} eq 'default') {
+                my $m = defined $r->{model} ? $r->{model} : '';
+                push @def_model_order, $m unless exists $def_merged{$m};
+                $def_merged{$m} ||= { order => [], val => {} };
+                for my $pair (@{ $r->{opts} || [] }) {
+                    my ($k, $v) = @$pair;
+                    next unless defined $k;
+                    push @{ $def_merged{$m}{order} }, $k unless exists $def_merged{$m}{val}{$k};
+                    $def_merged{$m}{val}{$k} = $v;   # last wins
+                }
+            }
+            next;
+        }
+        my $rk = "r$orig_idx";
         if ($r->{kind} eq 'comment' || $r->{kind} eq 'other') {
             push @hidden_html, qq{<input type="hidden" name="${rk}_kind" value="} . esc($r->{kind}) . qq{">}
                 . qq{<input type="hidden" name="${rk}_raw" value="} . esc($r->{raw}) . qq{">\n};
@@ -7312,7 +8300,8 @@ sub show_edit_table {
             push @dev_html, render_record_card($rk, $r, 'device');
         }
     }
-    print qq{<input type="hidden" name="rec_count" value="} . ($i + 1) . qq{">\n};
+    # rec_count covers every record position (indices are r0..r{N-1}).
+    print qq{<input type="hidden" name="rec_count" value="} . scalar(@$records) . qq{">\n};
     print join('', @hidden_html);
 
     # Devices tab. All device cards are rendered (so every device is
@@ -7342,9 +8331,18 @@ sub show_edit_table {
     print qq{</div>\n};
     print qq{</div>\n};
 
+    # For a limited (read-only) user, render one merged box per model now.
+    if (!$unrestricted) {
+        for my $m (@def_model_order) {
+            push @def_html, render_merged_default_readonly($m, $def_merged{$m});
+        }
+    }
+
     # Defaults tab
     print qq{<div class="tab-panel" data-panel="defaults" style="display:none;">\n};
-    print qq{<div class="panel-actions"><button type="button" class="btn" id="add-default">+ Add model defaults</button></div>\n};
+    print qq{<div class="panel-actions">}
+        . ($unrestricted ? qq{<button type="button" class="btn" id="add-default">+ Add model defaults</button>} : '')
+        . qq{</div>\n};
     print join('', @def_html);
     print qq{</div>\n};
 
@@ -7472,6 +8470,9 @@ sub reconstruct_records_from_form {
                     push @opts, [$k, $rv];
                 }
             } elsif (exists $submitted{$k}) {
+                # An empty site= is the "no site assigned" placeholder -- do not
+                # write it to the table (keeps untagged devices unchanged).
+                return if $k eq 'site' && (!defined $submitted{$k} || $submitted{$k} eq '');
                 push @opts, [$k, $submitted{$k}];
             }
         };
@@ -7803,8 +8804,6 @@ sub show_preview_table {
     my $masked  = mask_secrets($preview);
 
     print page_head('Preview device table', $user, 'wide');
-    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=setup') . qq{">&larr; Setup</a></p>\n};
     print qq{<h1>Preview device table</h1>\n};
     if (@$errors) {
         print qq{<p class="error">Validation errors &mdash; Save is blocked until these are fixed: }
@@ -7829,7 +8828,6 @@ sub show_preview_table {
         print qq{<button type="submit" name="action" value="save_table" class="btn btn-green">Save changes</button>\n};
     }
     print qq{<button type="submit" name="action" value="edit_table_from_form" class="btn">Back to editor</button>\n};
-    print qq{<a class="btn btn-green" href="} . esc(script_url() . '?action=setup') . qq{">Cancel</a>\n};
     print qq{</div>\n};
     print $cgi->end_form;
 
@@ -7869,6 +8867,9 @@ sub do_save_table {
 
     my $dbh = db_connect();
     my $allowed = $dbh ? user_may_edit_table($dbh, $user) : 0;
+    my $unrestricted = $dbh ? user_is_unrestricted($dbh, $user) : 1;
+    my $site_acc = $dbh ? user_site_access($dbh, $user) : { unrestricted => 1, codes => {} };
+    my $known_codes = $dbh ? known_site_codes($dbh) : {};
     $dbh->disconnect if $dbh;
     unless ($allowed) {
         print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
@@ -7896,7 +8897,66 @@ sub do_save_table {
 
     my ($records, $warnings) = reconstruct_records_from_form($orig);
 
+    # --- per-site merge for a site-limited user -----------------------------
+    # The limited user's form carried ONLY their own devices. Rebuild the full
+    # table: every record from disk that the user cannot see is preserved
+    # verbatim; the user's visible devices are replaced by the submitted ones,
+    # in their original file position. Hard invariants (else the save is
+    # refused): every submitted device must carry a site= the user may use, and
+    # the submitted set may not introduce a device-id that already exists on a
+    # device the user cannot see (device-ids are unique table-wide and not
+    # renamable).
+    if (!$unrestricted) {
+        # The submitted records contain only devices (limited editor); collect them.
+        my @submitted_dev = grep { $_->{kind} eq 'device' } @$records;
+        # Validate each submitted device's site is allowed.
+        for my $d (@submitted_dev) {
+            my $code = device_site_code($d);
+            if ($code eq SITE_ALL_CODE || !$site_acc->{codes}{$code}) {
+                redirect_to_editor(err => "Device '" . (defined $d->{id} ? $d->{id} : '?')
+                    . "': you may only assign a site from your allowed list.");
+                return;
+            }
+        }
+        # Device-ids owned by other (non-visible) devices must not be reused.
+        my %other_ids;
+        for my $r (@$orig) {
+            next unless $r->{kind} eq 'device';
+            $other_ids{ $r->{id} } = 1 if !device_visible_to_acc($site_acc, $r);
+        }
+        for my $d (@submitted_dev) {
+            if (defined $d->{id} && $other_ids{ $d->{id} }) {
+                redirect_to_editor(err => "Device-id '$d->{id}' already exists "
+                    . "(on a device outside your sites). Device-ids must be unique.");
+                return;
+            }
+        }
+        # Rebuild: walk the on-disk records; replace the block of visible devices
+        # with the submitted devices (preserving position of the first one),
+        # keep everything else verbatim.
+        my @merged; my $inserted = 0;
+        for my $r (@$orig) {
+            if ($r->{kind} eq 'device' && device_visible_to_acc($site_acc, $r)) {
+                if (!$inserted) { push @merged, @submitted_dev; $inserted = 1; }
+                next;   # drop the old visible device (replaced above)
+            }
+            push @merged, $r;
+        }
+        push @merged, @submitted_dev if !$inserted;   # user added devices, had none before
+        $records = \@merged;
+    }
+
     my $errors = validate_records($records);
+    # Site/device-id validation. On save a site is mandatory (require_site):
+    # enforce it over the whole table for an unrestricted (admin) save; a
+    # site-limited save is already checked device-by-device above (an empty or
+    # foreign site is rejected there), so here we only check codes/ids without
+    # faulting the admin-owned untagged devices the user cannot see/edit.
+    {
+        my $vdbh = db_connect();
+        push @$errors, site_table_errors($vdbh, $records, $unrestricted ? 1 : 0) if $vdbh;
+        $vdbh->disconnect if $vdbh;
+    }
     if (@$errors) {
         redirect_to_editor(err => join('  ', @$errors));
         return;
@@ -8028,7 +9088,7 @@ sub _basename { my ($p) = @_; $p =~ s{.*/}{}; return $p; }
 # Redirect back to the editor with a flash message (PRG, same pattern as the
 # user-page handlers). Messages go in the query string.
 # =============================================================================
-# Device-table backup restore (Tools page, admin only)
+# Device-table backup restore (Restore device table tool, admin only)
 # =============================================================================
 
 # The regexp a valid backup basename must match:
@@ -8085,7 +9145,7 @@ sub resolve_backup_path {
 
 sub redirect_to_tools {
     my (%o) = @_;
-    my $url = script_url() . '?action=tools';
+    my $url = script_url() . '?action=tool_restore';
     $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
     $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
     print $cgi->header(-location => $url, -status => '302 Found');
@@ -8099,7 +9159,7 @@ sub redirect_to_editor {
     print $cgi->header(-location => $url, -status => '302 Found');
 }
 
-# Redirect to the Setup page with a flash message (PRG).
+# Redirect to the "Show device table" view with a flash message (PRG).
 sub redirect_to_setup {
     my (%o) = @_;
     my $url = script_url() . '?action=setup';
@@ -8189,8 +9249,6 @@ sub show_bulk_edit {
     }
 
     print page_head('Bulk edit devices', $user, 'wide');
-    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=setup') . qq{">&larr; Setup</a></p>\n};
     print qq{<h1>Bulk edit devices</h1>\n};
 
     # Same directory checks as the graphical editor: if `-t` (templates) or
@@ -8222,7 +9280,9 @@ sub show_bulk_edit {
     # without scrolling past a long device list.
     print qq{<div class="save-row">}
         . qq{<button type="submit" class="btn btn-green">Save changes</button>}
-        . qq{<a class="btn" href="} . esc(script_url() . '?action=setup') . qq{">Cancel</a>}
+        . qq{<a class="btn btn-danger" href="} . esc(script_url() . '?action=bulk_edit')
+        . qq{" data-confirm="Reject all changes and reload the table from disk?" }
+        . qq{data-confirm-danger="y">Reject all changes</a>}
         . qq{</div>\n};
     # Passwords are shown in PLAIN TEXT here (admin-only, and the whole point
     # of bulk edit is to edit the raw lines), so HTML-escape only -- do NOT
@@ -8298,8 +9358,13 @@ sub do_bulk_save {
     my $new_devices = text_to_devices($text);
 
     # Validate the new device set (all-or-nothing) with the same rules as
-    # the structured editor.
+    # the structured editor, including the mandatory site= on every device.
     my $errors = validate_records($new_devices);
+    {
+        my $vdbh = db_connect();
+        push @$errors, site_table_errors($vdbh, $new_devices, 1) if $vdbh;
+        $vdbh->disconnect if $vdbh;
+    }
     if (@$errors) {
         show_bulk_edit($user, $text, $errors);
         return;
@@ -8334,6 +9399,50 @@ sub do_bulk_save {
 }
 
 # Render one editable record (device / default / email) as a card.
+# A compact read-only rendering of a record (used for the Defaults tab shown to
+# site-limited users: they can see the model defaults but not change them).
+# Render one read-only box for a model's merged defaults (last value wins).
+# $merged = { order => [keys in first-seen order], val => { key => last value } }.
+sub render_merged_default_readonly {
+    my ($model, $merged) = @_;
+    my $h = qq{<div class="rec-card rec-readonly">\n};
+    $h .= qq{<div class="rec-head"><strong>default:</strong> } . esc($model) . qq{</div>\n};
+    $h .= qq{<div class="opt-list">\n};
+    for my $k (@{ $merged->{order} }) {
+        my $v = mask_secrets_opt($k, $merged->{val}{$k});
+        $h .= qq{<div class="opt-field"><label>} . esc($k) . qq{</label> }
+            . qq{<span class="ro-value">} . esc(defined $v ? $v : '') . qq{</span></div>\n};
+    }
+    $h .= qq{</div></div>\n};
+    return $h;
+}
+
+sub render_record_card_readonly {
+    my ($r) = @_;
+    my $model = defined $r->{model} ? $r->{model} : '';
+    my $h = qq{<div class="rec-card rec-readonly">\n};
+    $h .= qq{<div class="rec-head"><strong>default:</strong> } . esc($model) . qq{</div>\n};
+    $h .= qq{<div class="opt-list">\n};
+    for my $pair (@{ $r->{opts} || [] }) {
+        my ($k, $v) = @$pair;
+        next unless defined $k;
+        $v = mask_secrets_opt($k, $v);
+        $h .= qq{<div class="opt-field"><label>} . esc($k) . qq{</label> }
+            . qq{<span class="ro-value">} . esc(defined $v ? $v : '') . qq{</span></div>\n};
+    }
+    $h .= qq{</div></div>\n};
+    return $h;
+}
+
+# Mask a secret option's value for read-only display.
+sub mask_secrets_opt {
+    my ($k, $v) = @_;
+    return $v unless defined $k;
+    return $SECRET_KEEP if $k eq 'pass' || $k eq 'enable' || $k eq 'password'
+                           || $k eq 'community';
+    return $v;
+}
+
 sub render_record_card {
     my ($rk, $r, $kind) = @_;
     my $h = qq{<div class="rec-card" data-rk="$rk" data-kind="$kind">\n};
@@ -8462,11 +9571,18 @@ sub edit_table_script {
     } qw(repository template fetch_run report)) . '}';
     my $fr_disabled  = ($al->{present} && $al->{fetch_run_disabled}) ? 1 : 0;
     my $rep_disabled = ($al->{present} && $al->{report_disabled})    ? 1 : 0;
+    # Site options for the add-option dropdown (same list the server renders).
+    my $sites_js = '[' . join(',', map {
+        qq[{"code":"] . $jesc->($_->{code}) . qq[","desc":"] . $jesc->($_->{description}) . qq["}]
+    } grep { $_->{code} ne SITE_ALL_CODE } @{ $SITE_CTX{options} || [] }) . ']';
+    my $site_unrestricted = $SITE_CTX{unrestricted} ? 1 : 0;
     my $out = qq{<script>window.FCWEB_TPL_ROWS = $rows_js;\n}
             . qq{window.FCWEB_TPL_DEFAULT_DIR = "$def_dir";\n}
             . qq{window.FCWEB_DIR_ALIAS = $alias_js;\n}
             . qq{window.FCWEB_DIR_ENTRIES = $entries_js;\n}
             . qq{window.FCWEB_FETCHRUN_DISABLED = $fr_disabled;\n}
+            . qq{window.FCWEB_SITE_OPTIONS = $sites_js;\n}
+            . qq{window.FCWEB_SITE_UNRESTRICTED = $site_unrestricted;\n}
             . qq{window.FCWEB_REPORT_DISABLED = $rep_disabled;</script>\n};
     $out .= <<'JS';
 <script>
@@ -8477,6 +9593,8 @@ sub edit_table_script {
   var DIR_ENTRIES = window.FCWEB_DIR_ENTRIES || {repository:[],template:[],fetch_run:[],report:[]};
   var FETCHRUN_DISABLED = !!window.FCWEB_FETCHRUN_DISABLED;
   var REPORT_DISABLED = !!window.FCWEB_REPORT_DISABLED;
+  var SITE_OPTIONS = window.FCWEB_SITE_OPTIONS || [];
+  var SITE_UNRESTRICTED = !!window.FCWEB_SITE_UNRESTRICTED;
   var DIR_PRESENT = false;
   for (var _k in DIR_ENTRIES) { if (DIR_ENTRIES[_k] && DIR_ENTRIES[_k].length) DIR_PRESENT = true; }
   // Build an allow-list <select> of $aliases for a directory kind.
@@ -8748,6 +9866,16 @@ sub edit_table_script {
       control = '<select name="' + name + '">' +
         '<option value="">(default)</option>' +
         '<option value="hide">hide</option></select>';
+    } else if (type === 'enum_site') {
+      // Newly added => no site yet: placeholder selected, select shown red.
+      var sopts = '<option value="" selected>-- no site assigned --</option>';
+      for (var si = 0; si < SITE_OPTIONS.length; si++) {
+        var sc = SITE_OPTIONS[si].code, sd = SITE_OPTIONS[si].desc;
+        var lbl = sc + (sd ? ' -- ' + sd : '');
+        sopts += '<option value="' + sc.replace(/"/g,'&quot;') + '">'
+               + lbl.replace(/</g,'&lt;') + '</option>';
+      }
+      control = '<select name="' + name + '" class="site-select site-unset">' + sopts + '</select>';
     } else if (type === 'enum_onoff') {
       control = '<select name="' + name + '">' +
         '<option value="">(unset)</option>' +
@@ -8829,6 +9957,23 @@ sub edit_table_script {
     card.innerHTML = head + '<div class="opt-list"></div>' +
       '<div class="add-option"><select class="add-opt-select"><option value="">+ add option\u2026</option></select></div>';
 
+    // Every device must carry a site=; add it automatically (no remove button),
+    // defaulting to the red "no site assigned" placeholder.
+    if (kind === 'device') {
+      var sopts = '<option value="" selected>-- no site assigned --</option>';
+      for (var si = 0; si < SITE_OPTIONS.length; si++) {
+        var sc = SITE_OPTIONS[si].code, sd = SITE_OPTIONS[si].desc;
+        var lbl = sc + (sd ? ' -- ' + sd : '');
+        sopts += '<option value="' + sc.replace(/"/g,'&quot;') + '">'
+               + lbl.replace(/</g,'&lt;') + '</option>';
+      }
+      var sdiv = document.createElement('div');
+      sdiv.className = 'opt-field';
+      sdiv.innerHTML = '<label>site</label> ' +
+        '<select name="' + rk + '_opt_site" class="site-select site-unset">' + sopts + '</select>';
+      card.querySelector('.opt-list').appendChild(sdiv);
+    }
+
     if (kind === 'device') {
       // New device goes to the TOP of the device list. Clear any active
       // filter first, otherwise the new (empty) card would be hidden by it.
@@ -8868,6 +10013,23 @@ sub edit_table_script {
   // Every device card is in the DOM (so all are submitted on save); we just
   // show one page of them at a time. Deleting a card and adding one both
   // re-render the current page.
+  // A site dropdown still on the empty value is shown red (via .site-unset);
+  // picking a real site clears it and disables the "-- no site assigned --"
+  // placeholder so it cannot be chosen again (it is only a dummy).
+  document.addEventListener('change', function (e) {
+    var el = e.target;
+    if (el && el.classList && el.classList.contains('site-select')) {
+      var placeholder = el.querySelector('option[value=""]');
+      if (el.value === '') {
+        el.classList.add('site-unset');
+        if (placeholder) placeholder.disabled = false;
+      } else {
+        el.classList.remove('site-unset');
+        if (placeholder) placeholder.disabled = true;
+      }
+    }
+  });
+
   var devCards = document.getElementById('dev-cards');
   var devPager = document.getElementById('dev-pager');
   var devPageInfo = document.getElementById('dev-pageinfo');
@@ -9074,6 +10236,15 @@ sub host_sort_key {
 }
 
 sub read_device_ids {
+    my ($filter_user) = @_;
+    # When a user is given and is site-limited, only their visible devices are
+    # returned (central enforcement for the device list / status).
+    my $acc;
+    if (defined $filter_user) {
+        my $dbh = db_connect();
+        $acc = $dbh ? user_site_access($dbh, $filter_user) : { unrestricted => 1 };
+        $dbh->disconnect if $dbh;
+    }
     my @devices;
     open(my $fh, '<', $DEVICE_TABLE)
         or return ([], "Cannot read device table $DEVICE_TABLE: $!");
@@ -9099,14 +10270,21 @@ sub read_device_ids {
         $model = '' unless defined $model;
         # Pull the "comment" option (if any) from the options.
         my $comment = '';
+        my $site = '';
         if (defined $optstr && $optstr ne '') {
             for my $pair (@{ parse_opts($optstr) }) {
-                if ($pair->[0] eq 'comment') { $comment = $pair->[1]; last; }
+                $comment = $pair->[1] if $pair->[0] eq 'comment';
+                $site    = $pair->[1] if $pair->[0] eq 'site';
             }
         }
+        next if $seen{$id}++;
+        # Per-user visibility filter (central enforcement).
+        if ($acc && !$acc->{unrestricted}) {
+            my $code = ($site ne '') ? $site : SITE_ALL_CODE;
+            next if $code eq SITE_ALL_CODE || !$acc->{codes}{$code};
+        }
         push @devices, { id => $id, model => $model, host => (defined $host ? $host : ''),
-                         comment => $comment }
-            unless $seen{$id}++;
+                         comment => $comment, site => $site };
     }
     close($fh);
     return ([ sort { lc($a->{id}) cmp lc($b->{id}) } @devices ], undef);
@@ -10440,7 +11618,7 @@ sub page_head {
     if (defined $user) {
         my $u         = esc($user);
         my $home      = esc(script_url());
-        my $user_page = esc(script_url() . '?action=user');
+        my $user_page = esc(script_url() . '?action=change_password_form');
         my $help_page = esc(script_url() . '?action=help');
         my $action    = esc(script_url());
         my $csrf      = esc(csrf_token());
@@ -10452,45 +11630,91 @@ sub page_head {
         my ($sid, $sess_user, $sess_csrf, $pw_warn) = current_session();
         my $may_edit = 0;
         my $is_admin = 0;
+        my $unrestricted = 1;
         my $dbh = db_connect();
         if ($dbh) {
             $is_admin = user_is_admin($dbh, $user);
             $may_edit = $is_admin ? 1 : user_may_edit_table($dbh, $user);
+            $unrestricted = user_is_unrestricted($dbh, $user);
             $dbh->disconnect;
         }
-        my $setup_link = '';
+
+        # Build the title-bar as application-style dropdown menus. Each group is
+        # a <div class="menu-group"> with a trigger button and a dropdown panel;
+        # a small script (menu_bar_script) handles open/close + keyboard. The
+        # markup degrades to plain links if the script does not run.
+        my $su = sub {   # a dropdown item: label + action (or full url)
+            my ($label, $act) = @_;
+            my $href = $act =~ /^\?/ ? esc(script_url() . $act) : esc($act);
+            return qq{<a role="menuitem" href="$href">} . esc($label) . qq{</a>};
+        };
+        my $group = sub {   # a menu group: trigger label + joined items
+            my ($label, @items) = @_;
+            my $id = 'menu-' . lc($label); $id =~ s/[^a-z0-9]+/-/g;
+            return qq{<div class="menu-group">}
+                 . qq{<button type="button" class="menu-trigger" aria-haspopup="true" aria-expanded="false">}
+                 . esc($label) . qq{ <span class="menu-caret">&#9662;</span></button>}
+                 . qq{<div class="menu-dropdown" role="menu">} . join('', @items) . qq{</div></div>};
+        };
+
+        # Devices
+        my $devices_menu = $group->('Devices',
+            $su->('Device list',    script_url()),
+            $su->('Backup status',  '?action=status'),
+            $su->('Backup reports', '?action=report'));
+
+        # Setup devices (only if allowed to edit). Admin/unrestricted: full set;
+        # a site-limited editor: only "Edit device table".
+        my $setup_menu = '';
         if ($may_edit) {
-            my $setup_page = esc(script_url() . '?action=setup');
-            $setup_link = qq{<a href="$setup_page">Setup</a>};
+            my @items = $unrestricted
+                ? ($su->('Show device table', '?action=setup'),
+                   $su->('Edit device table', '?action=edit_table'),
+                   $su->('Bulk edit',         '?action=bulk_edit'))
+                : ($su->('Edit device table', '?action=setup'));  # routes to editor
+            $setup_menu = $group->('Setup devices', @items);
         }
 
-        # Tools (orphaned-backup check/delete) is admin-only (built-in admin
-        # or admin_function). Shown between Setup and User; the handlers
-        # re-check the requirement.
-        my $tools_link = '';
+        # Tools (admin only), alphabetical. Each item is its own single-tool
+        # page.
+        my $tools_menu = '';
         if ($is_admin) {
-            my $tools_page = esc(script_url() . '?action=tools');
-            $tools_link = qq{<a href="$tools_page">Tools</a>};
+            $tools_menu = $group->('Tools',
+                $su->('Check devices for consistent backup suffixes', '?action=tool_suffix'),
+                $su->('Check devices for empty backups',              '?action=tool_empty_bk'),
+                $su->('Check site assignment',                        '?action=check_site_assignment'),
+                $su->('Devices without backups',                      '?action=tool_nobackup'),
+                $su->('Empty Directory Cleanup',                      '?action=tool_empty_dir'),
+                $su->('Orphaned Backup Cleanup',               '?action=tool_orphan'),
+                $su->('Restore device table',                         '?action=tool_restore'),
+                $su->('Template viewer',                              '?action=view_templates'),
+                $su->('View fetchconfig log',                         '?action=view_log'));
         }
+
+        # User: Change your password for all; admin extras. Each is its own page.
+        my @user_items = ();
+        push @user_items, $su->('Users list', '?action=user_list'),
+                          $su->('Add user',   '?action=user_add') if $is_admin;
+        push @user_items, $su->('Change your password', '?action=change_password_form');
+        push @user_items, $su->('Sites', '?action=sites') if $is_admin;
+        my $user_menu = $group->('User', @user_items);
 
         # Log out is a state-changing action, so it's a POST form with a
-        # CSRF token (styled as a plain link), not a GET <a> -- otherwise a
-        # cross-site <img src=...?action=logout> could force-log-out a user.
+        # CSRF token (styled as a plain link), not a GET <a>.
         $menu = qq{<nav class="menu">}
-              . qq{<a href="$home">Devices</a>}
-              . qq{<a href="} . esc(script_url() . '?action=status') . qq{">Status</a>}
-              . qq{<a href="} . esc(script_url() . '?action=report') . qq{">Reports</a>}
-              . $setup_link
-              . $tools_link
-              . qq{<a href="$user_page">User</a>}
-              . qq{<a href="$help_page">Help</a>}
+              . $devices_menu
+              . $setup_menu
+              . $tools_menu
+              . $user_menu
+              . qq{<a class="menu-flat" href="$help_page">Help</a>}
               . qq{</nav>}
               . qq{<div class="user-info">$u &nbsp;|&nbsp; }
               . qq{<form method="POST" action="$action" class="logout-form">}
               . qq{<input type="hidden" name="action" value="logout">}
               . qq{<input type="hidden" name="csrf" value="$csrf">}
               . qq{<button type="submit" class="linkbtn">Log out</button>}
-              . qq{</form></div>};
+              . qq{</form></div>}
+              . menu_bar_script();
 
         # Default-password nag, until the account picks a real password.
         if (defined $pw_warn && $pw_warn ne '') {
@@ -10512,8 +11736,11 @@ sub page_head {
     # have no backdrop.
     my $body_class = defined $user ? 'app-body' : 'login-body';
     my $backdrop_css = defined $user ? '' : qq{
-  body.login-body { background: #23303d url('$IMAGE_BASE_URL/back.jpg') center center / cover no-repeat fixed; }
-  body.login-body main { min-height: calc(100vh - 3.2em); }
+  body.login-body { background: #23303d url('$IMAGE_BASE_URL/back.jpg') center center / cover no-repeat fixed;
+                    min-width: 0; }
+  body.login-body main { min-height: calc(100vh - 3.2em); min-width: 0;
+    display: flex; align-items: flex-start; justify-content: center; padding-top: 6vh; }
+  body.login-body .login-box { margin: 0; flex: none; width: 320px; max-width: 90%; }
   body.login-body header.app-titlebar { background: #fff; }
   body.login-body footer.app-footer { position: fixed; left: 0; right: 0; bottom: 0; text-align: center;
                          background: rgba(0,0,0,0.55); color: #fff; padding: 0.7em 1em; margin: 0; }
@@ -10526,16 +11753,43 @@ sub page_head {
 <title>$t</title>
 <style>
 $backdrop_css
+  /* Sticky footer: the body is a full-height flex column so the footer sits at
+     the bottom of the viewport on short pages, and after the content (reached
+     by scrolling) on long pages. */
+  html { min-height: 100%; }
+  /* The page never renders below 900px wide: the body itself carries the
+     min-width so, when the viewport is narrower, the WHOLE page (header,
+     content, footer) stays 900px and the window scrolls horizontally instead
+     of clipping the content. (The login page opts out below.) */
   body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
-         margin: 0; background: #f4f5f7; color: #222; }
+         margin: 0; background: #f4f5f7; color: #222;
+         display: flex; flex-direction: column; min-height: 100vh;
+         min-width: 900px; box-sizing: border-box; }
+  body > main { flex: 1 0 auto; align-self: stretch; }
+  body > footer.app-footer { flex: 0 0 auto; margin-top: auto; }
   header.app-titlebar { display: flex; align-items: center; gap: 1.4em;
-               background: #fff; border-bottom: 1px solid #ddd; padding: 0.6em 1em; }
+               background: #fff; border-bottom: 1px solid #ddd; padding: 0.6em 1em;
+               position: relative; z-index: 200; }
   .app-titlebar-brand { display: flex; align-items: center; gap: 0.6em; }
   header.app-titlebar img { width: 32px; height: 32px; border-radius: 6px; display: block; }
   header.app-titlebar .app-name { font-size: 1.15em; font-weight: 600; color: #23303d; }
   nav.menu { display: flex; align-items: center; gap: 1.1em; }
-  nav.menu a { color: #1a5fb4; text-decoration: none; font-weight: 500; font-size: 0.95em; }
-  nav.menu a:hover { text-decoration: underline; }
+  nav.menu a.menu-flat { color: #1a5fb4; text-decoration: none; font-weight: 500; font-size: 0.95em; }
+  nav.menu a.menu-flat:hover { text-decoration: underline; }
+  /* Application-style dropdown menus in the title bar. */
+  .menu-group { position: relative; }
+  .menu-trigger { background: none; border: none; cursor: pointer; font: inherit;
+    color: #1a5fb4; font-weight: 500; font-size: 0.95em; padding: 0.2em 0.1em;
+    display: inline-flex; align-items: center; gap: 0.25em; }
+  .menu-trigger:hover { text-decoration: underline; }
+  .menu-caret { font-size: 0.7em; opacity: 0.8; }
+  .menu-dropdown { display: none; position: absolute; top: 100%; left: 0; z-index: 1000;
+    min-width: 13em; margin-top: 0.3em; background: #fff; border: 1px solid #cdeede;
+    border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.14); padding: 0.3em 0; }
+  .menu-group.open .menu-dropdown { display: block; }
+  .menu-dropdown a { display: block; padding: 0.45em 1.1em; color: #1a5fb4;
+    text-decoration: none; font-size: 0.93em; white-space: nowrap; }
+  .menu-dropdown a:hover { background: #e8faf1; text-decoration: none; }
   .user-info { margin-left: auto; color: #555; font-size: 0.9em; white-space: nowrap; }
   .user-info a { color: #1a5fb4; text-decoration: none; }
   .user-info a:hover { text-decoration: underline; }
@@ -10545,7 +11799,21 @@ $backdrop_css
   .linkbtn:hover { text-decoration: underline; }
   footer.app-footer { text-align: center; color: #888; font-size: 0.8em;
                padding: 1.5em 1em; }
-  main { max-width: 900px; margin: 2em auto; padding: 0 1em; }
+  /* Shown only when the viewport is narrower than the 900px minimum, warning
+     that part of the page is off-screen (reachable by scrolling right). */
+  .narrow-warning { display: none; }
+  \@media (max-width: 900px) {
+    .narrow-warning { display: block; position: sticky; left: 0;
+      background: #fbe9e7; color: #b00020; border-bottom: 1px solid #f0b4ab;
+      padding: 0.5em 1em; font-size: 0.9em; font-weight: 500;
+      width: 100vw; box-sizing: border-box; }
+  }
+  /* Never let the content shrink below 900px: on a narrower window the body
+     gets a horizontal scrollbar instead of the content being cut off. Above
+     900px (full pages) the content grows to fill the window. */
+  html, body { overflow-x: auto; }
+  main { max-width: 900px; box-sizing: border-box;
+         margin: 2em auto; padding: 0 1em; }
   /* The side-by-side compare page opts into a wider column so two 90-char
      config panes can sit next to each other; normal pages stay at 900px
      for readable line lengths. Capped so it still centres on very wide
@@ -10678,9 +11946,14 @@ $backdrop_css
       width: 100%; box-sizing: border-box; padding: 0.4em; margin-top: 0.2em; }
   .login-box input[type=submit] { margin-top: 1.2em; padding: 0.5em 1em; }
   .error { color: #b00020; }
+  /* .btn is used on both <button> and <a>; normalise the box model so the two
+     render at exactly the same height (buttons otherwise carry UA line-height
+     and font defaults that make them a bit taller/shorter than links). */
   .btn { display: inline-block; background: #1a5fb4; color: #fff; border: none;
          border-radius: 4px; padding: 0.5em 1em; font-size: 0.95em; cursor: pointer;
-         text-decoration: none; white-space: nowrap; }
+         text-decoration: none; white-space: nowrap; box-sizing: border-box;
+         font-family: inherit; line-height: 1.2; vertical-align: middle;
+         text-align: center; }
   .btn:hover { background: #164a8f; }
   .action-row { display: flex; align-items: center; gap: 0.6em; margin: 0.8em 0; }
   /* Backup Now spinner overlay */
@@ -10774,23 +12047,40 @@ $backdrop_css
   .version-warning { background: #ffddd6; border-bottom: 2px solid #c0362c; color: #7a1c14;
                      padding: 0.8em 1em; font-size: 1.02em; text-align: center; }
   .version-warning code { background: rgba(0,0,0,0.06); padding: 0 0.3em; border-radius: 3px; }
-  .tag-on { display: inline-block; background: #e6ffec; border: 1px solid #9bd9a8; color: #1a7f37;
-            border-radius: 3px; padding: 0 0.4em; font-size: 0.8em; }
-  .tag-off { display: inline-block; background: #f1f1f1; border: 1px solid #ccc; color: #777;
-             border-radius: 3px; padding: 0 0.4em; font-size: 0.8em; }
-  .btn-small { padding: 0.2em 0.6em; font-size: 0.85em; }
+  /* Match the yes/no tag box to the small button height: same font size and
+     vertical padding, aligned on the same middle line. */
+  .tag-on, .tag-off { display: inline-block; vertical-align: middle;
+            border-radius: 4px; padding: 0.2em 0.6em; font-size: 0.85em;
+            line-height: 1.15; box-sizing: border-box; }
+  .tag-on  { background: #e6ffec; border: 1px solid #9bd9a8; color: #1a7f37; }
+  .tag-off { background: #f1f1f1; border: 1px solid #ccc;    color: #777; }
+  .btn-small { padding: 0.2em 0.6em; font-size: 0.85em; vertical-align: middle;
+               line-height: 1.15; }
   .checkbox-label { display: block; margin: 0.8em 0 0.2em; font-size: 0.9em; font-weight: normal; }
   .checkbox-label.nowrap { white-space: nowrap; }
-  .user-section { background: #e8faf1; border: 1px solid #cdeede; border-radius: 6px;
-                  padding: 0 0 1em; margin: 1em 0; overflow: hidden; }
-  .user-section > h2 { margin: 0 0 0.8em; font-size: 1.15em; background: #b7e6cd;
-                       border-bottom: 1px solid #a9dcc2; padding: 0.45em 1.1em; }
-  .user-section > *:not(h2) { margin-left: 1.1em; margin-right: 1.1em; }
-  .tool-section { background: #e8faf1; border: 1px solid #cdeede; border-radius: 6px;
-                  padding: 0 0 1em; margin: 1em 0; overflow: hidden; }
-  .tool-section-title { margin: 0 0 0.8em; font-size: 1.15em; background: #b7e6cd;
-                        border-bottom: 1px solid #a9dcc2; padding: 0.45em 1.1em; }
-  .tool-section > *:not(.tool-section-title) { margin-left: 1.1em; margin-right: 1.1em; }
+  /* Green section boxes: equal left/right spacing comes from the box's own
+     horizontal padding (so wide children such as tables are inset the same on
+     both sides and never overflow). The coloured title bar spans the full box
+     width via a negative margin that cancels the padding. */
+  /* No overflow:hidden on the box -- that would clip (and make unreachable)
+     any content wider than the box. The title bar gets its own rounded top
+     corners instead, so the box can grow to fit wide content and the page
+     provides a single horizontal scrollbar when the window is narrow. */
+  /* The box grows to contain a wide table instead of letting the table spill
+     past its right edge: fit-content sizes it to its content, min-width:100%
+     keeps it at least as wide as the available area. box-sizing so the padding
+     is included. */
+  .user-section, .tool-section { background: #e8faf1; border: 1px solid #cdeede;
+                  border-radius: 6px; padding: 0 1.1em 1em; margin: 1em 0;
+                  box-sizing: border-box; width: fit-content; min-width: 100%; }
+  .user-section > h2 { margin: 0 -1.1em 0.8em; font-size: 1.15em; background: #b7e6cd;
+                       border-bottom: 1px solid #a9dcc2; padding: 0.45em 1.1em;
+                       border-radius: 5px 5px 0 0; }
+  .tool-section-title { margin: 0 -1.1em 0.8em; font-size: 1.15em; background: #b7e6cd;
+                        border-bottom: 1px solid #a9dcc2; padding: 0.45em 1.1em;
+                        border-radius: 5px 5px 0 0; }
+  /* Tables inside a section fill the box's (padded) content width. */
+  .user-section table.list, .tool-section table.list { width: 100%; }
   .tool-section h3 { font-size: 1.02em; margin-bottom: 0.2em; }
   .scan-progress { width: 22em; max-width: 100%; height: 1.1em; vertical-align: middle; }
   .scan-list { margin: 0.4em 0 0; }
@@ -10849,7 +12139,10 @@ $backdrop_css
      here we just place the table (variable width) and the statistics box
      with a 5% gap between them. */
   .dev-layout { display: flex; align-items: flex-start; }
-  .dev-main { flex: 1 1 auto; min-width: 0; overflow-x: auto; }
+  /* The page itself scrolls horizontally below the 900px min-width (see the
+     main rule); the device-main column must NOT add its own nested scrollbar,
+     which otherwise cuts off the table and fights the page scroll. */
+  .dev-main { flex: 1 1 auto; min-width: 0; }
   .dev-main #dev-table { width: 100%; }
   .dev-stats { flex: 0 0 auto; margin: 0 0 0 5%; align-self: flex-start;
                background: #e8faf1; border: 1px solid #cdeede; border-radius: 6px;
@@ -10891,6 +12184,24 @@ $backdrop_css
                    border: 1px solid #444; border-radius: 4px; padding: 0.7em; white-space: pre;
                    background: #1e1e1e; color: #d4d4d4; }
   .row-actions { display: flex; gap: 0.5em; align-items: center; }
+  /* Per-site access UI */
+  .site-any { color: #c0362c; font-weight: 600; }
+  /* A site dropdown with no site chosen shows red (placeholder state); once a
+     real site is selected it reverts to normal. The dropdown list itself uses
+     normal text so the options are not inconsistently coloured. */
+  select.site-select.site-unset { color: #c0362c; border-color: #c0362c; }
+  select.site-select option { color: #141a1f; }
+  /* Users table Sites column: wrap long comma lists (~60 chars) instead of
+     stretching the row; the <span> carries the full list as a tooltip. */
+  .user-sites-cell { max-width: 32em; white-space: normal; overflow-wrap: anywhere; }
+  .site-checklist { max-height: 22em; overflow: auto; border: 1px solid #cdeede;
+    padding: 0.5em 0.8em; border-radius: 6px; margin: 0.5em 0; background: #fff; }
+  .site-opt { display: block; padding: 0.15em 0; }
+  /* Sites management table: one edit form per row via display:contents */
+  .contents-form { display: contents; }
+  .site-table td .site-code-in { width: 8em; }
+  .site-table td .site-desc-in { width: 100%; min-width: 14em; box-sizing: border-box; }
+  .site-table td { vertical-align: middle; }
 </style>
 </head>
 <body class="$body_class">
@@ -10901,9 +12212,96 @@ $backdrop_css
 </div>
 $menu
 </header>
+<div class="narrow-warning">This window is too narrow to show the full page &mdash; widen it, or scroll right to reach the hidden content.</div>
 $warn_banner
 <main$main_attr>
 HTML
+}
+
+# Title-bar dropdown menu behaviour: click a trigger to open its panel, click
+# elsewhere or press Escape to close, basic keyboard support. Self-contained.
+# Tools (admin only): list devices that have no site= assigned. Site tags are
+# required for the per-site user access model, so this flags any gaps.
+sub show_check_site_assignment {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to use Tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Check site assignment', $user, 'full');
+    print qq{<h1>Check site assignment</h1>\n};
+
+    my ($content, $err) = slurp_device_table();
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Devices without a site</h2>\n};
+    if ($err) {
+        print qq{<p class="error">} . esc($err) . qq{</p>\n};
+        print qq{</div>\n}; print page_foot(); return;
+    }
+    my @missing;
+    for my $r (@{ parse_device_table($content) }) {
+        next unless $r->{kind} eq 'device';
+        push @missing, $r if device_site_code($r) eq SITE_ALL_CODE;   # untagged
+    }
+    if (!@missing) {
+        print qq{<p class="success">All devices have a site assigned.</p>\n};
+    } else {
+        my $n = scalar @missing;
+        print qq{<p class="muted">$n device} . ($n == 1 ? '' : 's')
+            . qq{ have no <code>site=</code> assigned. Edit the device table }
+            . qq{(<strong>Setup devices &rarr; Edit device table</strong>) and assign a }
+            . qq{site to each &mdash; the device table cannot be saved otherwise.</p>\n};
+        print qq{<table class="list"><tr><th>Device-ID</th><th>Model</th><th>Host</th></tr>\n};
+        for my $r (@missing) {
+            my $host = '';
+            for my $p (@{ $r->{opts} || [] }) { }   # host is not an opt; use record
+            print qq{<tr><td>} . esc($r->{id}) . qq{</td>}
+                . qq{<td>} . esc(defined $r->{model} ? $r->{model} : '') . qq{</td>}
+                . qq{<td>} . esc(defined $r->{host} ? $r->{host} : '') . qq{</td></tr>\n};
+        }
+        print qq{</table>\n};
+    }
+    print qq{</div>\n};
+    print page_foot();
+}
+
+sub menu_bar_script {
+    return <<'JS';
+<script>
+(function () {
+  var groups = document.querySelectorAll('.menu-group');
+  if (!groups.length) return;
+  function closeAll(except) {
+    for (var i = 0; i < groups.length; i++) {
+      if (groups[i] === except) continue;
+      groups[i].classList.remove('open');
+      var t = groups[i].querySelector('.menu-trigger');
+      if (t) t.setAttribute('aria-expanded', 'false');
+    }
+  }
+  for (var i = 0; i < groups.length; i++) {
+    (function (g) {
+      var trig = g.querySelector('.menu-trigger');
+      if (!trig) return;
+      trig.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var open = g.classList.contains('open');
+        closeAll(g);
+        if (open) { g.classList.remove('open'); trig.setAttribute('aria-expanded', 'false'); }
+        else      { g.classList.add('open');    trig.setAttribute('aria-expanded', 'true'); }
+      });
+    })(groups[i]);
+  }
+  document.addEventListener('click', function () { closeAll(null); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' || e.keyCode === 27) closeAll(null);
+  });
+})();
+</script>
+JS
 }
 
 sub page_foot {
@@ -11000,6 +12398,17 @@ sub confirm_modal_html {
     e.preventDefault();
     var danger = form.getAttribute('data-confirm-danger') !== null;
     window.fcConfirm(msg, function () { form.submit(); }, { danger: danger });
+  }, true);
+  // Links (<a data-confirm="...">) defer navigation until confirmed.
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a[data-confirm]') : null;
+    if (!a) return;
+    var msg = a.getAttribute('data-confirm');
+    if (!msg) return;
+    e.preventDefault();
+    var danger = a.getAttribute('data-confirm-danger') !== null;
+    var href = a.href;
+    window.fcConfirm(msg, function () { window.location.href = href; }, { danger: danger });
   }, true);
 })();
 </script>

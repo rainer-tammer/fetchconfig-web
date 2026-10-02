@@ -77,7 +77,7 @@ PostgreSQL database; no `htpasswd` binary or password file is used.
 **Part 3 -- Using fetchconfig-web**
 - [Devices and backups](#devices-and-backups)
 - [Viewing and comparing backups](#viewing-and-comparing-backups)
-- [The Setup page and device-table editor](#setup-page-and-device-table-editor)
+- [Setup devices and the device-table editor](#setup-devices-and-the-device-table-editor)
 - [Tools](#tools-admins-only)
 - [User management](#user-management-via-the-web-ui)
 - [The Help page](#help-page)
@@ -297,7 +297,7 @@ MIN_PASSWORD_LENGTH     = 8
 DEFAULT_PASSWORD        = fetchconfig
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
-APP_VERSION             = 1.15
+APP_VERSION             = 1.50
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 
@@ -479,6 +479,15 @@ it to display something else. `COPYRIGHT` is read from the config file.
 
 The bundled `fetchconfig-web-dbsetup.pl` script creates the PostgreSQL role, database and `users` table.
 
+To enable per-site access on an **existing** installation, run the bundled
+`fetchconfig-web-dbupdate.sql` once against the fetchconfig-web database:
+
+```
+psql -U <DBuser> -d <DBinst> -f fetchconfig-web-dbupdate.sql
+```
+
+It is idempotent, PostgreSQL 8.2-compatible, and starts every existing user unrestricted (site 0). It also grants the web user the privileges it needs on the new tables (important if you run it as `postgres` rather than the web DB user).
+
 A standalone helper that creates the database and table and (optionally)
 imports existing accounts. Every step is a Y/N prompt, so it's safe to
 re-run. Run it once before first use:
@@ -564,7 +573,7 @@ user. The app can create it automatically, but only if the base directory it
 sits in is web-writable -- which it usually should **not** be. Create it by
 hand instead, leaving the base `fetchconfig` directory at `755
 fetchconfig_user:fetchconfig_group` and making just the backup directory
-writable by the web user (see "Setup page and device-table editor" for the
+writable by the web user (see "Setup devices and the device-table editor" for the
 exact commands).
 
 **Serve over HTTPS.** Login posts a plaintext password and the session
@@ -777,9 +786,18 @@ stripping the `<span>`s from the output yields byte-for-byte the plain view
 The copy button copies the DOM's text content, so it copies the plain
 config, not the highlight markup.
 
+### Navigation menus
+
+The title bar uses drop-down menus: **Devices** (Device list, Backup status,
+Backup reports), **Setup devices** (Show device table, Edit device table, Bulk
+edit -- shown only to users who may edit the table; a site-limited user sees
+only Edit device table), **Tools** (admin only, each tool on its own page), **User** (Change your password
+for everyone; Users list, Add user and Sites for admins), and **Help**. The
+post-login page is the device list.
+
 ### Reports
 
-The **Reports** page (top menu, between Status and Setup; all logged-in users)
+The **Reports** page (Devices menu -> Backup reports; all logged-in users)
 lists the HTML change-reports fetchconfig writes into the report directory --
 the `report_dir` set on the `email:` line, resolved through the `directory:`
 allow-list. The reports are listed newest first, with **View**, **Download**
@@ -803,7 +821,7 @@ Only files named `report-*.html` are listed or touched; the directory is
 expected to be group-writable with the set-group-id bit so fetchconfig and the
 web user share it.
 
-### Setup page and device-table editor
+### Setup devices and the device-table editor
 
 The **Setup** menu item -- shown in the title bar for the `admin` account
 (`$PROTECTED_USER`) or any user granted the device-table edit right --
@@ -1141,7 +1159,7 @@ is opened per request. Password hashes are generated in **pure Perl**
 
 #### Bulk edit
 
-The **Bulk Edit** button on the Setup page (`?action=bulk_edit`, **admin
+The **Bulk edit** item in the Setup devices menu (`?action=bulk_edit`, **admin
 only** -- stricter than the edit-device-table right) opens a plain-text
 editor for the device lines only. The textarea is preloaded with the
 **complete device list**, one device per line as
@@ -1275,7 +1293,7 @@ timestamp in its **filename**, not the file's mtime, so a restore or copy that
 touches the file doesn't change how old it counts as. The form is only shown
 when there are at least two backups (with one or none there is nothing this
 could remove). The result -- how many were deleted and which backup was kept
--- is reported as a flash message on the Tools page.
+-- is reported as a flash message on the tool page.
 
 #### Devices without backups
 
@@ -1305,7 +1323,7 @@ tab-separated size-0 line; the endpoint maps that to `empty`, an exit of 0
 (or the "no backed up config files found" case) to `clean`, and any other
 non-zero exit to `error`. Same Start/Cancel button and progress bar. Both
 scan tools share one implementation (`render_scan_tool`), with each box's
-element IDs namespaced so they coexist on the Tools page, and both list any
+element IDs namespaced so they can share markup, and both list any
 devices that could not be checked by name.
 
 #### Check devices for consistent backup suffixes
@@ -1334,7 +1352,7 @@ check does.
 
 #### View fetchconfig log
 
-The Tools page has a **View fetchconfig log** section with a **Display log**
+The Tools menu has a **View fetchconfig log** tool with a **Display log**
 button that opens the log on its own page (`?action=view_log`, admin only).
 It shows the output written by the scheduled (cron) `fetchconfig.pl` run. The
 log file is set with the optional `FETCHCONFIG_LOG` key in
@@ -1353,7 +1371,7 @@ output and only the first `LOG_MAX_DEVICES` are displayed.
 
 #### Template viewer
 
-The Tools page has a **Template viewer** section with a **Show templates**
+The Tools menu has a **Template viewer** tool with a **Show templates**
 button that opens a list of the generic-model templates on its own page
 (`?action=view_templates`, admin only). The list comes from
 `fetchconfig.pl -devices=<table> -t`, whose tab-separated output gives the full
@@ -1447,6 +1465,65 @@ new browser tab. **`HELP_BASE_URL`** (default `/fetchconfig-web`) is the URL
 base under which that documentation is served; put `README.template_engine.html`
 there (e.g. alongside the other served assets). If the file is not installed the
 button simply leads to a 404.
+
+### Per-site device access
+
+Users can be limited to **see and edit only the devices for their site(s)**.
+
+**How it works.** A device carries an optional `site=<code>` option in the
+device table. Each site code is defined in the database (`sites` table: id,
+code, description) and users are assigned one or more codes (`user_sites`). A
+device is visible to a user only if its `site=` is one of their codes.
+
+* **Site 0** (code `*`, shown as **"any site" / All sites"**) is the reserved
+  sentinel: a user who holds site 0 is **unrestricted** (sees and edits
+  everything, the default). The built-in **admin** always has site 0 and cannot
+  be limited. A user with `admin_function` is likewise unrestricted.
+* A device with **no `site=`** belongs to "any site" (site 0), so it is visible
+  **only to unrestricted users**. In the editor an untagged device shows a red
+  **"any site"** marker.
+
+**What a site-limited user sees.**
+
+* The **Devices** and **Status** pages list only their devices; **direct URLs**
+  to another site's device (view/compare/download a backup, Backup Now) are
+  refused.
+* **Setup** opens the graphical device editor directly, showing only their
+  devices. The **Defaults** tab is **view-only**; there is **no Email/Reporting
+  tab**, **no Bulk edit** and **no raw-config view**. **Tools** is
+  administrator-only.
+* On a device, `site=` is a drop-down of **only the codes the user may assign**;
+  a new or copied device must be given one of their codes, and the device-id is
+  read-only.
+* **Reports**: the report is parsed and only the sections for the user's devices
+  are shown. Downloading the full (unfiltered) HTML file requires the per-user
+  **"download full report"** right.
+
+**Saving (merge).** When a site-limited user saves, their edits are **merged
+into the full device table on the server**: every device and section they
+cannot see is preserved verbatim; only their own device lines are replaced. The
+save is refused if it would touch a device outside their sites, assign a site
+they do not hold, or create a duplicate device-id.
+
+**Validation.** On load and save, a `site=` value that is not a known code is
+reported as a clearly visible error, and device-ids must be unique table-wide.
+`fetchconfig.pl` ignores `site=`, so the CLI tool is unaffected.
+
+**Managing sites (admin).** The **User** page has a **Manage sites** link to a
+page that adds, edits and deletes site codes. A code can be deleted only if it
+is **not assigned to any user**. Editing a code is **atomic**: the `sites` row
+is updated and every `site=<old>` in the device table is rewritten to the new
+code, so no device is orphaned. Per user, the **Edit sites** button opens a
+searchable checklist (scales to ~1000 sites) to assign codes and toggle the
+"download full report" right; the User listing shows each user's first 10 codes
+with a tooltip listing all.
+
+**Enabling it on an existing install.** Run the bundled
+`fetchconfig-web-dbupdate.sql` once (see
+[The user database](#the-user-database)); it creates the `sites` and
+`user_sites` tables, adds the `download_full_report` column, seeds site 0, and
+**starts every existing user as unrestricted** so nobody is locked out. Then
+assign sites per user and tag devices with `site=` as needed.
 
 ### User management via the web UI
 
@@ -1654,11 +1731,11 @@ below are grouped by concern.
   have its rights toggled, and cannot be targeted by `reset_password`.
 - `change_password` only ever targets the current session's own username (never
   a form field), so it cannot be used to change another user's password.
-- The Setup page and the device-table editor are gated on
+- The "Show device table" view and the device-table editor are gated on
   `user_may_edit_table()` (any admin, or a user with the edit-table right).
   Setup exposes the raw device table, which may contain credentials on
   `default:` lines, so it is restricted by design.
-- The Tools page and all its endpoints are gated on `user_may_use_tools()`
+- The Tools functions and all their endpoints are gated on `user_may_use_tools()`
   (admins). A valid CSRF token does not bypass any authorization check: the two
   are independent layers.
 

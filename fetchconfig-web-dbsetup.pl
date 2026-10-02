@@ -307,13 +307,71 @@ if ($table_exists) {
     # generated identity, plain BOOLEAN default.
     $dbh->do(q{
         CREATE TABLE users (
-            username           TEXT     PRIMARY KEY,
-            pass_hash          TEXT     NOT NULL,
-            edit_device_table  BOOLEAN  NOT NULL DEFAULT FALSE,
-            admin_function     BOOLEAN  NOT NULL DEFAULT FALSE
+            username             TEXT     PRIMARY KEY,
+            pass_hash            TEXT     NOT NULL,
+            edit_device_table    BOOLEAN  NOT NULL DEFAULT FALSE,
+            admin_function       BOOLEAN  NOT NULL DEFAULT FALSE,
+            download_full_report BOOLEAN  NOT NULL DEFAULT FALSE
         )
     }) or die_clean("CREATE TABLE failed: " . $dbh->errstr);
     print "Created table \"users\".\n";
+}
+
+# --- Step 2b: per-site access tables (v1.50) -----------------------------
+# "sites" holds the site/location codes; id 0 is the reserved "All sites"
+# sentinel. "user_sites" maps users to the sites they may access; a user who
+# holds site 0 is unrestricted.
+my ($sites_exists) = $dbh->selectrow_array(
+    q{SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'sites'});
+if ($sites_exists) {
+    print "Table \"sites\" already exists -- leaving it as-is.\n";
+} else {
+    $dbh->do(q{
+        CREATE TABLE sites (
+            id           INTEGER  PRIMARY KEY,
+            code         TEXT     NOT NULL UNIQUE,
+            description  TEXT     NOT NULL DEFAULT ''
+        )
+    }) or die_clean("CREATE TABLE sites failed: " . $dbh->errstr);
+    $dbh->do(q{INSERT INTO sites (id, code, description) VALUES (0, '*', 'All sites')})
+        or die_clean("seed sites failed: " . $dbh->errstr);
+    # 8.2-compatible: plain CREATE (reached only right after the sites table was
+    # just created, so the sequence does not exist yet).
+    $dbh->do(q{CREATE SEQUENCE sites_id_seq START WITH 1 MINVALUE 1});
+    print "Created table \"sites\" (seeded id 0 = All sites).\n";
+}
+my ($usites_exists) = $dbh->selectrow_array(
+    q{SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'user_sites'});
+if ($usites_exists) {
+    print "Table \"user_sites\" already exists -- leaving it as-is.\n";
+} else {
+    $dbh->do(q{
+        CREATE TABLE user_sites (
+            username  TEXT     NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+            site_id   INTEGER  NOT NULL REFERENCES sites(id)       ON DELETE RESTRICT,
+            PRIMARY KEY (username, site_id)
+        )
+    }) or die_clean("CREATE TABLE user_sites failed: " . $dbh->errstr);
+    print "Created table \"user_sites\".\n";
+}
+
+# Grant the application DB user the privileges it needs on the site tables and
+# sequence. When this script creates them it connects AS that user, so it is
+# already the owner and these grants are a harmless no-op; they are issued
+# explicitly so the schema works the same way regardless of who owns the
+# objects (e.g. if the tables were created by a different role).
+{
+    my $q_user = $dbh->quote_identifier($app_user2);
+    for my $stmt (
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON sites TO $q_user",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON user_sites TO $q_user",
+        "GRANT USAGE, SELECT, UPDATE ON SEQUENCE sites_id_seq TO $q_user",
+    ) {
+        $dbh->do($stmt);   # best effort; ignore if already granted / owner
+    }
+    print "Granted \"$app_user2\" access to the site tables.\n";
 }
 
 # --- Step 3: import from htpasswd (optional) -----------------------------
@@ -370,6 +428,15 @@ if ($admin_exists) {
     print "Created \"$BOOTSTRAP_USER\" with the default password \"$BOOTSTRAP_PASS\".\n";
     print "  --> Log in and change it immediately; fetchconfig-web will warn until you do.\n";
 }
+
+# --- Step 4b: start every user unrestricted (site 0) ---------------------
+# So nobody is locked out after enabling per-site access; administrators then
+# tighten assignments on the User page. admin always keeps site 0.
+$dbh->do(q{INSERT INTO user_sites (username, site_id)
+           SELECT username, 0 FROM users
+           WHERE NOT EXISTS (SELECT 1 FROM user_sites us
+                             WHERE us.username = users.username AND us.site_id = 0)})
+    or warn "Note: could not seed user_sites: " . $dbh->errstr . "\n";
 
 $dbh->disconnect;
 
@@ -439,7 +506,7 @@ HELP_FILE               = /www/pub/fetchconfig-web/help.html
 # Leave empty to disable sudo saving (then the template directories must be
 # writable by the web-server user). See "Template editor" in README.md.
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
-APP_VERSION             = 1.15
+APP_VERSION             = 1.50
 COPYRIGHT               = 2026 (c) Rainer Tammer
 CFG
 }

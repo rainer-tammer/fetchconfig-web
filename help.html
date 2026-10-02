@@ -47,6 +47,17 @@
   re-implement the backup logic: every page runs the same
   <code>fetchconfig.pl</code> command-line tool behind the scenes, so what you
   see here always matches what the command line would produce.</p>
+<section>
+  <h2>Per-site device access</h2>
+  <p>If your account is limited to one or more <strong>sites</strong>, you see
+  and edit only the devices tagged with your site codes. The Devices, Status
+  and Reports pages are filtered to your sites, Setup opens straight into the
+  graphical device editor (Devices only; the Defaults tab is view-only; no
+  Email/Reporting or Bulk edit), and a device can be assigned only to a site you
+  hold. An administrator manages site codes and per-user assignments on the User
+  page.</p>
+</section>
+
 </div>
 
 <nav class="toc">
@@ -55,7 +66,7 @@
     <li><a href="#help-menu">The menu bar</a></li>
     <li><a href="#help-login">Logging in and out</a></li>
     <li><a href="#help-devices">Devices</a></li>
-    <li><a href="#help-status">Status</a></li>
+    <li><a href="#help-status">Backup status</a></li>
     <li><a href="#help-backups">Backups for a device</a></li>
     <li><a href="#help-viewing">Viewing a backup</a></li>
     <li><a href="#help-comparing">Comparing two backups</a></li>
@@ -71,11 +82,24 @@
 
 <section class="card" id="help-menu">
   <h2>The menu bar</h2>
-  <p>The bar across the top of every page holds the menu &mdash;
-  <strong>Devices</strong>, <strong>Setup</strong> and <strong>Tools</strong>
-  (shown only when you have the rights for them), <strong>User</strong>, and
-  <strong>Help</strong> &mdash; with your username and a
-  <strong>Log out</strong> link on the right.</p>
+  <p>The bar across the top of every page holds application-style drop-down
+  menus; click a menu name to open it and pick a function. Your username and a
+  <strong>Log out</strong> link sit on the right. The menus are:</p>
+  <ul>
+    <li><strong>Devices</strong> &mdash; Device list (the home page after
+        login), Backup status, Backup reports.</li>
+    <li><strong>Setup devices</strong> (only if you may edit the device table)
+        &mdash; Show device table, Edit device table, Bulk edit. A site-limited
+        user sees only Edit device table.</li>
+    <li><strong>Tools</strong> (administrators only) &mdash; each tool on its
+        own page: Check devices for consistent backup suffixes, Check devices
+        for empty backups, Check site assignment, Devices without backups,
+        Empty Directory Cleanup, Orphaned Backup Cleanup, Restore device table,
+        Template viewer, View fetchconfig log.</li>
+    <li><strong>User</strong> &mdash; Change your password (everyone); Users
+        list, Add user and Sites (administrators only).</li>
+    <li><strong>Help</strong> &mdash; this page.</li>
+  </ul>
 </section>
 
 <section class="card" id="help-login">
@@ -289,11 +313,12 @@
 <section class="card" id="help-setup">
   <h2>Setup &amp; editing the device table</h2>
   <ul>
-    <li>The <strong>Setup</strong> menu item appears for the
+    <li>The <strong>Setup devices</strong> menu appears for the
         <code>admin</code> account and for any user granted the device-table
-        edit right. It shows the raw fetchconfig device table exactly as the
-        tool reads it, with a Copy button &mdash; useful for checking how a
-        device or its defaults are configured.</li>
+        edit right. Its <strong>Show device table</strong> item shows the raw
+        fetchconfig device table exactly as the tool reads it, with a Copy
+        button; <strong>Edit device table</strong> opens the graphical editor
+        and <strong>Bulk edit</strong> the raw editor.</li>
     <li>Because the device table can contain device login credentials (on its
         <code>default:</code> lines), access is restricted this way and the
         page should be treated as sensitive.</li>
