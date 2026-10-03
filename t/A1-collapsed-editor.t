@@ -4,7 +4,7 @@ use FindBin; use lib "$FindBin::Bin/lib";
 use FCWebTest qw(load_cgi make_config);
 
 my ($cfg) = make_config();
-load_cgi($cfg);
+load_cgi($cfg); main::read_config();
 
 no warnings 'once';
 # Build an original table: comment, default, three devices (two GMG, one HAM).

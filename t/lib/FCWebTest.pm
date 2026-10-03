@@ -113,7 +113,12 @@ sub make_config {
     );
     my $path = File::Spec->catfile($dir, 'fetchconfig-web.cfg');
     open(my $fh, '>', $path) or die "cannot write $path: $!";
-    print $fh "$_ = $cfg{$_}\n" for sort keys %cfg;
+    # Skip keys whose value is undef (a caller may pass KEY => undef to mean
+    # "leave this unset" rather than writing a bogus "KEY = " line).
+    for (sort keys %cfg) {
+        next unless defined $cfg{$_};
+        print $fh "$_ = $cfg{$_}\n";
+    }
     close($fh);
     return ($path, $dir, $fcp);
 }
@@ -145,10 +150,39 @@ sub load_cgi {
     $src =~ s/^if \(!-d \$SESSION_DIR\) \{.*?^\}\n//ms;
     $src =~ s/^\s*main\(\);\s*$//m;
     $src =~ s/^\s*exit\s+0;\s*$//m;
+
+    # A second load_cgi() in one test process re-defines every sub and constant,
+    # which is intentional but otherwise floods the output with "redefined"
+    # warnings. The CGI's own "use strict; use warnings;" would re-enable them
+    # for the rest of the file, so inject "no warnings 'redefine','once'"
+    # immediately after the FIRST pragma -- before the "use constant" lines,
+    # whose BEGIN-time redefinition warnings fire during compilation of the
+    # eval'd source. (Test-only transform; the shipped script is unchanged.)
+    $src =~ s/^(use\s+warnings\s*;)/$1\nno warnings 'redefine', 'once';/m;
+
     $src .= "\n1;\n";
 
-    # Eval into package main so the subs are callable as main::foo().
-    my $ok = eval "package main;\n" . $src . "\n";
+    # Eval into package main so the subs are callable as main::foo(). A test may
+    # load_cgi() more than once (e.g. to switch to a second config); that
+    # re-defines every sub and constant, which is intentional here. The pragma
+    # must be in scope at the point the eval RUNS (that is where the redefine
+    # warnings fire), so wrap the eval itself -- prepending "no warnings" inside
+    # the eval'd string is not enough for sub/constant redefinition.
+    # Silence only the noise a deliberate reload makes -- "Subroutine/Constant
+    # subroutine ... redefined" and "used only once" -- while letting every
+    # other warning through unchanged. A __WARN__ filter catches all of them
+    # uniformly, including the "use constant" redefinitions that fire from
+    # constant.pm's own glob assignment and so ignore a lexical pragma here.
+    my $ok = do {
+        no warnings 'redefine', 'once';
+        local $SIG{__WARN__} = sub {
+            my $w = shift;
+            return if $w =~ /(?:Constant subroutine|Subroutine) \S+ redefined/;
+            return if $w =~ /used only once: possible typo/;
+            warn $w;
+        };
+        eval "package main;\nno warnings 'redefine', 'once';\n" . $src . "\n";
+    };
     die "loading CGI failed: $@" unless $ok;
     return 1;
 }

@@ -4259,6 +4259,13 @@ sub show_tools {
         . qq{restore it (the current table is backed up first, so a restore is itself }
         . qq{undoable), or delete it.</p>\n};
 
+    # Staleness token + human age of the LIVE table now, so each Restore form
+    # can (a) show the admin how fresh the table it is about to replace is, and
+    # (b) carry the token for the save-time concurrency guard (Layer 1).
+    my $cur_token = device_table_mtime();
+    my @cur_st    = Time::HiRes::stat($DEVICE_TABLE);
+    my $cur_age   = @cur_st ? time_with_age($cur_st[9]) : 'unknown';
+
     my $backups = list_table_backups();
     if (!@$backups) {
         print qq{<p>No backups found.</p>\n};
@@ -4303,12 +4310,18 @@ sub show_tools {
             print qq{<a class="btn view-backup-link" data-name="} . esc($n) . qq{" href="}
                 . esc(script_url() . '?action=view_backup&name=' . CGI::escape($n))
                 . qq{">View</a>\n};
-            # Restore (POST + CSRF + confirm)
+            # Restore (POST + CSRF + confirm). The confirm states how fresh the
+            # live table is (Layer 2) and the form carries the staleness token
+            # (Layer 1) so a concurrent change aborts the restore.
             print $cgi->start_form(-method => 'POST', -action => script_url(),
                 -data_confirm => 'Restore the device table from ' . esc($n)
-                    . '? The current table will be backed up first.');
+                    . '? The current table (last modified ' . esc($cur_age)
+                    . ') will be backed up first, then replaced -- any change made '
+                    . 'since then is discarded.',
+                -data_confirm_danger => 'y');
             print qq{<input type="hidden" name="action" value="restore_backup">\n};
             print qq{<input type="hidden" name="name" value="} . esc($n) . qq{">\n};
+            print qq{<input type="hidden" name="table_mtime" value="} . esc($cur_token) . qq{">\n};
             print csrf_field();
             print qq{<button type="submit" class="btn">Restore</button>\n};
             print $cgi->end_form;
@@ -5948,10 +5961,30 @@ sub do_restore_backup {
         local $/; $restore_content = <$fh>; close($fh);
     }
 
+    # Serialise against editor/bulk saves and re-check the staleness token under
+    # the lock (Layer 1): a restore replaces the whole table, so if it changed
+    # since the Restore page was loaded the newer change would be silently lost.
+    # The restore still takes a pre-restore backup, so an intended restore is
+    # itself undoable -- but an UNINTENDED clobber is now refused instead.
+    my ($table_lock, $lock_err) = lock_device_table();
+    unless ($table_lock) {
+        redirect_to_tools(err => "$lock_err The table was NOT restored.");
+        return;
+    }
+    my $submitted_mtime = $cgi->param('table_mtime') // '';
+    my $current_mtime   = device_table_mtime();
+    if ($submitted_mtime ne '' && "$current_mtime" ne "$submitted_mtime") {
+        redirect_to_tools(err =>
+            'The device table changed since the Restore page was loaded, so the '
+          . 'restore was NOT performed (that newer change is not lost). Reload '
+          . 'this page to see the current state, then restore again if you still '
+          . 'want to.');
+        return;
+    }
+
     # Current bytes, so the pre-restore backup captures exactly what's live.
     my ($current, $rerr) = slurp_device_table();
     $current = '' unless defined $current;
-    # No mtime guard here: a restore is an intentional "make it this" action.
     my ($ok, $info) = backup_and_write_table($current, $restore_content);
     if (!$ok) {
         redirect_to_tools(err => $info);
@@ -6397,6 +6430,14 @@ sub do_edit_site {
     my ($uok, $uerr) = db_update_site($dbh, $id, $code, $desc);
     unless ($uok) { $dbh->disconnect; _sites_redirect(err=>"Could not update site: " . ($uerr // 'database error') . '.'); return; }
     if ($oldcode ne $code) {
+        # Serialise against editor saves: the rename is a read-modify-write of
+        # the table, so hold the writer lock from the read through the write.
+        my ($table_lock, $lock_err) = lock_device_table();
+        unless ($table_lock) {
+            $dbh->disconnect;
+            _sites_redirect(err => "Site renamed in the database, but the device table could not be locked for the site= rewrite: $lock_err");
+            return;
+        }
         my ($content, $cerr) = slurp_device_table();
         if (!$cerr) {
             my $recs = parse_device_table($content);
@@ -7794,9 +7835,52 @@ sub serialize_records {
 # can't be stat'd. Used for the edit concurrency guard: the editor captures
 # this when the page loads and the save handler refuses to write if the
 # file changed underneath in the meantime.
+# Take an exclusive lock serialising writers of the device table. Returns a
+# filehandle whose lifetime IS the lock: flock() is released automatically when
+# the handle goes out of scope (including on every early return), so callers
+# simply keep the returned value in a lexical for as long as the critical
+# section lasts. The lock lives on a sidecar file in $BACKUP_TMP_DIR (web-user
+# writable) rather than on the table itself, because the web user usually may
+# not create files in the table's directory. Closes the check-then-write race:
+# a saver must re-verify the staleness token AFTER acquiring this lock.
+# Returns undef (and a reason in $@-style second value) if the lock cannot be
+# taken; callers then refuse to write rather than proceed unlocked.
+sub lock_device_table {
+    my $dir  = (defined $BACKUP_TMP_DIR && $BACKUP_TMP_DIR ne '') ? $BACKUP_TMP_DIR : $SESSION_DIR;
+    my $lock = "$dir/device_table.lock";
+    my $fh;
+    unless (open($fh, '>>', $lock)) {
+        return (undef, "Could not open lock file $lock: $!");
+    }
+    unless (flock($fh, LOCK_EX)) {
+        close($fh);
+        return (undef, "Could not lock the device table ($lock): $!");
+    }
+    return ($fh, undef);
+}
+
 sub device_table_mtime {
-    my @st = stat($DEVICE_TABLE);
-    return @st ? $st[9] : '';
+    # Staleness token for the edit concurrency guard. It is an opaque string
+    # "<mtime>:<size>:<md5>" rather than a bare mtime, so a change is detected
+    # even when two writes land within the same clock tick:
+    #   - mtime via Time::HiRes::stat gives sub-second resolution on AIX (JFS2)
+    #     and Linux (XFS/ext4); on a filesystem that only stores whole seconds
+    #     the size and content digest still catch a same-second rewrite.
+    #   - MD5 is used as a change detector (not a security primitive), and it
+    #     is already loaded; it avoids a Digest::SHA dependency on older Perls.
+    # The token travels through the editor's hidden table_mtime field and is
+    # compared verbatim on save, so its format is internal only.
+    my @st = Time::HiRes::stat($DEVICE_TABLE);
+    return '' unless @st;
+    my $digest = '';
+    if (open(my $fh, '<', $DEVICE_TABLE)) {
+        binmode($fh);
+        my $ctx = Digest::MD5->new;
+        $ctx->addfile($fh);
+        $digest = $ctx->hexdigest;
+        close($fh);
+    }
+    return sprintf('%.6f:%d:%s', $st[9], $st[7], $digest);
 }
 
 # Read $DEVICE_TABLE verbatim for the "Show device table" view -- no parsing, no
@@ -9034,7 +9118,19 @@ sub do_save_table {
         return;
     }
 
+    # --- serialise writers: take the table lock FIRST, then run the staleness
+    # check under it, so two near-simultaneous saves cannot both pass the check
+    # and overwrite each other. $table_lock's scope is the whole critical
+    # section (through backup_and_write_table); every early return releases it.
+    my ($table_lock, $lock_err) = lock_device_table();
+    unless ($table_lock) {
+        redirect_to_editor(err => "$lock_err Your changes were NOT saved.");
+        return;
+    }
+
     # --- concurrency guard: has the file changed since the editor opened? ---
+    # The token is hires-mtime:size:md5 (see device_table_mtime), so a change
+    # within the same second is still detected.
     my $submitted_mtime = $cgi->param('table_mtime') // '';
     my $current_mtime   = device_table_mtime();
     if ($submitted_mtime ne '' && "$current_mtime" ne "$submitted_mtime") {
@@ -9045,9 +9141,9 @@ sub do_save_table {
     }
 
     # Re-read the current table so secret fields left at the mask can recover
-    # their original value. The mtime guard above means this matches exactly
-    # what the editor was built from, so original record index N ("rN") lines
-    # up with $orig[N].
+    # their original value. The guard above (held under the lock) means this
+    # matches exactly what the editor was built from, so original record index
+    # N ("rN") lines up with $orig[N].
     my ($content, $rerr) = slurp_device_table();
     if ($rerr) { redirect_to_editor(err => $rerr); return; }
     my $orig = parse_device_table($content);
@@ -9272,6 +9368,23 @@ sub backup_epoch_from_name {
 
 # List device-table backups in $BACKUP_DEVICE_TABLE, newest first. Returns
 # an arrayref of { name, size, mtime } (name is the basename only).
+# Format a Unix time as "YYYY-MM-DD HH:MM (N min ago)" for the Restore confirm.
+sub time_with_age {
+    my ($t) = @_;
+    return 'unknown' unless defined $t && $t > 0;
+    my @lt = localtime($t);
+    my $stamp = sprintf('%04d-%02d-%02d %02d:%02d',
+                        $lt[5] + 1900, $lt[4] + 1, $lt[3], $lt[2], $lt[1]);
+    my $age = time() - $t;
+    $age = 0 if $age < 0;
+    my $ago;
+    if    ($age < 60)    { $ago = 'just now'; }
+    elsif ($age < 3600)  { my $m = int($age / 60);   $ago = "$m min ago"; }
+    elsif ($age < 86400) { my $h = int($age / 3600); $ago = "$h h ago"; }
+    else                 { my $d = int($age / 86400); $ago = "$d day" . ($d == 1 ? '' : 's') . ' ago'; }
+    return "$stamp ($ago)";
+}
+
 sub list_table_backups {
     my $re = backup_name_re();
     my @backups;
@@ -9491,6 +9604,15 @@ sub do_bulk_save {
     unless ($is_admin) {
         print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
         print "Only an admin can bulk-edit the device table.\n";
+        return;
+    }
+
+    # Serialise writers (same as do_save_table): lock first, then check the
+    # staleness token under the lock, hold the lock through the write.
+    my ($table_lock, $lock_err) = lock_device_table();
+    unless ($table_lock) {
+        show_bulk_edit($user, scalar($cgi->param('devices')),
+            ["$lock_err Your changes were NOT saved."]);
         return;
     }
 

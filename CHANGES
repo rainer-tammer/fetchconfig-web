@@ -7,6 +7,36 @@
 
 1.50
 ====
+* make test now runs cleanly: the test harness (t/lib/FCWebTest.pm) silences
+  the "Subroutine/Constant subroutine ... redefined" and "used only once" noise
+  that a deliberate second load of the CGI produced, and make_config skips
+  undef overrides. No change to the shipped application.
+* The test harness no longer prints "Subroutine ... redefined" / "used only
+  once" / uninitialized-value warnings when a test loads the CGI more than once
+  (e.g. to switch config). FCWebTest::load_cgi now filters that reload noise and
+  make_config skips undef overrides; the affected tests set no warnings "once".
+  Cosmetic only - no test outcome changed (271 tests pass).
+* Restore device table now participates in the concurrency guard: its confirm
+  shows the live table's last-modified time/age, and the restore takes the
+  writer lock and re-checks the staleness token under it, so a restore started
+  against a table that has since changed is refused instead of silently
+  discarding the newer change (Gap C, Layers 1-2).
+* New INSTALL.md (rendered to INSTALL.html by render-doc.py):
+  a step-by-step installation and upgrade guide. render-doc.py: clearer usage
+  errors (reversed args / missing input now print a usage message and exit
+  cleanly instead of a traceback). render-doc.py now derives the
+  page title/lede from the input document so it renders both README.md and
+  INSTALL.md. Corrected the Perl requirements: Digest::MD5 and Time::HiRes
+  listed; the phantom Digest::SHA / MIME::Base64 requirements removed (neither
+  is used -- MD5 is used deliberately to avoid a Digest::SHA dependency on
+  older Perls such as AIX).
+* Concurrency hardening of device-table writes. The staleness token is now
+  <hires-mtime>:<size>:<md5> (Time::HiRes::stat for sub-second mtimes on AIX
+  JFS2 / Linux XFS, plus a content digest), so a same-second rewrite is
+  detected. Save, Bulk edit and the site-code rename now take an exclusive
+  flock on a sidecar lock file, re-check the token under the lock and write
+  while holding it, closing the check-then-write race in which two
+  near-simultaneous saves could silently overwrite each other.
 * Documentation brought up to date (README.md and help.html): collapsed device
   editor and on-demand card loading, Site/comment filters and top+bottom pager,
   Save changes / view-only Preview / Reject all changes, directory drop-downs

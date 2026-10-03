@@ -135,7 +135,7 @@ ok(  (grep /must select a site/, main::site_table_errors($fd, \@untagged, 1)),
         r3_kind => 'device', r3_model => 'cisco-ios', r3_id => 'mine', r3_host => 'h',
         r3_opt_user => 'm', r3_opt_pass => $SK, r3_opt_site => 'BER01',
     );
-    no warnings 'redefine';
+    no warnings 'redefine', 'once';
     my $old_param = \&CGI::param;
     local *CGI::param = sub {
         my ($s,$k) = @_;

@@ -135,12 +135,16 @@ each of these in turn.
   user database (see "User database" below).
 - `fetchconfig-web-documentation.html` -- this README rendered as a styled,
   self-contained HTML manual (linked from the Help page).
+- `INSTALL.md` + `INSTALL.html` -- the step-by-step
+  installation and upgrade guide (Markdown, and the same rendered to HTML).
+  Start there for a new deployment; this README is the full reference.
 - `CHANGES` -- the changelog.
 - `LICENSE` -- the GNU General Public License, version 3 (see "License"
   below).
 - `render-doc.py` + `render-doc.md` -- a build helper (Python 3, standard
-  library only) that regenerates `fetchconfig-web-documentation.html` from
-  this README, and its short description. Not needed at runtime.
+  library only) that renders the Markdown documents to HTML:
+  `README.md` -> `fetchconfig-web-documentation.html` and
+  `INSTALL.md` -> `INSTALL.html`. Not needed at runtime.
 
 ## Part 2 -- Installation and configuration
 
@@ -165,14 +169,20 @@ Each step is detailed below.
 
 ### Requirements
 
-- Perl 5 with core modules: `CGI`, `CGI::Cookie`, `Digest::MD5`,
-  `Digest::SHA`, `MIME::Base64`, `Fcntl`, `File::Path`, `File::Temp`,
-  `IPC::Open3`, `IO::Select`, `Symbol`, `Text::ParseWords`. `CGI.pm` was
-  removed from Perl core in 5.22+, so on newer systems install it
-  separately, e.g. `apt install libcgi-pm-perl` (Debian/Ubuntu),
-  `dnf install perl-CGI` (RHEL), `zypper install perl-CGI` (SLES) or
-  `cpan CGI`. The rest are
-  standard core modules on every Perl install (Linux and AIX).
+- Perl 5 (5.10 or newer) with these core modules: `CGI`, `CGI::Cookie`,
+  `Digest::MD5`, `Time::HiRes`, `Fcntl`, `File::Path`, `File::Temp`,
+  `File::Copy`, `IPC::Open3`, `IO::Select`, `Symbol`, `Errno`,
+  `Text::ParseWords`. `CGI.pm` was removed from Perl core in 5.22+, so on
+  newer systems install it separately, e.g. `apt install libcgi-pm-perl`
+  (Debian/Ubuntu), `dnf install perl-CGI` (RHEL), `zypper install perl-CGI`
+  (SLES) or `cpan CGI`. The rest are standard core modules on every Perl
+  install (Linux and AIX).
+  **Note:** `Digest::SHA` is deliberately *not* required. Password hashes use
+  pure-Perl Apache MD5 (`$apr1$`) via `Digest::MD5`; SHA-256/512 (`$5$`/`$6$`)
+  hashes are verified through the system `crypt()`. The device-table
+  staleness digest also uses `Digest::MD5` (as a change detector, not a
+  security primitive) precisely to avoid a `Digest::SHA` dependency on older
+  Perls such as the one shipped with AIX.
 - `Algorithm::Diff`, `DBI`, and `DBD::Pg` (non-core) -- see "Non-core Perl
   modules" below.
 - A **PostgreSQL** server (9.2 or newer) reachable from the web server, and
@@ -591,7 +601,8 @@ exact commands).
 
 **Serve over HTTPS.** Login posts a plaintext password and the session
 cookie is a bearer token; both should travel encrypted. Once HTTPS is in
-place, uncomment `-secure => 1` on the cookie in `do_login()`.
+place, set `HTTPS_ENABLED = 1` in the configuration so the session cookie
+carries the `Secure` flag (no source edit needed).
 
 ### Backup Now and repository write permissions
 
@@ -915,11 +926,21 @@ a field still holding that placeholder keeps the stored value (recovered by
 re-reading the current table); any other value -- including empty --
 replaces it. New devices/defaults must have their password typed in.
 
-**Concurrency guard:** the editor records the device table's modification
-time when it opens and sends it back on save. If the file changed on disk in
-the meantime (another admin, or an OS-side edit), the save is refused with a
-message and nothing is written -- so two overlapping edits can't silently
-clobber each other.
+**Concurrency guard:** the editor records a staleness token for the device
+table when it opens and sends it back on save. The token is
+`<mtime>:<size>:<md5>` -- the modification time via `Time::HiRes::stat`
+(sub-second on AIX JFS2 and Linux XFS/ext4) plus the file size and an MD5 of
+the content, so a change is detected even when two writes land within the same
+clock tick or on a filesystem that only stores whole seconds. On save (and in
+Bulk edit, and the site-code rename that rewrites `site=` across the table) the
+writer first takes an **exclusive `flock`** on a sidecar lock file
+(`device_table.lock` in `BACKUP_TMP_DIR`, falling back to `SESSION_DIR`), then
+re-checks the token *under the lock*, then writes, then releases. This closes
+the check-then-write window: two near-simultaneous saves can no longer both
+pass the check and overwrite each other -- the second is refused with a
+message and nothing is written. The lock is held only for the duration of the
+save itself, never while the editor is merely open, so an abandoned editor
+session cannot block anyone.
 
 **On save**, the editor writes the table in a fixed layout, regrouping the
 records by kind (original relative order preserved within each group) and
@@ -1278,9 +1299,13 @@ backup row has a checkbox and **View / Restore / Delete**:
   backup can be inspected fully before restoring.
 - **Restore** (POST + CSRF, confirm dialog) writes the chosen backup over
   `$DEVICE_TABLE`. The **current** table is backed up first (into the same
-  `$BACKUP_DEVICE_TABLE`, so a restore is itself undoable), then the backup
-  is written in place via the shared safe-writer. No mtime guard here -- a
-  restore is an intentional "make it this" action.
+  `$BACKUP_DEVICE_TABLE`, so a restore is itself undoable), then the backup is
+  written in place via the shared safe-writer. The confirm dialog shows how
+  fresh the live table is (its last-modified time and age), and Restore
+  participates in the same concurrency guard as Save: it takes the writer lock
+  and re-checks the staleness token under it, so a restore started against a
+  table that has since changed is refused rather than silently discarding the
+  newer change. Reload the Restore page to see the current state and try again.
 - **Delete** (POST + CSRF, confirm dialog) permanently removes the `.bak`
   file.
 

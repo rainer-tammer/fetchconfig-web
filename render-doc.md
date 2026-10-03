@@ -1,26 +1,39 @@
 # render-doc.py
 
-Build tool that renders `fetchconfig-web-documentation.html` (the HTML manual)
-from `README.md`. It is a development/build helper -- it is **not** needed at
-runtime by fetchconfig-web itself.
+Build tool that renders the project's Markdown documents to styled,
+self-contained HTML: `README.md` becomes `fetchconfig-web-documentation.html`
+(the manual) and `INSTALL.md` becomes `INSTALL.html` (the
+installation guide). It is a development/build helper -- it is **not** needed
+at runtime by fetchconfig-web itself.
 
 ## Usage
 
 ```sh
-python3 render-doc.py [input-readme] [output-html]
+python3 render-doc.py [input-markdown] [output-html]
 ```
+
+The **script name comes first**. A common mistake is to omit it, e.g.
+`python INSTALL.md INSTALL.html` -- that asks Python to execute the Markdown
+and fails with a `SyntaxError`. Always run `python render-doc.py <input> <output>`.
 
 Both arguments are optional and default to:
 
 - input:  `README.md`
 - output: `fetchconfig-web-documentation.html`
 
-Run it from the project directory after editing `README.md` to regenerate the
-manual:
+Run it from the project directory after editing either document:
 
 ```sh
-python3 render-doc.py
+python3 render-doc.py                                      # README.md -> manual
+python3 render-doc.py INSTALL.md INSTALL.html   # install guide
 ```
+
+The page title, hero eyebrow and lede are derived from the input: the H1
+`fetchconfig-web -- <Subtitle>` supplies the eyebrow/title (a bare
+`fetchconfig-web` H1 falls back to "Documentation") and the first intro
+paragraph after the H1 is the lede. The sidebar is built from the `##`
+sections and their `###` subsections, so both documents stay in sync with
+their Markdown automatically.
 
 ## Requirements
 

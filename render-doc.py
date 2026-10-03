@@ -23,7 +23,7 @@
 # Copyright (C) 2026  Rainer Tammer
 # Licensed under the GNU GPL v3 or later (see the LICENSE file).
 
-import sys, re, io
+import sys, re, io, os
 
 # --- Python 2.7 / 3 compatibility -----------------------------------------
 # html.escape (Py3) vs cgi.escape (Py2); io.open gives an encoding= kwarg on
@@ -57,8 +57,30 @@ def to_text(s):
     return s if isinstance(s, _text_type) else _text_type(s)
 
 # --- I/O filenames (argv-overridable) --------------------------------------
+# Correct invocation:  python render-doc.py [input.md] [output.html]
+# A common mistake is to omit the script name, e.g. `python INSTALL.md out.html`,
+# which makes Python try to EXECUTE the Markdown and fail with a confusing
+# SyntaxError. Guard against it: if this file is not the program being run (so
+# our own usage/help never fires), or the "input" is an .html while the
+# "output" is a .md, explain the correct command and exit cleanly.
+def _usage(msg):
+    sys.stderr.write(
+        "render-doc.py: %s\n"
+        "Usage:  python render-doc.py [input.md] [output.html]\n"
+        "  e.g.  python render-doc.py README.md  fetchconfig-web-documentation.html\n"
+        "        python render-doc.py INSTALL.md fetchconfig-web-install.html\n"
+        "Note: the SCRIPT name (render-doc.py) comes first, then the Markdown\n"
+        "input, then the HTML output. Do not run 'python INSTALL.md ...'.\n"
+        % msg)
+    sys.exit(2)
+
 README_IN = sys.argv[1] if len(sys.argv) > 1 else 'README.md'
 HTML_OUT  = sys.argv[2] if len(sys.argv) > 2 else 'fetchconfig-web-documentation.html'
+
+if README_IN.lower().endswith('.html') and HTML_OUT.lower().endswith(('.md', '.markdown')):
+    _usage("arguments look reversed (input should be Markdown, output HTML)")
+if not os.path.exists(README_IN):
+    _usage("input file not found: %s" % README_IN)
 
 # --- Embedded stylesheet + <style> wrapper (upstream doc's design system) --
 STYLE = r"""<style>
@@ -726,8 +748,28 @@ for idx,(title, body) in enumerate(sections, start=1):
         % (slug(title), idx, inline(title), render_body(body))
     )
 
-# hero lede: first paragraph of intro (after H1)
-lede = "A single-file Perl CGI front-end for fetchconfig: a browser UI for browsing device backups, viewing and comparing configurations, checking run status, and editing the device table &mdash; backed by a PostgreSQL user database."
+# Title, eyebrow and hero lede are derived from the INPUT document so the same
+# renderer serves README.md ("fetchconfig-web ... Documentation") and
+# INSTALL.md ("fetchconfig-web -- Installation") correctly:
+#   - the H1 "fetchconfig-web -- <Subtitle>" gives the eyebrow (<Subtitle>);
+#     a bare "fetchconfig-web" H1 falls back to "Documentation";
+#   - the lede is the first non-empty intro paragraph after the H1.
+_h1 = ''
+_lede_lines = []
+for _ln in intro:
+    if not _h1 and _ln.startswith('# '):
+        _h1 = _ln[2:].strip(); continue
+    if _h1:
+        if _ln.strip() == '':
+            if _lede_lines: break
+            continue
+        if _ln.startswith('#'): break
+        _lede_lines.append(_ln.strip())
+_m = re.match(r'^fetchconfig-web\s*(?:--|-|\u2014)\s*(.+)$', _h1)
+eyebrow = _m.group(1).strip() if _m else 'Documentation'
+page_title = 'fetchconfig-web &mdash; ' + html.escape(eyebrow)
+lede = inline(' '.join(_lede_lines)) if _lede_lines else \
+    "A single-file Perl CGI front-end for fetchconfig: a browser UI for browsing device backups, viewing and comparing configurations, checking run status, and editing the device table &mdash; backed by a PostgreSQL user database."
 
 # Precompute the dynamic pieces so the template below uses only simple named
 # placeholders -- str.format() (used for Python 2.7 compatibility) cannot call
@@ -740,7 +782,7 @@ page = (u"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>fetchconfig-web &mdash; Documentation</title>
+<title>{page_title}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -778,7 +820,7 @@ page = (u"""<!DOCTYPE html>
   <div class="main-col">
 
     <div class="hero">
-      <div class="hero-eyebrow">Documentation</div>
+      <div class="hero-eyebrow">{eyebrow}</div>
       <h1>fetchconfig-web</h1>
       <p class="lede">{lede}</p>
       <div class="callout warn" style="margin-top:1rem">
@@ -836,6 +878,7 @@ page = (u"""<!DOCTYPE html>
 
 </body>
 </html>
-""").format(style=style, lede=lede, nav=nav, sections=sections)
+""").format(style=style, lede=lede, nav=nav, sections=sections,
+            page_title=page_title, eyebrow=html.escape(eyebrow))
 _open_utf8(HTML_OUT, 'w').write(to_text(page))
 print("wrote %s: %d bytes, %d sections" % (HTML_OUT, len(page), len(sec_html)))
