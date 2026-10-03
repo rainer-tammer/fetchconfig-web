@@ -324,18 +324,35 @@
         page should be treated as sensitive.</li>
     <li><strong>Edit device table</strong> opens a structured editor with
         three tabs &mdash; <strong>Devices</strong>, <strong>Defaults</strong>
-        (per model), and <strong>Email notification</strong>. Each entry is a
-        card whose options are proper fields for the selected model; use
-        <em>+ add option</em> to add a recognized option, <em>+ Add device</em>
-        / <em>+ Add model defaults</em> to add rows, and the &times; / Delete
-        buttons to remove options or whole entries. On the Devices tab you can
-        filter the cards by <strong>Device-ID</strong> and by
-        <strong>comment</strong> (the filter is remembered between visits).</li>
+        (per model), and <strong>Email notification</strong>. On the Devices
+        tab each device is a compact <strong>collapsed row</strong>
+        (Device-ID / Model / Site / Comment); click <strong>Edit</strong> to
+        expand it into a full card of proper fields for the selected model, and
+        <strong>Collapse</strong> to fold it again. Use <em>+ add option</em> to
+        add a recognized option, <em>+ Add device</em> / <em>+ Add model
+        defaults</em> to add rows, and the &times; / Delete buttons to remove
+        options or whole entries. Filter the rows by <strong>Device-ID</strong>,
+        <strong>Site</strong> (a drop-down) and <strong>comment</strong>; the
+        filter is remembered between visits. Long lists paginate (100 per page)
+        with First/Prev/Next/Last above and below.</li>
+    <li><strong>Save changes</strong> writes the table (a timestamped backup is
+        taken first). <strong>Preview raw table</strong> shows exactly what would
+        be written, with passwords masked, and is view-only &mdash; use
+        <strong>Back to editor</strong> to return and save.
+        <strong>Reject all changes</strong> reloads from disk and discards your
+        edits. Passwords you don't change are kept (a masked
+        <code>\__unchanged__/</code> placeholder stands in for the stored value);
+        every device must have a <strong>site</strong> before the table saves.</li>
     <li>If the device table has a <strong>directory allow-list</strong> (the
         <code>directory:</code> lines, editable only on the server), the
         <strong>repository</strong> and <strong>template_dir</strong> options
-        become drop-downs of the allowed directories, shown by their
-        <code>$ALIAS</code> with the full path in gray. The <code>on_fetch_run</code>
+        become drop-downs of the allowed directories; each entry shows its
+        <code>$ALIAS</code> together with the directory it expands to, and the
+        selected directory is also shown in gray beside the box. When a device's
+        <strong>repository</strong>, <strong>template_dir</strong> (generic
+        model) or <strong>on_fetch_run</strong> directory matches the value from
+        its model's <code>default:</code> line, a blue <strong>default</strong>
+        flag is shown and that option is coloured blue. The <code>on_fetch_run</code>
         option (if allowed) is edited as a directory drop-down plus a command
         field; if the allow-list sets <code>fetch_run</code> to <code>none</code>
         it cannot be used. When a <code>report</code> directory is allow-listed,

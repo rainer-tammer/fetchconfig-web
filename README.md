@@ -295,6 +295,8 @@ DBhost                  = localhost
 PROTECTED_USER          = admin
 MIN_PASSWORD_LENGTH     = 8
 DEFAULT_PASSWORD        = fetchconfig
+HTTPS_ENABLED           = 0
+SHOW_RENDER_TIME        = 0
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 APP_VERSION             = 1.50
@@ -317,6 +319,17 @@ Format and loading:
   file is missing or a required key is absent, the app serves a clear
   configuration-error page instead of failing obscurely.
 - The config is read once per request, before anything else runs.
+- **`HTTPS_ENABLED`** (`0`|`1`, default `0`) controls the `Secure` flag on the
+  session cookie. Set it to `1` when fetchconfig-web is served over HTTPS: the
+  browser then only ever sends the cookie over an encrypted connection. Leave it
+  `0` for an HTTP-only deployment -- with `Secure` set on plain HTTP the browser
+  would withhold the cookie and login would appear to fail. This replaces the
+  old approach of editing the source to uncomment the cookie's `-secure` flag.
+- **`SHOW_RENDER_TIME`** (`0`|`1`, default `0`): the universal switch for the
+  load/render-time displays. When `1`, the device list, status, log and
+  template-list pages show their "... load time" line, and the device-table
+  editor shows its render time in gray at the bottom-right. A diagnostic aid;
+  off by default, so none of these appear unless enabled.
 - **`FETCHCONFIG_PATH` and `FETCHCONFIG_BIN`** together locate the
   fetchconfig executable: it is run as `<FETCHCONFIG_PATH>/<FETCHCONFIG_BIN>`
   (e.g. `/usr/local/fetchconfig/fetchconfig.pl`). `FETCHCONFIG_PATH` is also
@@ -870,25 +883,31 @@ on the table as three tabs -- **Devices**, **Defaults (per model)**, and
   SMTP transport security: `off` (default, plain SMTP), `starttls` (upgrade an
   initially-clear connection, typically port 25/587) or `ssl` (TLS from the
   start, typically port 465).
-- The **Devices** tab has **Device-ID** and **comment** filter boxes (with a
-  Clear button); they narrow the visible device cards by substring, combined
-  with AND, matching against each card's *live* field values (so filtering
-  keeps working as you edit). The filter choices persist in a cookie
-  (`fcweb_editfilter`, separate from the device-list filter). Filtering only
-  hides cards -- every device is still submitted on save -- and adding a
-  device clears the filter so the new (empty) card is visible.
-- The **Devices** tab paginates at 100 devices per page, with Prev/Next
-  navigation, over the *filtered* set (all devices are still submitted on
-  save regardless of the visible page). Adding a device jumps to page 1 so
-  the new entry is visible at the top.
+- The **Devices** tab lists devices as lightweight **collapsed rows**
+  (Device-ID / Model / Site / Comment + an **Edit** button). Clicking **Edit**
+  expands that one device: its full editable card is fetched on demand
+  (`?action=edit_card`) and shown inline; Edit toggles to **Collapse**. This
+  keeps the page small and fast even for thousands of devices -- only the
+  cards you open are built. Un-expanded devices round-trip unchanged on save.
+- The **Devices** tab has **Device-ID** (text), **Site** (searchable
+  drop-down) and **comment** (text) filters, plus a Clear button; they narrow
+  the visible rows by substring/exact-site, combined with AND, reading each
+  row's current value (live fields once expanded, otherwise the row's data).
+  The choices persist in a cookie (`fcweb_editfilter`). Filtering only hides
+  rows -- every device is still submitted on save -- and adding a device
+  clears the filter so the new card is visible.
+- The **Devices** tab paginates at 100 rows per page over the *filtered* set,
+  with First/Prev/Next/Last navigation shown **both above and below** the list
+  (all devices are still submitted regardless of the visible page). Adding a
+  device jumps to page 1.
 - **Device-ID** and **Host** get wider fields; on save the host is
   validated as an IPv4/IPv6 address or a hostname/FQDN, and Device-IDs must
   be present, valid, and unique.
-- **Preview raw table** shows the exact text that Save would write, with
-  passwords masked, without touching the file. From the preview you can
-  **Save changes** directly (your edits are carried forward) or go **Back to
-  editor** to keep editing. The editor's own **Save changes without preview**
-  button skips the preview step.
+- **Save changes** (green) writes the table. **Preview raw table** shows the
+  exact text Save would write (passwords masked) without touching the file; it
+  is **view-only** -- use **Back to editor** to return and save (your edits are
+  carried forward; only the devices you had expanded come back expanded).
+  **Reject all changes** (red) reloads the editor from disk, discarding edits.
 
 **Masked-secret write-back:** secret fields show a fixed placeholder
 (`\__unchanged__/`) for an existing value, never the real password. On save,
@@ -1127,17 +1146,26 @@ wrapped in the `# directory allow list - must be directly edited on the server`
 armor comments (shown in **red** in the Setup config view), and on save it is
 written back verbatim from disk. When the allow-list is present:
 
-* On the device-table editor, `repository=` and `template_dir=` become
-  **drop-downs of the allowed entries** (labelled by their `$ALIAS`), with the
-  expanded path shown in gray beside the field. A stored value that is not on
+* On the device-table editor, `repository=`, `template_dir=` (and
+  `on_fetch_run`'s directory part) become **drop-downs of the allowed entries**.
+  Each option shows both its `$ALIAS` **and** the directory it expands to
+  (e.g. `$TEMPLATE1 -- /usr/local/fetchconfig/templates`), with the selected
+  directory also shown in gray beside the field. A stored value that is not on
   the list is shown as a disabled *"(current, not allowed)"* option.
+* When a device option's value equals the value from its model's `default:`
+  line (`repository`, `on_fetch_run`'s directory, or `template_dir` on a
+  `generic` device), a blue **default** flag is shown beside the drop-down and
+  the matching option is coloured blue, so it is clear the device is using the
+  model default rather than an override.
 * Saved lines always store the **`$ALIAS`** (a literal path that matches an
   allowed path is rewritten to its alias), so changing a directory only means
   editing the `directory:` section -- every device follows automatically.
 * A table that references a directory not on the list can still be opened in
   the editor (so it can be fixed), with a red banner naming each violation, but
   **the save is blocked** until the violations are resolved.
-* Generic-model template lookups use the alias's **expanded path**.
+* Generic-model template lookups use the alias's **expanded path**. A `generic`
+  device with no `template_dir=` of its own inherits the `default:` line's
+  template directory (fetchconfig's `default`-section templates).
 
 When no `directory:` lines exist, the allow-list is inactive and the path
 fields stay free-text, exactly as before.
@@ -1707,8 +1735,13 @@ below are grouped by concern.
   in `$SESSION_DIR` (files mode 0600 in a 0700 directory). The session id is
   validated against `^[0-9a-f]{48}$` before use as a filename, so a crafted
   cookie cannot traverse out of `$SESSION_DIR`.
-- The session cookie is `HttpOnly` and `SameSite=Lax`. `-secure` is
-  commented out pending HTTPS; enable it once TLS is in place.
+- The session cookie is `HttpOnly` and `SameSite=Lax`. Set `HTTPS_ENABLED = 1`
+  (see Configuration) to add the `Secure` flag once the app is served over TLS.
+  **Serving fetchconfig-web over HTTPS is strongly recommended:** without TLS the
+  session cookie, the login password, and all device configuration (including
+  `pass=`/`enable=` secrets shown in Bulk edit and backups) travel in clear text
+  on the network. HTTPS is handled by the web server (Apache/nginx) in front of
+  the CGI, not by this script; `HTTPS_ENABLED` only governs the cookie flag.
 - `SESSION_TTL` (default 28800 s) is an **idle timeout**: the stored expiry is
   slid forward on every authenticated request, so a session ends `SESSION_TTL`
   after the last activity, not a fixed time after login.

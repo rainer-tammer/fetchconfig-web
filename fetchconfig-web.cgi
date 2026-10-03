@@ -81,7 +81,8 @@ my ($DEVICE_TABLE, $REPOSITORY, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFI
     $PROTECTED_USER, $MIN_PASSWORD_LENGTH, $DEFAULT_PASSWORD,
     $HELP_FILE, $APP_VERSION, $COPYRIGHT,
     $FETCHCONFIG_LOG, $LOG_MAX_DEVICES, $MAX_PARALLEL_SCAN,
-    $FONT_BASE_URL, $IMAGE_BASE_URL, $TEMPLATE_HELPER, $HELP_BASE_URL);
+    $FONT_BASE_URL, $IMAGE_BASE_URL, $TEMPLATE_HELPER, $HELP_BASE_URL,
+    $HTTPS_ENABLED, $SHOW_RENDER_TIME);
 
 # Parse $CONFIG_FILE (key = value, '#' comments and blank lines ignored,
 # optional surrounding quotes on the value) into a hashref, or (undef,
@@ -141,6 +142,16 @@ sub read_config {
     # to the default instead of causing runtime warnings or odd behaviour.
     $USE_SUDO_FOR_BACKUP_NOW = (defined $kv->{USE_SUDO_FOR_BACKUP_NOW} && $kv->{USE_SUDO_FOR_BACKUP_NOW} =~ /^[01]$/)
                                ? $kv->{USE_SUDO_FOR_BACKUP_NOW} : 1;
+    # When served over HTTPS, set HTTPS_ENABLED=1 so the session cookie carries
+    # the Secure flag (the browser then never sends it over plain HTTP). Default
+    # 0 so an HTTP-only deployment still works out of the box.
+    $HTTPS_ENABLED = (defined $kv->{HTTPS_ENABLED} && $kv->{HTTPS_ENABLED} =~ /^[01]$/)
+                     ? $kv->{HTTPS_ENABLED} : 0;
+    # When 1, load/render-time lines are shown across the UI (device list, status,
+    # log and template-list "load time" lines, and the device-table editor's
+    # render time, gray at the bottom-right). Default 0.
+    $SHOW_RENDER_TIME = (defined $kv->{SHOW_RENDER_TIME} && $kv->{SHOW_RENDER_TIME} =~ /^[01]$/)
+                        ? $kv->{SHOW_RENDER_TIME} : 0;
     $SUDO_BIN            = defined $kv->{SUDO_BIN}            ? $kv->{SUDO_BIN}            : '/usr/bin/sudo';
     $BACKUP_TMP_DIR      = defined $kv->{BACKUP_TMP_DIR} && $kv->{BACKUP_TMP_DIR} ne '' ? $kv->{BACKUP_TMP_DIR} : $SESSION_DIR;
     $BACKUP_DEVICE_TABLE = defined $kv->{BACKUP_DEVICE_TABLE} && $kv->{BACKUP_DEVICE_TABLE} ne '' ? $kv->{BACKUP_DEVICE_TABLE} : '/usr/local/fetchconfig/backup';
@@ -905,6 +916,8 @@ sub main {
             do_delete_old_backups($user);
         } elsif ($action eq 'edit_table') {
             show_edit_table($user);
+        } elsif ($action eq 'edit_card') {
+            show_edit_card($user);
         } elsif ($action eq 'edit_table_from_form') {
             show_edit_table($user);
         } elsif ($action eq 'preview_table') {
@@ -1057,6 +1070,44 @@ use constant SITE_ALL_CODE => '*';     # reserved id-0 code, shown as "any site"
 #     all => all sites arrayref, unrestricted => 0|1 }
 # Populated by show_edit_table() so render_option_field() need not take a user.
 our %SITE_CTX;
+
+# Per-model directory defaults taken from the "default: <model>" lines, so the
+# editor can flag a device option whose value equals its model's default.
+# model => { repository => <val>, template_dir => <val>, on_fetch_run => <val> }
+# Populated by model_defaults_init() from the parsed records.
+our %MODEL_DEFAULTS;
+sub model_defaults_init {
+    my ($records) = @_;
+    %MODEL_DEFAULTS = ();
+    for my $r (@$records) {
+        next unless $r->{kind} eq 'default';
+        my $m = defined $r->{model} ? $r->{model} : '';
+        next if $m eq '';
+        for my $p (@{ $r->{opts} || [] }) {
+            my ($k, $v) = @$p;
+            next unless defined $k && ($k eq 'repository' || $k eq 'template_dir'
+                                       || $k eq 'on_fetch_run');
+            # last "default:" line wins, matching fetchconfig semantics
+            $MODEL_DEFAULTS{$m}{$k} = $v;
+        }
+    }
+}
+
+# The model default for a device option, as an $alias (for comparison), or ''.
+# $dkind is the allow-list kind ('repository'|'template'|'fetch_run'); for
+# on_fetch_run only the directory part is taken. template_dir has no per-model
+# default line (it is the shared default template dir), so it is handled by the
+# caller via template_default_dir().
+sub model_default_alias {
+    my ($model, $key, $dkind) = @_;
+    my $raw = (defined $model && defined $MODEL_DEFAULTS{$model})
+            ? $MODEL_DEFAULTS{$model}{$key} : undef;
+    return '' unless defined $raw && $raw ne '';
+    if ($key eq 'on_fetch_run') { ($raw) = split_fetch_run($raw); }
+    return '' if !defined $raw || $raw eq '';
+    my $a = alias_for_value($dkind, $raw);
+    return defined $a ? $a : $raw;
+}
 sub site_ctx_init {
     my ($dbh, $username) = @_;
     my $acc = user_site_access($dbh, $username);
@@ -1646,7 +1697,8 @@ sub do_login {
             -httponly => 1,
             -samesite => 'Lax',   # defence-in-depth alongside the CSRF token
             -path     => '/',
-            # -secure => 1,   # uncomment once served over HTTPS
+            # Secure flag set from the HTTPS_ENABLED config key (default off).
+            ($HTTPS_ENABLED ? (-secure => 1) : ()),
         );
         # Return the user to the page they originally asked for (captured as a
         # hidden "next" in the login form), if it is a safe landing action;
@@ -1675,7 +1727,8 @@ sub do_logout {
     if (defined $username && csrf_ok($csrf)) {
         destroy_session($sid);
         my $cookie = CGI::Cookie->new(-name => $COOKIE_NAME, -value => '', -path => '/',
-                                      -httponly => 1, -samesite => 'Lax', -expires => '-1d');
+                                      -httponly => 1, -samesite => 'Lax', -expires => '-1d',
+                                      ($HTTPS_ENABLED ? (-secure => 1) : ()));
         print $cgi->header(-cookie => $cookie, -location => script_url(), -status => '302 Found');
     } else {
         print $cgi->header(-location => script_url(), -status => '302 Found');
@@ -1849,7 +1902,8 @@ sub show_device_list {
             ? sprintf('%dms', int($load_secs * 1000 + 0.5))
             : sprintf('%.2fs', $load_secs);
         print qq{<p class="dev-loadtime">Device table load time: }
-            . esc($load_str) . qq{</p>\n};
+            . esc($load_str) . qq{</p>\n}
+            if $SHOW_RENDER_TIME;
         print qq{</div>\n};   # .dev-stats
 
         print qq{</div>\n};   # .dev-layout
@@ -2201,7 +2255,8 @@ sub show_status_page {
     my $load_str = $load_secs < 1
         ? sprintf('%dms', int($load_secs * 1000 + 0.5))
         : sprintf('%.2fs', $load_secs);
-    print qq{<p class="dev-loadtime">Status table load time: } . esc($load_str) . qq{</p>\n};
+    print qq{<p class="dev-loadtime">Status table load time: } . esc($load_str) . qq{</p>\n}
+        if $SHOW_RENDER_TIME;
     print qq{</div>\n};   # .tool-section
 
     print status_page_script();
@@ -4107,9 +4162,9 @@ my %TOOL_TITLE = (
     empty_bk   => 'Check devices for empty backups',
     suffix     => 'Check devices for consistent backup suffixes',
 );
-# Render a Tools tool. With $only set (one of %TOOL_TITLE keys) it shows just
-# that one tool as its own page; otherwise it would show them all (no longer
-# used -- every Tools menu item links to a single-tool page).
+# Render a single Tools tool as its own page: $only is one of the %TOOL_TITLE
+# keys naming which tool to show. Called without $only (?action=tools, no tool
+# selected) it shows a short "pick a tool from the Tools menu" prompt.
 sub show_tools {
     my ($user, $only) = @_;
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
@@ -4392,47 +4447,6 @@ sub show_tool_nobackup   { show_tools($_[0], 'nobackup'); }
 sub show_tool_empty_bk   { show_tools($_[0], 'empty_bk'); }
 sub show_tool_suffix     { show_tools($_[0], 'suffix'); }
 
-# Tools-page section: just a launcher for the log viewer, which lives on its
-# own page (?action=view_log). No file read here.
-sub render_log_section {
-    print qq{<div class="tool-section">\n};
-    print qq{<h2 class="tool-section-title">View fetchconfig log</h2>\n};
-    print qq{<p class="muted">The output written by the scheduled (cron) }
-        . qq{<code>fetchconfig.pl</code> run, shown as collapsible sections }
-        . qq{(failed sections in red, expanded).</p>\n};
-    if (!defined $FETCHCONFIG_LOG || $FETCHCONFIG_LOG eq '') {
-        print qq{<p class="muted">No log file configured. Set }
-            . qq{<code>FETCHCONFIG_LOG</code> in <code>} . esc($CONFIG_FILE) . qq{</code>.</p>\n};
-    } else {
-        print qq{<p><a class="btn" href="}
-            . esc(script_url() . '?action=view_log') . qq{">Display log</a></p>\n};
-    }
-    print qq{</div>\n};   # .tool-section
-}
-
-# Tools-page section: launcher for the template viewer (?action=view_templates).
-sub render_site_check_section {
-    print qq{<div class="tool-section" id="site-check">\n};
-    print qq{<h2 class="tool-section-title">Check site assignment</h2>\n};
-    print qq{<p class="muted">List devices that have no <code>site=</code> assigned. }
-        . qq{Every device needs a site for the per-site user access to work.</p>\n};
-    print qq{<p><a class="btn" href="} . esc(script_url() . '?action=check_site_assignment')
-        . qq{">Check site assignment</a></p>\n};
-    print qq{</div>\n};
-}
-
-sub render_template_section {
-    print qq{<div class="tool-section">\n};
-    print qq{<h2 class="tool-section-title">Template viewer</h2>\n};
-    print qq{<p class="muted">Lists the generic-model templates found in the }
-        . qq{template directories <code>fetchconfig.pl -t</code> reports, and }
-        . qq{lets you view each one (read-only) with syntax highlighting. The }
-        . qq{same template name may appear in more than one directory.</p>\n};
-    print qq{<p><a class="btn" href="}
-        . esc(script_url() . '?action=view_templates') . qq{">Show templates</a></p>\n};
-    print qq{</div>\n};   # .tool-section
-}
-
 # Full-page fetchconfig log viewer (?action=view_log, admin only, read-only).
 # Reads FETCHCONFIG_LOG and shows it split into collapsible sections at each
 # "-----[NAME]-----" header. Section names are bold; the [NAME] is green, or
@@ -4544,7 +4558,8 @@ sub show_fetchconfig_log {
     my $load_str = $load_secs < 1
         ? sprintf('%dms', int($load_secs * 1000 + 0.5))
         : sprintf('%.2fs', $load_secs);
-    print qq{<p class="dev-loadtime">Log table load time: } . esc($load_str) . qq{</p>\n};
+    print qq{<p class="dev-loadtime">Log table load time: } . esc($load_str) . qq{</p>\n}
+        if $SHOW_RENDER_TIME;
     print log_viewer_script();
     print qq{</div>\n};   # .tool-section
     print top_bottom_nav();
@@ -5068,7 +5083,8 @@ sub show_view_templates {
     my $secs = Time::HiRes::time() - $t0;
     print qq{<p class="dev-loadtime">Template list load time: }
         . esc($secs < 1 ? sprintf('%dms', int($secs*1000+0.5)) : sprintf('%.2fs',$secs))
-        . qq{</p>\n};
+        . qq{</p>\n}
+        if $SHOW_RENDER_TIME;
     print qq{</div>\n};   # .tool-section
     print page_foot();
 }
@@ -7874,9 +7890,19 @@ sub render_option_field {
         # kept as an option so an existing setting is never lost.
         my $v = defined $val ? $val : '';
         my $sec = $section ne '' ? $section : 'device';
-        my $eff_dir = ($row_tpl_dir ne '') ? $row_tpl_dir
-                    : ($sec eq 'device' ? template_default_dir() : '');
-        my $models = template_models_for($sec, $eff_dir);
+        # Which template directory applies, and which -t section lists its
+        # templates: a device with its own template_dir uses the "device"
+        # section in that dir; a device WITHOUT one inherits the default: line's
+        # template_dir, whose templates fetchconfig -t tags as "default".
+        my ($eff_dir, $lookup_sec);
+        if ($row_tpl_dir ne '') {
+            $eff_dir = $row_tpl_dir;  $lookup_sec = $sec;
+        } elsif ($sec eq 'device') {
+            $eff_dir = template_default_dir();  $lookup_sec = 'default';
+        } else {
+            $eff_dir = '';  $lookup_sec = $sec;
+        }
+        my $models = template_models_for($lookup_sec, $eff_dir);
         my %have = map { $_ => 1 } @$models;
         # Current value invalid = set but not among this directory's models. It
         # is shown as a disabled marker (not selectable) and the warning is on.
@@ -7930,8 +7956,14 @@ sub render_option_field {
         # path, normalise it to its alias so the matching option is selected.
         $cur_dir = alias_for_value('fetch_run', $cur_dir) if $cur_dir ne '';
         my $dir_ok = ($cur_dir ne '') ? defined resolve_allowed_path('fetch_run', $cur_dir) : 1;
+        # Model default directory (as $alias) for the blue "default" flag; only
+        # the directory part of the default: on_fetch_run= is compared.
+        my $def_alias = ($section ne 'default')
+            ? model_default_alias($model_or_email, 'on_fetch_run', 'fetch_run') : '';
         $control  = qq{<input type="hidden" name="} . esc($name) . qq{" value="$ev" class="fr-hidden">};
-        $control .= qq{<select class="fr-dir dir-alias-select" data-dir-kind="fetch_run">}
+        $control .= qq{<select class="fr-dir dir-alias-select" data-dir-kind="fetch_run"}
+                  . ($def_alias ne '' ? qq{ data-default-alias="} . esc($def_alias) . qq{"} : '')
+                  . qq{>}
                   . qq{<option value=""} . ($cur_dir eq '' ? ' selected' : '') . qq{>(choose directory)</option>};
         if ($cur_dir ne '' && !$dir_ok) {
             $control .= qq{<option value="} . esc($cur_dir) . qq{" selected disabled>}
@@ -7939,10 +7971,16 @@ sub render_option_field {
         }
         for my $e (@{ $al->{fetch_run} }) {
             my $sel = ($cur_dir eq $e->{alias}) ? ' selected' : '';
-            $control .= qq{<option value="} . esc($e->{alias}) . qq{"$sel }
-                      . qq{data-path="} . esc($e->{path}) . qq{">} . esc($e->{alias}) . qq{</option>};
+            my $label = $e->{alias}
+                      . ($e->{path} ne '' ? " -- $e->{path}" : '');
+            my $ocls = ($def_alias ne '' && $e->{alias} eq $def_alias) ? ' class="opt-default"' : '';
+            $control .= qq{<option value="} . esc($e->{alias}) . qq{"$sel$ocls }
+                      . qq{data-path="} . esc($e->{path}) . qq{">} . esc($label) . qq{</option>};
         }
         $control .= qq{</select>};
+        my $is_def = ($def_alias ne '' && $cur_dir ne '' && $cur_dir eq $def_alias);
+        $control .= qq{ <span class="tag-default"}
+                  . ($is_def ? '' : ' style="display:none;"') . qq{>default</span>};
         my $exp = ($cur_dir ne '' && $dir_ok) ? expanded_path_for('fetch_run', $cur_dir) : '';
         $control .= qq{ <span class="dir-alias-path muted">} . esc($exp) . qq{</span>};
         $control .= qq{ <input type="text" class="fr-cmd" size="24" placeholder="command -options" value="}
@@ -8016,8 +8054,22 @@ sub render_option_field {
         $v = alias_for_value($dkind, $v) if $v ne '' && $allowed;
         my $extra   = ($key eq 'template_dir')
                     ? qq{ data-tpl-role="template_dir" data-tpl-section="} . esc($section) . qq{"} : '';
+        # The model default this device option would inherit (as an $alias), for
+        # the blue "default" flag. Device rows only; template_dir only matters
+        # for generic (its default is the shared default template dir).
+        my $def_alias = '';
+        if ($section ne 'default') {
+            if ($key eq 'repository') {
+                $def_alias = model_default_alias($model_or_email, 'repository', 'repository');
+            } elsif ($key eq 'template_dir' && lc($model_or_email) eq 'generic') {
+                my $td = template_default_dir();
+                $def_alias = ($td ne '') ? (alias_for_value('template', $td) // $td) : '';
+            }
+        }
         $control = qq{<select name="} . esc($name) . qq{" class="dir-alias-select"}
-                 . qq{ data-dir-kind="$dkind"$extra>}
+                 . qq{ data-dir-kind="$dkind"}
+                 . ($def_alias ne '' ? qq{ data-default-alias="} . esc($def_alias) . qq{"} : '')
+                 . qq{$extra>}
                  . qq{<option value=""} . ($v eq '' ? ' selected' : '') . qq{>(choose directory)</option>};
         if ($v ne '' && !$allowed) {
             $control .= qq{<option value="} . esc($v) . qq{" selected disabled>}
@@ -8025,10 +8077,21 @@ sub render_option_field {
         }
         for my $e (@{ $al->{$dkind} }) {
             my $sel = ($v eq $e->{alias}) ? ' selected' : '';
-            $control .= qq{<option value="} . esc($e->{alias}) . qq{"$sel }
-                      . qq{data-path="} . esc($e->{path}) . qq{">} . esc($e->{alias}) . qq{</option>};
+            # Show both the $alias and the directory it expands to, so the user
+            # can tell the entries apart without reading the gray path beside it.
+            my $label = $e->{alias}
+                      . ($e->{path} ne '' ? " -- $e->{path}" : '');
+            # The option that equals the model default is coloured blue.
+            my $ocls = ($def_alias ne '' && $e->{alias} eq $def_alias) ? ' class="opt-default"' : '';
+            $control .= qq{<option value="} . esc($e->{alias}) . qq{"$sel$ocls }
+                      . qq{data-path="} . esc($e->{path}) . qq{">} . esc($label) . qq{</option>};
         }
         $control .= qq{</select>};
+        # Blue "default" flag: shown when the selected value equals the model
+        # default (same style as the Grant/Revoke tags). JS keeps it in sync.
+        my $is_def = ($def_alias ne '' && $v ne '' && $v eq $def_alias);
+        $control .= qq{ <span class="tag-default"}
+                  . ($is_def ? '' : ' style="display:none;"') . qq{>default</span>};
         # gray expanded path + red "not allowed" note
         my $exp = $allowed ? expanded_path_for($dkind, $v) : '';
         $control .= qq{ <span class="dir-alias-path muted">} . esc($exp) . qq{</span>};
@@ -8048,7 +8111,10 @@ sub render_option_field {
     my $del = ($key eq 'site' && !$is_email)
             ? ''
             : qq{ <button type="button" class="opt-del" title="Remove this option">&times;</button>};
-    return qq{<div class="opt-field"><label>} . esc($key) . qq{$mand$unrecognized</label> }
+    # The generic-model "model=" option selects the template model; label it
+    # "model template" so it is not confused with the device Model ("generic").
+    my $disp_key = ($key eq 'model' && $type eq 'enum_template') ? 'model template' : $key;
+    return qq{<div class="opt-field"><label>} . esc($disp_key) . qq{$mand$unrecognized</label> }
          . $control . $del . qq{</div>\n};
 }
 
@@ -8089,6 +8155,7 @@ sub render_add_option {
 
 sub show_edit_table {
     my ($user) = @_;
+    my $render_t0 = [Time::HiRes::gettimeofday()];
 
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
 
@@ -8216,7 +8283,7 @@ sub show_edit_table {
     # confirm dialog + GET reload are not tangled with the edit form's POST.
     print qq{<div class="save-row">}
         . qq{<button type="submit" name="action" value="preview_table" class="btn">Preview raw table</button>}
-        . qq{<button type="submit" name="action" value="save_table" class="btn btn-green">Save changes without preview</button>}
+        . qq{<button type="submit" name="action" value="save_table" class="btn btn-green">Save changes</button>}
         . qq{<a class="btn btn-danger" href="} . esc(script_url() . '?action=edit_table')
         . qq{" data-confirm="Reject all changes and reload the table from disk?" }
         . qq{data-confirm-danger="y">Reject all changes</a>}
@@ -8251,28 +8318,33 @@ sub show_edit_table {
     # Comments/other records are carried as hidden fields (not shown) so they
     # round-trip untouched.
     my @models = known_models();
+    model_defaults_init($records);   # for the blue "default" flag on device rows
 
     my (@dev_html, @def_html, @email_html, @hidden_html);
     # Read-only defaults for a limited user are merged per model (last value
     # wins, as fetchconfig reads them), so one box shows all of a model's
     # options rather than one box per device-table line.
     my (@def_model_order, %def_merged);
-    my $orig_idx = -1;   # position of $r within @$records (== @$orig position)
+    my $seq = -1;   # position of $r within @$records
     for my $r (@$records) {
-        $orig_idx++;
+        $seq++;
+        # The field index MUST be the record's real on-disk table position, so
+        # the masked-secret (pass=) write-back and the edit_card AJAX both line up
+        # with $orig on save. On a normal load @$records IS the on-disk table, so
+        # the sequence position == disk index. On "Back to editor" (from_form)
+        # the records are rebuilt and possibly compacted, so each carries its
+        # original disk index in _form_idx -- use that.
+        my $orig_idx = (defined $r->{_form_idx}) ? $r->{_form_idx} : $seq;
         # Limited users: only their own device lines are rendered/submitted;
         # everything else (other devices, comments, defaults, email, directory)
         # is preserved server-side by the merge on save, so it is NOT carried in
         # the form. Defaults are shown read-only; email/other are hidden.
-        # IMPORTANT: the field index must be the record's real position in the
-        # table ($orig_idx), not a sequential counter -- otherwise the secret
-        # (pass=) write-back looks up the wrong original record on save and
-        # wipes the password.
         if (!$unrestricted) {
             if ($r->{kind} eq 'device') {
                 next unless device_visible_to_acc($site_acc, $r);
-                my $rk = "r$orig_idx";
-                push @dev_html, render_record_card($rk, $r, 'device');
+                push @dev_html, (($from_form && $r->{_was_expanded})
+                    ? render_device_expanded_row($orig_idx, $r)
+                    : render_device_summary_row($orig_idx, $r));
             } elsif ($r->{kind} eq 'default') {
                 my $m = defined $r->{model} ? $r->{model} : '';
                 push @def_model_order, $m unless exists $def_merged{$m};
@@ -8297,38 +8369,81 @@ sub show_edit_table {
         } elsif ($r->{kind} eq 'default') {
             push @def_html, render_record_card($rk, $r, 'default');
         } elsif ($r->{kind} eq 'device') {
-            push @dev_html, render_record_card($rk, $r, 'device');
+            push @dev_html, (($from_form && $r->{_was_expanded})
+                ? render_device_expanded_row($orig_idx, $r)
+                : render_device_summary_row($orig_idx, $r));
         }
     }
-    # rec_count covers every record position (indices are r0..r{N-1}).
-    print qq{<input type="hidden" name="rec_count" value="} . scalar(@$records) . qq{">\n};
+    # rec_count must exceed the HIGHEST field index used, so the save-time
+    # reconstruct loop reaches every record. On from_form the indices are the
+    # original disk positions (_form_idx) and may be sparse/compacted, so take
+    # max(_form_idx)+1 rather than the (smaller) array length.
+    my $rec_count = scalar @$records;
+    for my $r (@$records) {
+        $rec_count = $r->{_form_idx} + 1
+            if defined $r->{_form_idx} && $r->{_form_idx} + 1 > $rec_count;
+    }
+    print qq{<input type="hidden" name="rec_count" value="$rec_count">\n};
     print join('', @hidden_html);
 
-    # Devices tab. All device cards are rendered (so every device is
-    # submitted on save, even ones not on the visible page), but the JS
-    # paginates their *visibility* to $DEV_PAGE_SIZE per page.
+    # Devices tab. Each device is a lightweight COLLAPSED summary row (id /
+    # model / site + Edit); the heavy editable card is fetched on demand
+    # (?action=edit_card) when the row is expanded. This keeps the page small
+    # and fast even for thousands of devices. Un-expanded rows round-trip
+    # verbatim on save via their "untouched" marker.
     my $dev_page_size = 100;
+    my $dev_total = scalar @dev_html;
+    # Distinct site codes among the listed devices, for the site filter dropdown.
+    my %site_seen; my $have_untagged = 0;
+    for my $r (@$records) {
+        next unless $r->{kind} eq 'device';
+        next unless $unrestricted || device_visible_to_acc($site_acc, $r);
+        my $sc = device_site_code($r);
+        if ($sc eq SITE_ALL_CODE) { $have_untagged = 1; } else { $site_seen{$sc} = 1; }
+    }
+    my $site_filter_opts = qq{<option value="">All sites</option>};
+    for my $sc (sort keys %site_seen) {
+        $site_filter_opts .= qq{<option value="} . esc($sc) . qq{">} . esc($sc) . qq{</option>};
+    }
+    $site_filter_opts .= qq{<option value="\x00none">(no site)</option>} if $have_untagged;
     print qq{<div class="tab-panel" data-panel="devices">\n};
     print qq{<div class="panel-actions">}
         . qq{<button type="button" class="btn" id="add-device">+ Add device</button>}
         . qq{<span class="edit-filter">}
         . qq{<input type="text" id="edit-dev-filter" class="filter-box" placeholder="Filter Device-ID&hellip;" autocomplete="off">}
+        . qq{<select id="edit-site-filter" class="filter-box">$site_filter_opts</select>}
         . qq{<input type="text" id="edit-comment-filter" class="filter-box" placeholder="Filter comment&hellip;" autocomplete="off">}
         . qq{<button type="button" class="btn btn-small" id="edit-clear-filter">Clear</button>}
         . qq{</span>}
         . qq{</div>\n};
-    print qq{<div id="dev-pager" class="dev-pager" data-page-size="$dev_page_size" style="display:none;">}
-        . qq{<button type="button" class="btn btn-small" id="dev-first">&laquo; First</button>}
-        . qq{<button type="button" class="btn btn-small" id="dev-prev">&larr; Prev</button>}
-        . qq{<span id="dev-pageinfo" class="pageinfo"></span>}
-        . qq{<button type="button" class="btn btn-small" id="dev-next">Next &rarr;</button>}
-        . qq{<button type="button" class="btn btn-small" id="dev-last">Last &raquo;</button>}
+    # Pager shown both above and below the list; the JS updates every .dev-pager
+    # and its controls are matched by class (several copies can coexist).
+    my $pager = qq{<div class="dev-pager" data-page-size="$dev_page_size" style="display:none;">}
+        . qq{<button type="button" class="btn btn-small dev-first">&laquo; First</button>}
+        . qq{<button type="button" class="btn btn-small dev-prev">&larr; Prev</button>}
+        . qq{<span class="pageinfo dev-pageinfo"></span>}
+        . qq{<button type="button" class="btn btn-small dev-next">Next &rarr;</button>}
+        . qq{<button type="button" class="btn btn-small dev-last">Last &raquo;</button>}
         . qq{</div>\n};
+    print $pager;
     print qq{<p class="no-match" id="edit-dev-no-match" style="display:none;">}
         . qq{No devices match your filter.</p>\n};
+    print qq{<div class="dev-row dev-row-head"><span></span>}
+        . qq{<span class="dev-row-id">Device-ID</span>}
+        . qq{<span class="dev-row-model">Model</span>}
+        . qq{<span class="dev-row-site">Site</span>}
+        . qq{<span class="dev-row-comment">Comment</span></div>\n}
+        if $dev_total;
     print qq{<div id="dev-cards">\n};
     print join('', @dev_html);
     print qq{</div>\n};
+    print $pager;   # bottom pager
+    if ($SHOW_RENDER_TIME) {
+        my $secs = Time::HiRes::tv_interval($render_t0);
+        my $str  = $secs < 1 ? sprintf('%dms', int($secs * 1000 + 0.5))
+                             : sprintf('%.2fs', $secs);
+        print qq{<p class="render-time">Rendered in } . esc($str) . qq{</p>\n};
+    }
     print qq{</div>\n};
 
     # For a limited (read-only) user, render one merged box per model now.
@@ -8343,7 +8458,15 @@ sub show_edit_table {
     print qq{<div class="panel-actions">}
         . ($unrestricted ? qq{<button type="button" class="btn" id="add-default">+ Add model defaults</button>} : '')
         . qq{</div>\n};
-    print join('', @def_html);
+    if (@def_html) {
+        print join('', @def_html);
+    } else {
+        # No default: lines in the table -- say so rather than show a blank tab.
+        print qq{<p class="muted">No per-model defaults are defined}
+            . ($unrestricted ? qq{. Use <strong>+ Add model defaults</strong> to add one.}
+                             : qq{ in the device table.})
+            . qq{</p>\n};
+    }
     print qq{</div>\n};
 
     # Email tab
@@ -8400,11 +8523,28 @@ sub reconstruct_records_from_form {
         my $kind = $cgi->param("${rk}_kind");
         next unless defined $kind;
         next if $cgi->param("${rk}_deleted");    # record removed in the UI
+        # Remember how many records existed before this iteration so, at the end,
+        # we can tag whatever got pushed with its FORM index ($n). The editor's
+        # field indices come from the on-disk table position, so $n is the disk
+        # index; the "Back to editor" (from_form) re-render re-keys fields to this
+        # index (_form_idx) rather than the compacted array position -- otherwise
+        # the masked-secret write-back on the next save would read the wrong
+        # $orig record and wipe passwords (defaults included).
+
+        # Collapsed-editor fast path: a device the user never expanded submits
+        # only "${rk}_untouched=1" (no fields). Its record is unchanged, so take
+        # the original verbatim from $orig->[$n] -- no field parsing, no secret
+        # write-back needed (the stored value is already correct). Copy it (don't
+        # alias $orig->[$n]) so tagging _form_idx can't mutate the original.
+        if ($cgi->param("${rk}_untouched") && $orig->[$n]) {
+            push @records, { %{ $orig->[$n] }, _form_idx => $n };
+            next;
+        }
 
         if ($kind eq 'comment' || $kind eq 'other') {
             my $raw = $cgi->param("${rk}_raw");
             $raw = '' unless defined $raw;
-            push @records, { kind => $kind, raw => $raw };
+            push @records, { kind => $kind, raw => $raw, _form_idx => $n };
             next;
         }
 
@@ -8488,9 +8628,9 @@ sub reconstruct_records_from_form {
 
         if ($kind eq 'email') {
             if ($cgi->param("${rk}_bare") && @opts == 1 && $opts[0][0] eq 'to') {
-                push @records, { kind => 'email', bare => $opts[0][1] };
+                push @records, { kind => 'email', bare => $opts[0][1], _form_idx => $n };
             } else {
-                push @records, { kind => 'email', opts => \@opts };
+                push @records, { kind => 'email', opts => \@opts, _form_idx => $n };
             }
             # NOTE: the mandatory-option check for email is done AFTER the
             # loop, against the merged set of ALL email: records -- fetchconfig
@@ -8498,15 +8638,24 @@ sub reconstruct_records_from_form {
             # earlier), so from/to/smtp may be spread across several lines.
         } elsif ($kind eq 'default') {
             next if $model eq '';
-            push @records, { kind => 'default', model => $model, opts => \@opts };
+            push @records, { kind => 'default', model => $model, opts => \@opts, _form_idx => $n };
         } elsif ($kind eq 'device') {
             next if $model eq '';
             my $id   = $cgi->param("${rk}_id")   // '';
             my $host = $cgi->param("${rk}_host") // '';
             $id   =~ s/^\s+|\s+$//g;
             $host =~ s/^\s+|\s+$//g;
-            push @records, { kind => 'device', model => $model, id => $id,
-                             host => $host, opts => \@opts };
+            # This device carried real fields (it was expanded at least once, so
+            # its edits must be saved). Whether "Back to editor" RE-OPENS it is a
+            # separate question: only cards left OPEN at submit time carry
+            # "${rk}_open=1" (expanding sets it, collapsing clears it). So a card
+            # the user expanded, edited, then collapsed is saved but comes back
+            # collapsed. (_was_expanded / _form_idx are render hints only;
+            # serialize ignores unknown keys, so they never reach the table.)
+            my %dev = (kind => 'device', model => $model, id => $id,
+                       host => $host, opts => \@opts, _form_idx => $n);
+            $dev{_was_expanded} = 1 if $cgi->param("${rk}_open");
+            push @records, \%dev;
         }
     }
 
@@ -8762,11 +8911,20 @@ sub generic_model_dir_error {
     if ($t->{rc} == 1) {
         return "Cannot save $label: no templates are available (fetchconfig -t).";
     }
-    my $eff_dir = (defined $dir && $dir ne '') ? $dir
-                : ($section eq 'device' ? template_default_dir() : '');
+    # A device with its own template_dir uses the "device" section; a device
+    # without one inherits the default: line's dir, whose templates -t tags
+    # "default" (see render_option_field).
+    my ($eff_dir, $lookup_sec);
+    if (defined $dir && $dir ne '') {
+        $eff_dir = $dir;  $lookup_sec = $section;
+    } elsif ($section eq 'device') {
+        $eff_dir = template_default_dir();  $lookup_sec = 'default';
+    } else {
+        $eff_dir = '';  $lookup_sec = $section;
+    }
     # Models known to -t for this section+dir; if the directory is one -t does
     # not list (a freshly-typed template_dir), scan it directly.
-    my @known = @{ template_models_for($section, $eff_dir) };
+    my @known = @{ template_models_for($lookup_sec, $eff_dir) };
     unless (@known) {
         @known = @{ scan_dir_models($eff_dir) } if $eff_dir ne '';
     }
@@ -8824,9 +8982,8 @@ sub show_preview_table {
     print $cgi->start_form(-method => 'POST', -action => script_url(), -id => 'preview-form');
     print preview_hidden_fields();
     print qq{<div class="save-row">\n};
-    if (!@$errors) {
-        print qq{<button type="submit" name="action" value="save_table" class="btn btn-green">Save changes</button>\n};
-    }
+    # Preview is view-only: return to the editor to save (so there is a single
+    # Save path, in the graphical editor).
     print qq{<button type="submit" name="action" value="edit_table_from_form" class="btn">Back to editor</button>\n};
     print qq{</div>\n};
     print $cgi->end_form;
@@ -9443,6 +9600,128 @@ sub mask_secrets_opt {
     return $v;
 }
 
+# Collapsed device row for the editor: shows Device-ID / Model / Site and an
+# Edit button. Carries only the hidden "${rk}_kind=device" + "${rk}_untouched=1"
+# markers so an un-expanded device round-trips verbatim on save (see
+# reconstruct_records_from_form). When the user clicks Edit, the JS fetches the
+# full card (?action=edit_card&idx=N) and swaps it in, dropping the untouched
+# marker so the real fields are submitted. $idx is the record's table position.
+# AJAX endpoint (?action=edit_card&idx=N): return the full editable card HTML
+# for the device at table position N, so the collapsed editor can expand a row
+# on demand. The card is rendered with rk="rN" -- the SAME real-position index
+# the full editor would use -- so the secret write-back and save round-trip are
+# identical to a server-rendered card. Access is gated: edit right, device kind,
+# and (for a site-limited user) per-site visibility.
+sub show_edit_card {
+    my ($user) = @_;
+    my $card_t0 = [Time::HiRes::gettimeofday()];
+    my $dbh = db_connect();
+    my $allowed = $dbh ? user_may_edit_table($dbh, $user) : 0;
+    unless ($allowed) {
+        $dbh->disconnect if $dbh;
+        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
+    site_ctx_init($dbh, $user);
+    my $site_acc = user_site_access($dbh, $user);
+    $dbh->disconnect if $dbh;
+
+    my $idx = $cgi->param('idx');
+    unless (defined $idx && $idx =~ /^\d+$/) {
+        print $cgi->header(-type => 'text/plain', -status => '400 Bad Request');
+        print "Invalid index.\n";
+        return;
+    }
+
+    my ($content, $err) = slurp_device_table();
+    if ($err) {
+        print $cgi->header(-type => 'text/plain', -status => '500 Internal Server Error');
+        print "Could not read the device table.\n";
+        return;
+    }
+    my $records = parse_device_table($content);
+    model_defaults_init($records);   # for the blue "default" flag on the card
+    my $r = $records->[$idx];
+    unless ($r && $r->{kind} eq 'device') {
+        print $cgi->header(-type => 'text/plain', -status => '404 Not Found');
+        print "No device at that position.\n";
+        return;
+    }
+    # A site-limited user may only expand a device they can see.
+    unless ($site_acc->{unrestricted} || device_visible_to_acc($site_acc, $r)) {
+        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print "That device is not available to you.\n";
+        return;
+    }
+
+    my $card_html = render_record_card("r$idx", $r, 'device');
+    my %hdr = (-type => 'text/html', -charset => 'UTF-8');
+    if ($SHOW_RENDER_TIME) {
+        my $ms = int(Time::HiRes::tv_interval($card_t0) * 1000 + 0.5);
+        # Server-side render time of this card, read by the editor JS to show the
+        # "server N ms" part of the AJAX timing line.
+        $hdr{'-X-Render-Time'} = "${ms}ms";
+    }
+    print $cgi->header(%hdr);
+    print $card_html;
+}
+
+sub render_device_summary_row {
+    my ($idx, $r) = @_;
+    my $rk = "r$idx";
+    my $id    = defined $r->{id}   ? $r->{id}   : '';
+    my $model = defined $r->{model}? $r->{model}: '';
+    my $site  = device_site_code($r);
+    $site = '' if $site eq SITE_ALL_CODE;   # untagged shows blank
+    my ($comment) = map { $_->[1] } grep { $_->[0] eq 'comment' } @{ $r->{opts} || [] };
+    $comment = '' unless defined $comment;
+    my $site_cls = ($site eq '') ? ' dev-row-nosite' : '';
+    return qq{<div class="dev-row$site_cls" data-rk="$rk" data-idx="$idx" }
+         . qq{data-id="} . esc($id) . qq{" data-site="} . esc($site)
+         . qq{" data-comment="} . esc($comment) . qq{">}
+         . qq{<input type="hidden" name="${rk}_kind" value="device">}
+         . qq{<input type="hidden" name="${rk}_untouched" value="1" class="untouched-flag">}
+         . qq{<button type="button" class="btn btn-small dev-row-edit">Edit</button>}
+         . qq{<span class="dev-row-id">} . esc($id) . qq{</span>}
+         . qq{<span class="dev-row-model">} . esc($model) . qq{</span>}
+         . qq{<span class="dev-row-site">} . esc($site) . qq{</span>}
+         . qq{<span class="dev-row-comment">} . esc($comment) . qq{</span>}
+         . qq{</div>\n};
+}
+
+# A device row rendered already-expanded: the summary line plus the full
+# editable card inline, matching what the JS produces on expand. Used by the
+# "Back to editor" (from_form) render so the user's in-progress edits are kept
+# in real card fields -- the collapsed-row path would instead re-fetch the
+# unedited device from disk, losing the edits (and, because the reconstructed
+# record order can differ from disk, show the wrong device). No "untouched"
+# marker: the real fields are submitted.
+sub render_device_expanded_row {
+    my ($idx, $r) = @_;
+    my $rk = "r$idx";
+    my $id    = defined $r->{id}    ? $r->{id}    : '';
+    my $model = defined $r->{model} ? $r->{model} : '';
+    my $site  = device_site_code($r);
+    $site = '' if $site eq SITE_ALL_CODE;
+    my ($comment) = map { $_->[1] } grep { $_->[0] eq 'comment' } @{ $r->{opts} || [] };
+    $comment = '' unless defined $comment;
+    my $site_cls = ($site eq '') ? ' dev-row-nosite' : '';
+    my $h = qq{<div class="dev-row dev-row-open$site_cls" data-rk="$rk" data-idx="$idx" }
+          . qq{data-expanded="1" data-id="} . esc($id) . qq{" data-site="} . esc($site)
+          . qq{" data-comment="} . esc($comment) . qq{">}
+          . qq{<button type="button" class="btn btn-small dev-row-edit">Collapse</button>}
+          . qq{<span class="dev-row-id">} . esc($id) . qq{</span>}
+          . qq{<span class="dev-row-model">} . esc($model) . qq{</span>}
+          . qq{<span class="dev-row-site">} . esc($site) . qq{</span>}
+          . qq{<span class="dev-row-comment">} . esc($comment) . qq{</span>}
+          . qq{<input type="hidden" name="${rk}_open" value="1">}
+          . qq{<div class="dev-row-card">}
+          . render_record_card($rk, $r, 'device')
+          . qq{</div></div>\n};
+    return $h;
+}
+
 sub render_record_card {
     my ($rk, $r, $kind) = @_;
     my $h = qq{<div class="rec-card" data-rk="$rk" data-kind="$kind">\n};
@@ -9576,10 +9855,24 @@ sub edit_table_script {
         qq[{"code":"] . $jesc->($_->{code}) . qq[","desc":"] . $jesc->($_->{description}) . qq["}]
     } grep { $_->{code} ne SITE_ALL_CODE } @{ $SITE_CTX{options} || [] }) . ']';
     my $site_unrestricted = $SITE_CTX{unrestricted} ? 1 : 0;
+    # Per-model default repository / on_fetch_run directory (as $alias), so the
+    # JS can toggle the blue "default" flag when a device's selection matches.
+    my $model_map = sub {
+        my ($okey, $dkind) = @_;
+        '{' . join(',', map {
+            my $a = model_default_alias($_, $okey, $dkind);
+            $a ne '' ? qq{"} . $jesc->($_) . qq{":"} . $jesc->($a) . qq{"} : ()
+        } sort keys %MODEL_DEFAULTS) . '}';
+    };
+    my $defrepo_js = $model_map->('repository', 'repository');
+    my $deffr_js   = $model_map->('on_fetch_run', 'fetch_run');
     my $out = qq{<script>window.FCWEB_TPL_ROWS = $rows_js;\n}
             . qq{window.FCWEB_TPL_DEFAULT_DIR = "$def_dir";\n}
             . qq{window.FCWEB_DIR_ALIAS = $alias_js;\n}
             . qq{window.FCWEB_DIR_ENTRIES = $entries_js;\n}
+            . qq{window.FCWEB_DEFAULT_REPO = $defrepo_js;\n}
+            . qq{window.FCWEB_DEFAULT_FETCHRUN = $deffr_js;\n}
+            . qq{window.FCWEB_SHOW_RENDER_TIME = } . ($SHOW_RENDER_TIME ? 1 : 0) . qq{;\n}
             . qq{window.FCWEB_FETCHRUN_DISABLED = $fr_disabled;\n}
             . qq{window.FCWEB_SITE_OPTIONS = $sites_js;\n}
             . qq{window.FCWEB_SITE_UNRESTRICTED = $site_unrestricted;\n}
@@ -9605,10 +9898,12 @@ sub edit_table_script {
                '" data-dir-kind="' + kind + '"' + (extra || '') + '>' +
                '<option value="">(choose directory)</option>';
     for (var i = 0; i < ent.length; i++) {
+      var lbl = ent[i].alias + (ent[i].path ? ' -- ' + ent[i].path : '');
       html += '<option value="' + ent[i].alias + '" data-path="' + ent[i].path + '">' +
-              ent[i].alias + '</option>';
+              lbl + '</option>';
     }
     return html + '</select>' +
+      ' <span class="tag-default" style="display:none;">default</span>' +
       ' <span class="dir-alias-path muted"></span>' +
       ' <span class="dir-alias-warn error" style="display:none;">not in the allowed directory list</span>';
   }
@@ -9682,25 +9977,29 @@ sub edit_table_script {
     var section = sel.getAttribute('data-tpl-section') || 'device';
     var row = sel.closest ? sel.closest('.rec-card') : null;
     var dirEl = row ? row.querySelector('[data-tpl-role="template_dir"]') : null;
-    var dir;
-    if (dirEl && dirEl.value) dir = dirToPath(dirEl.value);
-    else if (section === 'device') dir = defaultsTabDir() || TPL_DEFAULT_DIR;
-    else dir = '';                                  // defaults tab, no dir
+    // lookupSec is the -t section whose rows list this row's templates. A device
+    // with its own template_dir uses the "device" section; a device WITHOUT one
+    // inherits the default: line's template_dir, whose templates -t tags
+    // "default". So: explicit dir -> own section; inherited -> "default".
+    var dir, lookupSec;
+    if (dirEl && dirEl.value) { dir = dirToPath(dirEl.value); lookupSec = section; }
+    else if (section === 'device') { dir = defaultsTabDir() || TPL_DEFAULT_DIR; lookupSec = 'default'; }
+    else { dir = ''; lookupSec = section; }          // defaults tab, no dir
     // Known to the snapshot -> filter it (fast, no request). Otherwise the user
     // typed a directory -t doesn't know yet: ask the server to scan it.
-    if (snapshotHasDir(section, dir)) {
-      fillModelSelect(sel, row, modelsFor(section, dir));
+    if (snapshotHasDir(lookupSec, dir)) {
+      fillModelSelect(sel, row, modelsFor(lookupSec, dir));
       return;
     }
     if (typeof window.fetch !== 'function') {         // no fetch: snapshot only
-      fillModelSelect(sel, row, modelsFor(section, dir));
+      fillModelSelect(sel, row, modelsFor(lookupSec, dir));
       return;
     }
     var url = scriptUrl + '?action=template_models&dir=' + encodeURIComponent(dir);
     fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) { fillModelSelect(sel, row, (d && d.models) || []); })
-      .catch(function () { fillModelSelect(sel, row, modelsFor(section, dir)); });
+      .catch(function () { fillModelSelect(sel, row, modelsFor(lookupSec, dir)); });
   }
   function refreshAllModelSelects() {
     var sels = form.querySelectorAll('.tpl-model-select');
@@ -9718,6 +10017,58 @@ sub edit_table_script {
     if (pathEl) pathEl.textContent = path;
     var warnEl = field ? field.querySelector('.dir-alias-warn') : null;
     if (warnEl) warnEl.style.display = (sel.value && !path) ? '' : 'none';
+    updateDefaultFlag(sel, field);
+  }
+  // Blue "default" flag + option colouring: show/mark when the selected value
+  // equals this device's model default for the option. The default alias is on
+  // the <select> as data-default-alias (kept current by updateDefaultAlias on
+  // model change).
+  function updateDefaultFlag(sel, field) {
+    field = field || (sel.closest ? sel.closest('.opt-field') : null);
+    var def = sel.getAttribute('data-default-alias') || '';
+    for (var i = 0; i < sel.options.length; i++) {
+      var o = sel.options[i];
+      if (def && o.value === def) o.classList.add('opt-default');
+      else o.classList.remove('opt-default');
+    }
+    var tag = field ? field.querySelector('.tag-default') : null;
+    if (tag) tag.style.display = (def && sel.value && sel.value === def) ? '' : 'none';
+  }
+  // Recompute a dir dropdown's data-default-alias from the row's current model
+  // (repository / on_fetch_run defaults are per-model; template_dir uses the
+  // shared default template dir for a generic model). Called on model change.
+  function updateDefaultAlias(sel) {
+    if (!sel || !sel.classList.contains('dir-alias-select')) return;
+    var kind = sel.getAttribute('data-dir-kind') || '';
+    var row = sel.closest ? sel.closest('.rec-card') : null;
+    var def = '';
+    var mSel = row ? row.querySelector('.rec-model') : null;
+    var model = mSel ? mSel.value : '';
+    if (kind === 'repository') {
+      def = (window.FCWEB_DEFAULT_REPO && window.FCWEB_DEFAULT_REPO[model]) || '';
+    } else if (kind === 'fetch_run') {
+      def = (window.FCWEB_DEFAULT_FETCHRUN && window.FCWEB_DEFAULT_FETCHRUN[model]) || '';
+    } else if (kind === 'template') {
+      // template_dir: only a generic device has a model default -- the shared
+      // default template dir (TPL_DEFAULT_DIR). fetchconfig -t reports that dir
+      // as a $alias when an allow-list is configured, so it is already in the
+      // same form as the option values; use it directly. If it is a literal
+      // path (no allow-list), map it to its $alias when one matches.
+      if (model === 'generic' && TPL_DEFAULT_DIR) {
+        def = TPL_DEFAULT_DIR;
+        if (DIR_ALIAS[TPL_DEFAULT_DIR] === undefined) {   // not already an alias key
+          var want = trimSlash(TPL_DEFAULT_DIR);
+          for (var a in DIR_ALIAS) {
+            if (DIR_ALIAS.hasOwnProperty(a) && trimSlash(DIR_ALIAS[a]) === want) { def = a; break; }
+          }
+        }
+      }
+    } else {
+      return;
+    }
+    if (def) sel.setAttribute('data-default-alias', def);
+    else sel.removeAttribute('data-default-alias');
+    updateDefaultFlag(sel, null);
   }
   // Combine an on_fetch_run row's directory dropdown + command field into its
   // hidden field ("<alias>/<command>").
@@ -9738,6 +10089,15 @@ sub edit_table_script {
     if (el.classList && (el.classList.contains('fr-dir') || el.classList.contains('fr-cmd'))) {
       var f = el.closest ? el.closest('.opt-field') : null;
       joinFetchRun(f);
+    }
+    // Model changed: the repository / on_fetch_run default is per-model, so
+    // recompute the blue "default" flag on this row's dir dropdowns.
+    if (el.classList && el.classList.contains('rec-model')) {
+      var card = el.closest ? el.closest('.rec-card') : null;
+      if (card) {
+        var sels = card.querySelectorAll('.dir-alias-select');
+        for (var i = 0; i < sels.length; i++) updateDefaultAlias(sels[i]);
+      }
     }
   });
   form.addEventListener('input', function (e) {
@@ -9916,7 +10276,9 @@ sub edit_table_script {
     }
     var div = document.createElement('div');
     div.className = 'opt-field';
-    div.innerHTML = '<label>' + key + '</label> ' + control + ' ' +
+    // The generic "model=" option is the template model; label it accordingly.
+    var dispKey = (key === 'model' && type === 'enum_template') ? 'model template' : key;
+    div.innerHTML = '<label>' + dispKey + '</label> ' + control + ' ' +
       '<button type="button" class="opt-del" title="Remove this option">\u00d7</button>';
     list.appendChild(div);
     // Remove the option from the menu so it can't be added twice -- EXCEPT for
@@ -9927,6 +10289,11 @@ sub edit_table_script {
     // If a model= or template_dir field was just added, populate the model
     // dropdown(s) from the -t snapshot.
     if (key === 'model' || key === 'template_dir') refreshAllModelSelects();
+    // A freshly-added template_dir / repository / on_fetch_run dropdown needs
+    // its model-default computed so the blue "default" flag + option colouring
+    // work (the same as a server-rendered field).
+    var newSel = div.querySelector('.dir-alias-select');
+    if (newSel) updateDefaultAlias(newSel);
   });
 
   // --- add a new device / default record ---
@@ -10031,18 +10398,20 @@ sub edit_table_script {
   });
 
   var devCards = document.getElementById('dev-cards');
-  var devPager = document.getElementById('dev-pager');
-  var devPageInfo = document.getElementById('dev-pageinfo');
-  var devFirst = document.getElementById('dev-first');
-  var devPrev = document.getElementById('dev-prev');
-  var devNext = document.getElementById('dev-next');
-  var devLast = document.getElementById('dev-last');
-  var devPageSize = devPager ? parseInt(devPager.getAttribute('data-page-size'), 10) || 100 : 100;
+  // There can be more than one pager (top and bottom); operate on all of them.
+  var devPagers = Array.prototype.slice.call(document.querySelectorAll('.dev-pager'));
+  var devPageSize = devPagers.length
+    ? (parseInt(devPagers[0].getAttribute('data-page-size'), 10) || 100) : 100;
   var devPage = 0;
 
   function devCardList() {
+    // Collapsed editor: the device entries are .dev-row elements (summary rows
+    // or, once expanded, a row wrapping the full card). Added-but-unsaved
+    // devices are .rec-card appended directly; include those too.
     return Array.prototype.filter.call(devCards.children, function (el) {
-      return el.classList && el.classList.contains('rec-card');
+      return el.classList &&
+        (el.classList.contains('dev-row') || el.classList.contains('rec-card')) &&
+        !el.classList.contains('dev-row-head');
     });
   }
 
@@ -10051,6 +10420,7 @@ sub edit_table_script {
   // like the device-list filter. Pagination below only counts/paginates
   // the cards that pass the filter.
   var editDevFilter     = document.getElementById('edit-dev-filter');
+  var editSiteFilter    = document.getElementById('edit-site-filter');
   var editCommentFilter = document.getElementById('edit-comment-filter');
   var editClearFilter   = document.getElementById('edit-clear-filter');
   var editNoMatch       = document.getElementById('edit-dev-no-match');
@@ -10060,28 +10430,56 @@ sub edit_table_script {
   function editSaveFilter() {
     var d = editDevFilter ? editDevFilter.value : '';
     var c = editCommentFilter ? editCommentFilter.value : '';
-    editSetCookie(encodeURIComponent(d) + '|' + encodeURIComponent(c));
+    var s = editSiteFilter ? editSiteFilter.value : '';
+    editSetCookie(encodeURIComponent(d) + '|' + encodeURIComponent(c) + '|' + encodeURIComponent(s));
   }
   function editRestoreFilter() {
     var raw = editGetCookie(); if (!raw) return;
     var p = raw.split('|');
     if (editDevFilter && p[0]) editDevFilter.value = decodeURIComponent(p[0]);
     if (editCommentFilter && p[1]) editCommentFilter.value = decodeURIComponent(p[1]);
+    // Only restore a site value that still exists as an option.
+    if (editSiteFilter && p[2]) {
+      var want = decodeURIComponent(p[2]);
+      for (var i = 0; i < editSiteFilter.options.length; i++) {
+        if (editSiteFilter.options[i].value === want) { editSiteFilter.value = want; break; }
+      }
+    }
   }
-  // A card's current Device-ID and comment (lowercased) from its live fields.
+  // A row's current Device-ID and comment (lowercased). An expanded row (or an
+  // added card) has live fields; a collapsed summary row carries data-id /
+  // data-comment attributes instead.
   function cardDevId(card) {
     var el = card.querySelector('input[name$="_id"]');
-    return el ? el.value.toLowerCase() : '';
+    if (el) return el.value.toLowerCase();
+    var a = card.getAttribute('data-id');
+    return a ? a.toLowerCase() : '';
   }
   function cardComment(card) {
     var el = card.querySelector('input[name$="_opt_comment"], textarea[name$="_opt_comment"]');
-    return el ? el.value.toLowerCase() : '';
+    if (el) return el.value.toLowerCase();
+    var a = card.getAttribute('data-comment');
+    return a ? a.toLowerCase() : '';
+  }
+  // A row's site code. An expanded row has the site <select>; a collapsed row
+  // carries data-site. Untagged devices report the "\x00none" sentinel so the
+  // "(no site)" filter option can match them.
+  function cardSite(card) {
+    var el = card.querySelector('select[name$="_opt_site"]');
+    if (el) return el.value === '' ? '\x00none' : el.value;
+    if (card.hasAttribute('data-site')) {
+      var a = card.getAttribute('data-site');
+      return a === '' ? '\x00none' : a;
+    }
+    return '\x00none';
   }
   function cardMatches(card) {
     var dq = editDevFilter ? editDevFilter.value.trim().toLowerCase() : '';
     var cq = editCommentFilter ? editCommentFilter.value.trim().toLowerCase() : '';
+    var sq = editSiteFilter ? editSiteFilter.value : '';
     return (dq === '' || cardDevId(card).indexOf(dq) !== -1) &&
-           (cq === '' || cardComment(card).indexOf(cq) !== -1);
+           (cq === '' || cardComment(card).indexOf(cq) !== -1) &&
+           (sq === '' || cardSite(card) === sq);
   }
 
   function renderDevPage() {
@@ -10103,25 +10501,26 @@ sub edit_table_script {
       c.style.display = (idx >= start && idx < end) ? '' : 'none';
     });
     if (editNoMatch) editNoMatch.style.display = (all.length > 0 && total === 0) ? '' : 'none';
-    if (devPager) {
-      devPager.style.display = (total > devPageSize) ? '' : 'none';
-      if (devPageInfo) {
-        devPageInfo.textContent = 'Page ' + (devPage + 1) + ' of ' + pages +
-          ' (' + total + ' device' + (total === 1 ? '' : 's') + ')';
-      }
-      if (devFirst) devFirst.disabled = (devPage <= 0);
-      if (devPrev) devPrev.disabled = (devPage <= 0);
-      if (devNext) devNext.disabled = (devPage >= pages - 1);
-      if (devLast) devLast.disabled = (devPage >= pages - 1);
-    }
+    var info = 'Page ' + (devPage + 1) + ' of ' + pages +
+               ' (' + total + ' device' + (total === 1 ? '' : 's') + ')';
+    devPagers.forEach(function (p) {
+      p.style.display = (total > devPageSize) ? '' : 'none';
+      var pi = p.querySelector('.dev-pageinfo'); if (pi) pi.textContent = info;
+      var f = p.querySelector('.dev-first'); if (f) f.disabled = (devPage <= 0);
+      var pr = p.querySelector('.dev-prev');  if (pr) pr.disabled = (devPage <= 0);
+      var nx = p.querySelector('.dev-next');  if (nx) nx.disabled = (devPage >= pages - 1);
+      var ls = p.querySelector('.dev-last');  if (ls) ls.disabled = (devPage >= pages - 1);
+    });
   }
   function onEditFilter() { devPage = 0; renderDevPage(); editSaveFilter(); }
   if (editDevFilter)     editDevFilter.addEventListener('input', onEditFilter);
   if (editCommentFilter) editCommentFilter.addEventListener('input', onEditFilter);
+  if (editSiteFilter)    editSiteFilter.addEventListener('change', onEditFilter);
   if (editClearFilter) {
     editClearFilter.addEventListener('click', function () {
       if (editDevFilter) editDevFilter.value = '';
       if (editCommentFilter) editCommentFilter.value = '';
+      if (editSiteFilter) editSiteFilter.value = '';
       onEditFilter();
       if (editDevFilter) editDevFilter.focus();
     });
@@ -10134,11 +10533,146 @@ sub edit_table_script {
     });
   }
 
-  if (devFirst) devFirst.addEventListener('click', function(){ devPage = 0; renderDevPage(); });
-  if (devPrev) devPrev.addEventListener('click', function(){ devPage--; renderDevPage(); });
-  if (devNext) devNext.addEventListener('click', function(){ devPage++; renderDevPage(); });
-  // A very large page number; renderDevPage() clamps it to the last page.
-  if (devLast) devLast.addEventListener('click', function(){ devPage = 1e9; renderDevPage(); });
+  // Expand a collapsed device row: fetch its full editable card and APPEND it to
+  // the row, keeping the summary line (id / model / site) visible above it. The
+  // card is fetched once; collapsing just hides it again (edits are kept in the
+  // DOM and still submitted). The summary spans are never destroyed, so a
+  // collapsed row always shows its data.
+  // AJAX timing line below the device table (shown only when SHOW_RENDER_TIME is
+  // on). Tracks the last card's round-trip and server time, and a session count.
+  var SHOW_TIME = !!window.FCWEB_SHOW_RENDER_TIME;
+  var ajaxCount = 0;
+  function recordAjaxTime(rttMs, srvStr) {
+    if (!SHOW_TIME) return;
+    ajaxCount++;
+    var el = document.getElementById('ajax-time');
+    if (!el) {
+      el = document.createElement('p');
+      el.id = 'ajax-time';
+      el.className = 'render-time';
+      var dc = document.getElementById('dev-cards');
+      if (dc && dc.parentNode) dc.parentNode.insertBefore(el, dc.nextSibling);
+    }
+    var rtt = Math.round(rttMs);
+    var txt = 'Last card: ' + rtt + ' ms';
+    if (srvStr) txt += ' (server ' + srvStr + ')';
+    txt += ' \u00b7 ' + ajaxCount + ' card' + (ajaxCount === 1 ? '' : 's') + ' loaded';
+    el.textContent = txt;
+    el.style.display = '';
+  }
+  function expandRow(row) {
+    if (!row) return;
+    // Already fetched: just un-hide the card.
+    if (row.getAttribute('data-expanded') === '1') {
+      row.classList.remove('dev-row-collapsed');
+      row.classList.add('dev-row-open');
+      setRowOpenFlag(row, true);
+      var eb = row.querySelector('.dev-row-edit'); if (eb) eb.textContent = 'Collapse';
+      return;
+    }
+    if (row.getAttribute('data-loading') === '1') return;
+    var idx = row.getAttribute('data-idx');
+    if (idx === null) return;
+    row.setAttribute('data-loading', '1');
+    var btn = row.querySelector('.dev-row-edit');
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    var url = scriptUrl + '?action=edit_card&idx=' + encodeURIComponent(idx);
+    var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    var srvMs = null;
+    fetch(url, { credentials: 'same-origin' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        srvMs = r.headers.get('X-Render-Time');   // e.g. "4ms" or null
+        return r.text();
+      })
+      .then(function (html) {
+        var rtt = ((window.performance && performance.now) ? performance.now() : Date.now()) - t0;
+        recordAjaxTime(rtt, srvMs);
+        // Drop the "untouched" marker so the card's real fields are submitted.
+        var flag = row.querySelector('.untouched-flag');
+        if (flag) flag.parentNode.removeChild(flag);
+        // Append the card (+ Collapse button) below the summary line. All card
+        // interactions are handled by the form-level delegated listeners, so
+        // the inserted card is live immediately; only the model dropdown's
+        // add-option refresh is wired here, matching addRecord().
+        var wrap = document.createElement('div');
+        wrap.className = 'dev-row-card';
+        wrap.innerHTML = html;   // collapse is the top summary-line button
+        row.appendChild(wrap);
+        row.setAttribute('data-expanded', '1');
+        row.removeAttribute('data-loading');
+        row.classList.add('dev-row-open');
+        setRowOpenFlag(row, true);   // mark currently-open (for from_form re-open)
+        if (btn) { btn.disabled = false; btn.textContent = 'Collapse'; }
+        var mdl = row.querySelector('.rec-model');
+        if (mdl) mdl.addEventListener('change', function(){ refreshAddOptions(row.querySelector('.rec-card')); });
+      })
+      .catch(function (err) {
+        row.removeAttribute('data-loading');
+        if (btn) { btn.disabled = false; btn.textContent = 'Edit'; }
+        alert('Could not load this device for editing: ' + err.message);
+      });
+  }
+  function collapseRow(row) {
+    if (!row) return;
+    row.classList.remove('dev-row-open');
+    row.classList.add('dev-row-collapsed');
+    setRowOpenFlag(row, false);   // no longer open -> won't re-open after Preview
+    var btn = row.querySelector('.dev-row-edit');
+    if (btn) btn.textContent = 'Edit';
+  }
+  // A hidden "${rk}_open=1" input marks a device row as currently expanded, so
+  // the "Back to editor" (from_form) re-render knows to re-open exactly the
+  // cards the user had open at Preview time -- independent of whether the card
+  // carries edited fields (an expanded-then-collapsed card is still saved, but
+  // comes back collapsed).
+  function setRowOpenFlag(row, on) {
+    var rk = row.getAttribute('data-rk');
+    if (!rk) return;
+    var name = rk + '_open';
+    var el = row.querySelector('input[name="' + name + '"]');
+    if (on) {
+      if (!el) {
+        el = document.createElement('input');
+        el.type = 'hidden'; el.name = name; el.value = '1';
+        row.appendChild(el);
+      }
+    } else if (el) {
+      el.parentNode.removeChild(el);
+    }
+  }
+  if (devCards) {
+    devCards.addEventListener('click', function (e) {
+      // The summary Edit button toggles: expand if collapsed, collapse if open.
+      var editBtn = e.target.closest && e.target.closest('.dev-row-edit');
+      if (editBtn) {
+        var row = editBtn.closest('.dev-row');
+        if (row.classList.contains('dev-row-open')) collapseRow(row);
+        else expandRow(row);
+        return;
+      }
+      // The Collapse button inside an expanded card.
+      var colBtn = e.target.closest && e.target.closest('.dev-row-collapse');
+      if (colBtn) { collapseRow(colBtn.closest('.dev-row')); return; }
+    });
+  }
+
+  // One click listener per pager handles its First/Prev/Next/Last buttons; this
+  // wires both the top and the bottom pager. renderDevPage() clamps devPage.
+  devPagers.forEach(function (p) {
+    p.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t.classList) return;
+      if      (t.classList.contains('dev-first')) devPage = 0;
+      else if (t.classList.contains('dev-prev'))  devPage--;
+      else if (t.classList.contains('dev-next'))  devPage++;
+      else if (t.classList.contains('dev-last'))  devPage = 1e9;
+      else return;
+      renderDevPage();
+      // Keep the clicked control in view after the list re-pages.
+      if (t.closest) { var pg = t.closest('.dev-pager'); if (pg) pg.scrollIntoView({block:'nearest'}); }
+    });
+  });
   // A device card removed via its Delete button should re-page.
   if (devCards) {
     devCards.addEventListener('click', function (e) {
@@ -12054,6 +12588,14 @@ $backdrop_css
             line-height: 1.15; box-sizing: border-box; }
   .tag-on  { background: #e6ffec; border: 1px solid #9bd9a8; color: #1a7f37; }
   .tag-off { background: #f1f1f1; border: 1px solid #ccc;    color: #777; }
+  /* Blue "default" flag (device dir option equals its model default) -- same
+     shape as the on/off tags. The matching dropdown option is coloured to
+     match (desktop browsers honour option colours). */
+  .tag-default { display: inline-block; vertical-align: middle; border-radius: 4px;
+                 padding: 0.2em 0.6em; font-size: 0.85em; line-height: 1.15;
+                 box-sizing: border-box; background: #eaf2fb; border: 1px solid #9bc3e6;
+                 color: #1a5fb4; }
+  option.opt-default { color: #1a5fb4; }
   .btn-small { padding: 0.2em 0.6em; font-size: 0.85em; vertical-align: middle;
                line-height: 1.15; }
   .checkbox-label { display: block; margin: 0.8em 0 0.2em; font-size: 0.9em; font-weight: normal; }
@@ -12151,11 +12693,30 @@ $backdrop_css
   .dev-stats-table { width: auto; min-width: 12em; }
   /* Same small size/colour as the page footer (footer.app-footer). */
   .dev-loadtime { font-size: 0.8em; color: #888; margin: 0.6em 0 0; }
+  .render-time { font-size: 0.8em; color: #888; margin: 0.6em 0 0; text-align: right; }
   /* Stack the stats under the table on narrow screens. */
   \@media (max-width: 700px) {
     .dev-layout { flex-direction: column; padding: 0; }
     .dev-stats { margin: 1.2em 0 0; }
   }
+  /* Collapsed device rows in the editor: a compact summary line (Edit button +
+     Device-ID / Model / Site) that expands into a full .rec-card on demand. */
+  /* Summary line is a grid; the expanded card (.dev-row-card) spans all columns
+     below it. The grid is kept even when open so the summary never disappears. */
+  .dev-row { display: grid; grid-template-columns: 5.5em 2fr 1fr 1.5fr 2fr;
+             align-items: center; gap: 0.6em; padding: 0.35em 0.6em;
+             border-bottom: 1px solid #eee; }
+  .dev-row.dev-row-open { border: 1px solid #ddd; border-radius: 5px;
+             background: #fff; margin-bottom: 0.7em; }
+  .dev-row-card { grid-column: 1 / -1; }
+  .dev-row-head { font-weight: 600; color: #555; background: #f6f6f6;
+             border-bottom: 1px solid #ddd; }
+  .dev-row-id   { font-family: monospace; }
+  .dev-row-site { color: #1a7f37; }
+  .dev-row-comment { color: #555; overflow-wrap: anywhere; }
+  .dev-row.dev-row-nosite .dev-row-site::after { content: '\2014'; color: #b00020; }
+  /* Collapsed (card fetched but hidden): hide the card wrapper, keep summary. */
+  .dev-row.dev-row-collapsed .dev-row-card { display: none; }
   .rec-card { border: 1px solid #ddd; border-radius: 5px; background: #fff;
               padding: 0.7em 0.9em; margin-bottom: 0.7em; }
   .rec-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4em 0.6em; margin-bottom: 0.6em; }

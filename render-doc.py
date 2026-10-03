@@ -634,11 +634,13 @@ def render_body(body):
                 trs += '<tr>%s</tr>' % tds
             out.append('<div class="table-wrap"><table><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>' % (th, trs))
             continue
-        # heading ### / ####
+        # heading ### / #### -- give it an id (slug of its text) so the sidebar
+        # nav links resolve to it.
         m = re.match(r'^(#{3,4}) (.+)$', ln)
         if m:
             lvl = len(m.group(1))
-            out.append('<h%d>%s</h%d>' % (lvl, inline(m.group(2).strip()), lvl))
+            htext = m.group(2).strip()
+            out.append('<h%d id="%s">%s</h%d>' % (lvl, slug(htext), inline(htext), lvl))
             i += 1
             continue
         # blockquote -> callout note. Strip the "> " prefix and render the
@@ -686,30 +688,34 @@ def render_body(body):
 # ---- intro: strip the H1, keep the rest as the hero lede + first section
 intro_text = '\n'.join(intro)
 
-# ---- build sidebar nav grouped simply
+# ---- build sidebar nav directly from the actual document structure.
+# Each top-level (##) section becomes a nav group; its ### subsections become
+# the links under it. This stays in sync with the README automatically instead
+# of a hardcoded title map. A "Part N -- Name" heading is shown as just "Name";
+# a ## section with no ### subsections links to itself.
 def nav_html():
-    groups = [
-        ('Overview', ['Files','Requirements']),
-        ('Configuration', ['Configuration','Deploying','How `fetchconfig.pl` is invoked']),
-        ('Features', ['"Backup Now" and the repository\'s write permissions','Web-UI (binary) backups','Config syntax highlighting (backup content view)','Floating Top / Bottom navigation','Backup list: date & time columns']),
-        ('Pages', ['Setup page and device-table editor','Tools (admins only)','User management via the web UI','Help page']),
-        ('Reference', ['Security model','License']),
-    ]
-    # map title -> slug from actual sections
-    have = {t: slug(t) for t,_ in sections}
     parts = []
-    for label, titles in groups:
-        links = []
-        for t in titles:
-            # find matching section title (exact or startswith)
-            match = None
-            for st in have:
-                if st == t or st.startswith(t[:20]):
-                    match = st; break
-            if match:
-                links.append('<a href="#%s">%s</a>' % (have[match], html.escape(match)))
-        if links:
-            parts.append('<div class="nav-group"><div class="nav-group-label">%s</div>%s</div>' % (html.escape(label), ''.join(links)))
+    for title, body in sections:
+        if title == 'Contents':
+            continue   # the sidebar replaces the in-document Contents list
+        group_label = re.sub(r'^Part\s+\d+\s*--\s*', '', title).strip()
+        # collect ### subsections within this section
+        subs = []
+        for ln in body:
+            m = re.match(r'^### (.+)$', ln)
+            if m:
+                st = m.group(1).strip()
+                subs.append(st)
+        if subs:
+            links = ''.join(
+                '<a href="#%s">%s</a>' % (slug(st), inline(st)) for st in subs
+            )
+            parts.append('<div class="nav-group"><div class="nav-group-label">%s</div>%s</div>'
+                         % (html.escape(group_label), links))
+        else:
+            # standalone section (e.g. Security model, License): link to itself
+            parts.append('<div class="nav-group">'
+                         '<a href="#%s">%s</a></div>' % (slug(title), inline(title)))
     return '\n'.join(parts)
 
 # ---- sections html with numbered kickers

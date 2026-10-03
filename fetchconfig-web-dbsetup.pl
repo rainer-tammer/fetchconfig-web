@@ -501,6 +501,15 @@ MIN_PASSWORD_LENGTH     = 8
 DEFAULT_PASSWORD        = fetchconfig
 
 # --- misc ---
+# Set to 1 when fetchconfig-web is served over HTTPS: the session cookie then
+# gets the "Secure" flag so the browser never sends it over plain HTTP. Leave 0
+# for an HTTP-only deployment (the cookie would otherwise never be sent and
+# login would appear to fail).
+HTTPS_ENABLED           = 0
+# Set to 1 to show load/render-time lines across the UI (device list, status,
+# log and template-list "load time" lines, plus the device-table editor render
+# time). Default 0.
+SHOW_RENDER_TIME        = 0
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
 # Privileged helper for the Tools template editor's Save/Revert (run via sudo).
 # Leave empty to disable sudo saving (then the template directories must be

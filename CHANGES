@@ -7,6 +7,74 @@
 
 1.50
 ====
+* Documentation brought up to date (README.md and help.html): collapsed device
+  editor and on-demand card loading, Site/comment filters and top+bottom pager,
+  Save changes / view-only Preview / Reject all changes, directory drop-downs
+  showing $ALIAS + path, and the blue "default" flag.
+* Device editor: an expanded card had two Collapse buttons; removed the
+  redundant bottom one, leaving the single Collapse button on the summary line.
+* The editor Defaults tab now shows "No per-model defaults are defined" when the
+  device table has no default: lines, instead of appearing completely empty
+  (notably for a site-limited read-only user).
+* CRITICAL FIX: Preview -> Back to editor could wipe default-definition passwords
+  and drop devices. The rebuilt records could be compacted, so field indices no
+  longer matched the on-disk table: the masked-secret write-back read the wrong
+  record (wiping passwords, defaults included) and a too-small rec_count dropped
+  high-index devices. Records now carry their original disk index and rec_count
+  covers the highest index, so everything round-trips correctly.
+* Device editor: when SHOW_RENDER_TIME=1, expanding a device now shows the
+  per-card AJAX timing below the table ("Last card: N ms (server M ms) - K cards
+  loaded"); edit_card returns its server render time in an X-Render-Time header.
+* Fixed: a freshly-added template_dir / repository / on_fetch_run option now gets
+  the blue "default" flag and option colouring (previously only options present
+  when the card was opened were tagged, and an added generic template_dir did
+  not highlight the default directory because its default is reported as a
+  $alias rather than a path).
+* Editor: the green "Save changes without preview" button is now just "Save
+  changes"; the Preview raw table page is view-only (its Save button removed --
+  use "Back to editor" to save). The Bulk edit editor keeps its own Save.
+* Fixed a severe editor bug: Preview raw table -> Back to editor could change a
+  device's model (e.g. generic -> nexus-ssh) because the reconstructed record
+  order no longer matched the on-disk table that the collapsed rows re-fetch
+  from. "Back to editor" re-renders only the devices that were expanded as cards
+  (carrying the submitted values); the rest stay collapsed. Nothing is lost or
+  mis-indexed.
+* The generic model= option is labelled "model template" (vs the device Model).
+* New config key SHOW_RENDER_TIME (0|1, default 0): when 1, it shows the load/render-time lines
+  across the UI (device list, status, log, template list, and the device-table
+  editor render time). Off by default, so these are now hidden unless enabled.
+* Device editor: when a device's repository=, on_fetch_run= (directory part),
+  or (for generic) template_dir= equals its model's default: value, a blue
+  "default" flag is shown beside the dropdown and the matching option is
+  coloured blue, so it is clear the device is using the model default.
+* Directory drop-downs (template_dir, repository, report_dir, on_fetch_run) now
+  show both the $alias and the directory it expands to in each option, instead
+  of just the $alias.
+* Device editor: the device-list First/Prev/Next/Last pager is shown both above
+  and below the list.
+* Fixed template_dir inheritance for generic devices: a device with no
+  template_dir= now inherits the default: line's template_dir and lists that
+  directory's templates (which fetchconfig -t tags as "default"); a device with
+  its own template_dir= still lists only that directory. Fixed in the editor
+  model drop-down, its live JS refresh, and the save-time validation.
+* Editor collapsed rows now show a Comment column after Site, and the device
+  filter gains a searchable Site drop-down (alongside Device-ID and comment).
+  Fixed: collapsing a previously-expanded device left the row blank -- the
+  summary line (ID/Model/Site/Comment) now stays and the card is hidden below it.
+* New config key HTTPS_ENABLED (0|1, default 0, in the misc section of
+  /etc/fetchconfig-web.cfg and the dbsetup template): set to 1 to add the Secure
+  flag to the session cookie when served over HTTPS, instead of editing the
+  source. Documented in README.
+* The HTML documentation sidebar is now built from the actual document
+  structure (Part 1-4 and their subsections) instead of a stale hardcoded list,
+  and ###/#### headings get id anchors so the nav links resolve.
+* Device-table editor rewritten for large tables: devices now show as collapsed
+  summary rows (Device-ID / Model / Site) and the full editable card is fetched
+  on demand (?action=edit_card) when a row is expanded. Un-expanded devices
+  round-trip verbatim on save. For ~2500 devices this cuts the page from ~9.5 MB
+  to ~1 MB and the DOM from ~198k to ~18k elements (editor loads ~5-20x faster).
+* Code cleanup: removed three unused section-renderer subs left over from the
+  combined Tools page and corrected a stale comment on show_tools.
 * Normalised .btn so <button> and <a> buttons render at the same height (e.g.
   Save vs Cancel on the Assign-sites page were slightly mismatched).
 * Fixed back links that led to the empty User landing instead of the users
