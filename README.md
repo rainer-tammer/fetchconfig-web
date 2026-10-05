@@ -150,6 +150,8 @@ each of these in turn.
   (liability/warranty adaptation for EU/German law, severability, governing law).
 - `PRIVACY.md` + `.html` -- GDPR data-privacy notes (the software runs on the
   operator's own system; the operator is the data controller).
+- `cpanfile` -- Perl dependency manifest (mirrors `Makefile.PL`) for GitHub
+  dependency tracking and `cpanm --installdeps .`.
 - `CHANGES` -- the changelog.
 - `LICENSE` -- the GNU General Public License, version 3 (see "License"
   below).

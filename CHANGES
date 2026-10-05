@@ -43,6 +43,8 @@
   role was granted INSERT on audit_log but not USAGE on audit_log_id_seq) is now
   reported instead of being silent: the delete still succeeds and a warning names
   the missing grant. Version/copyright follow the config overrides.
+* Added cpanfile (mirrors Makefile.PL prerequisites) so GitHub's dependency
+  graph can track the Perl module dependencies.
 * Version bumped to 1.51.
 
 #
