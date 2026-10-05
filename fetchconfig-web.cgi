@@ -61,12 +61,12 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.51';
+use constant APP_VERSION => '1.52';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '1.51';
+use constant APP_VERSION_INTERNAL => '1.52';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -74,7 +74,7 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.65';
+use constant MIN_FETCHCONFIG_VERSION => '9.67';
 
 my $CONFIG_FILE = '/etc/fetchconfig-web.cfg';
 my $APP_TITLE   = 'fetchconfig-web';

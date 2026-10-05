@@ -64,7 +64,7 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
 
 ### Requirements
 
-- **fetchconfig 9.65 or newer** already installed and working. fetchconfig-web
+- **fetchconfig 9.67 or newer** already installed and working. fetchconfig-web
   calls `fetchconfig.pl` and reads its device table, repository and template
   directories; it does not replace fetchconfig.
 - **Perl 5.10 or newer.** Tested on Linux and AIX.

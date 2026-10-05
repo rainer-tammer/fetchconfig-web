@@ -1,3 +1,9 @@
+1.52
+====
+* Requires fetchconfig 9.67 or newer (MIN_FETCHCONFIG_VERSION bumped from 9.65);
+  the version warning banner and the required-version notes updated accordingly.
+* Version bumped to 1.52.
+
 1.51
 ====
 * Fixed: user add/change/delete, permission changes (edit/admin rights, site

@@ -35,7 +35,7 @@ use Getopt::Long qw(:config no_ignore_case bundling);
 # ---- version / copyright, shared with fetchconfig-web --------------------
 # The built-in values match the application; both can be overridden by the
 # config file (APP_VERSION / COPYRIGHT), exactly as the web UI does.
-use constant APP_VERSION_INTERNAL => '1.51';
+use constant APP_VERSION_INTERNAL => '1.52';
 use constant DEFAULT_COPYRIGHT    => 'Copyright (c) 2026, Rainer Tammer';
 
 my $CONFIG_FILE = '/etc/fetchconfig-web.cfg';

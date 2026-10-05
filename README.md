@@ -5,9 +5,9 @@ title bar and logo shown on every page, and a Devices / Status / User / Help
 menu (plus a Setup item for accounts with the edit or admin right) in the
 title bar's nav row:
 
-> **Requires fetchconfig 9.65 or newer.** fetchconfig-web reads the installed
+> **Requires fetchconfig 9.67 or newer.** fetchconfig-web reads the installed
 > version from `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and shows a
-> warning banner (on every page, after login) if it is older than 9.65 or
+> warning banner (on every page, after login) if it is older than 9.67 or
 > cannot be determined. The minimum is set by the `MIN_FETCHCONFIG_VERSION`
 > constant in `fetchconfig-web.cgi`.
 
@@ -172,7 +172,7 @@ each of these in turn.
 For an experienced operator, the shortest path to a running instance:
 
 1. **Install the prerequisites** -- Perl with DBI/DBD::Pg, CGI and
-   Algorithm::Diff; PostgreSQL; and fetchconfig 9.65+ (see
+   Algorithm::Diff; PostgreSQL; and fetchconfig 9.67+ (see
    [Requirements](#requirements)).
 2. **Create the user database** -- run `perl fetchconfig-web-dbsetup.pl`
    (see [The user database](#the-user-database)).
