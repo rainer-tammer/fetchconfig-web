@@ -152,6 +152,8 @@ each of these in turn.
   operator's own system; the operator is the data controller).
 - `cpanfile` -- Perl dependency manifest (mirrors `Makefile.PL`) for GitHub
   dependency tracking and `cpanm --installdeps .`.
+- `.github/dependabot.yml` -- enables Dependabot version-update PRs for the
+  `cpanfile` (CPAN) modules and GitHub Actions.
 - `CHANGES` -- the changelog.
 - `LICENSE` -- the GNU General Public License, version 3 (see "License"
   below).

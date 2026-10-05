@@ -44,7 +44,9 @@
   reported instead of being silent: the delete still succeeds and a warning names
   the missing grant. Version/copyright follow the config overrides.
 * Added cpanfile (mirrors Makefile.PL prerequisites) so GitHub's dependency
-  graph can track the Perl module dependencies.
+  graph / Dependabot can track the Perl module dependencies, plus
+  .github/dependabot.yml enabling weekly Dependabot version-update PRs for the
+  CPAN modules and GitHub Actions.
 * Version bumped to 1.51.
 
 #
