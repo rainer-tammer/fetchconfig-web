@@ -1,3 +1,50 @@
+1.51
+====
+* Audit log. New append-only audit_log table (and a small app_state table)
+  recording state-changing actions: device-table saves (one row per changed
+  option, old -> new), restores, backup runs, deletes/cleanups, user add/
+  change/delete, password changes/resets (never the password), site changes,
+  logo upload/delete, template save/revert, plus logins / failed logins /
+  logout and denied attempts (CSRF, out-of-site). Secret option values
+  (pass/enable/SNMP community) are stored as ***.
+* Immutability (Level B): the web DB user gets INSERT + SELECT on audit_log
+  only -- no UPDATE/DELETE -- so the log cannot be altered or erased from the
+  app; only a DBA can. Audit writes are fail-open: on failure the action still
+  completes and a yellow warning is shown in the footer.
+* External-change tripwire: the app records the device table's content token
+  after its own writes and, on login and when the editor opens, logs an
+  external_change entry if the table was modified outside the application.
+* Tools -> Audit log viewer (admin only): 100 rows/page, newest first, fetched
+  by AJAX (the table is never sent whole), First/Prev/Next/Last navigation,
+  filters (user/action/object/text/date range) and CSV export.
+* New standalone PostgreSQL 8.2-compatible script fetchconfig-web-audit.sql to
+  add the audit tables to an existing database (also folded into
+  fetchconfig-web-dbupdate.sql); fresh installs get them via dbsetup.
+* Fixed: audit entries for actions that did not pass an explicit user (e.g.
+  empty/orphan cleanup, backup_now) logged the session id instead of the
+  username -- current_user() returned the session id (current_session's first
+  element) rather than the username. The Audit log page now uses the wide layout
+  and its table sits in a scroll wrapper inside the green box (the box fills the
+  width and contains the table instead of overflowing).
+* Audit log page: added a Reload button (Filter | Clear | Reload | Export CSV)
+  that re-fetches the current page.
+* New documents: LICENSE-ADDITIONS.md/.html (GPLv3 Section 7 additional terms --
+  EU/German liability and warranty adaptation, severability, German/EU governing
+  law) and PRIVACY.md/.html (GDPR notes; the software runs on the operator's own
+  system and the operator is the data controller; the provider stores no data).
+* New fetchconfig-web-clean-audit.pl: prune old audit-log rows with a privileged
+  DB role (-t days to keep, -l preview, -s print the create-role SQL, -l requires -t, -u/-p or
+  prompt for credentials, -v/-h). The prune is itself recorded in the audit log
+  (action audit_prune, including the -t value), so the create-role SQL grants
+  SELECT + INSERT + DELETE on audit_log (and the id sequence). The prune never
+  deletes the audit_prune records themselves, so the pruning history is kept,
+  and it writes a prune record only when rows were actually deleted (a run that
+  removed nothing logs nothing). A failure to WRITE that prune record (e.g. the
+  role was granted INSERT on audit_log but not USAGE on audit_log_id_seq) is now
+  reported instead of being silent: the delete still succeeds and a warning names
+  the missing grant. Version/copyright follow the config overrides.
+* Version bumped to 1.51.
+
 #
 # CHANGES -- fetchconfig-web
 #
@@ -7,6 +54,64 @@
 
 1.50
 ====
+* New Tools -> Disk space page: free/total space and use% for every repository
+  directory (global REPOSITORY + per-device/default repository=) and the
+  report_dir, grouped by filesystem (one table per filesystem, "Filesystem 1/2/..."); the
+  size figures are read once per filesystem and shown black on the first
+  directory and gray on the rest (the device id is no longer shown -- it is not
+  useful across AIX/Linux). "unknown" when a filesystem can't be read; missing
+  directories listed under "Unavailable". The tool now also lists the
+  directory: allow-list repository/report directories (not just the ones in
+  use), with a Source column: configured / allowed / allowed and configured
+  ($aliases expanded to real paths for matching). Uses the optional Filesys::Df module (loaded lazily;
+  the tool shows an install hint if it is absent, the app is unaffected).
+* The title-bar program icon now opens an About dialog (program name, internal
+  version APP_VERSION_INTERNAL, configured/effective version, copyright [config
+  COPYRIGHT or the built-in default], installed fetchconfig.pl version, GPLv3
+  note; OK/Esc/backdrop to close). The page footer also
+  falls back to the built-in copyright when none is configured, instead of
+  ending in a bare dash.
+* Report logo handling. The report_logo editor option is now a drop-down of the
+  image files (.png/.jpg/.gif, up to 25, case-sensitive) in the report_dir, with
+  a red warning if the directory holds more than 25. New Tools -> Upload report
+  logo page uploads a logo into the report_dir (<=100KB, PNG/JPEG/GIF verified by
+  magic bytes, safe case-preserved filename) and lists existing logos with a
+  Delete button and an inline base64 preview (the report directory is not
+  web-served, so previews are embedded as data: URIs). The stored value is the
+  bare filename.
+* Fixed two edited-card round-trip bugs: a collapsed edited device no longer
+  auto-expands after Preview -> Back to editor, and its red dot (and its edits)
+  are no longer lost on the first or a repeated round-trip. The "Back to editor"
+  render now embeds the full card in a collapsed row (fields still submit),
+  carries r{n}_edited, and only re-opens rows that were actually open.
+* Device editor: a device whose fields have been changed (not merely expanded)
+  now shows a red dot after its Device-ID. The marker tracks real edits (field
+  input/change, option add/remove, new device) and survives a Preview -> Back
+  to editor round-trip.
+* Password changes now rotate/invalidate sessions. A self password change mints
+  a fresh session (seamless) and invalidates the user's other sessions; an admin
+  reset of another user signs that user out everywhere (admin resetting their
+  own non-protected account is rotated like a self-change). A request with a
+  stale session cookie now lands on the login page with a "Your session has
+  ended" notice instead of a blank form. Session cookie construction is shared
+  via session_cookie(); clear_pw_warning_if_changed preserves the login_time.
+* New config key SESSION_MAX_LIFETIME (seconds, default 86400, 0 disables): an
+  absolute cap that force-expires a session that long after login regardless of
+  activity, so a captured cookie cannot be kept alive indefinitely. Session
+  files now carry a 5th line (login time); legacy 4-line files load and are
+  upgraded in place.
+* Fixed: expired session files were only removed when their own cookie was
+  presented again, so files from abandoned cookies accumulated in SESSION_DIR.
+  A login now runs a throttled sweep (at most once per SESSION_TTL) that reaps
+  any session past its idle timeout or absolute cap.
+* backup_and_write_table: on a partial write failure the message now states
+  plainly that the table may be incomplete, names the pre-write backup, and
+  tells the admin to restore it via Tools -> Restore device table (or copy it
+  back on the server), noting a full disk / FS error as the likely cause.
+* The device_table.lock flock target is created mode 0600.
+* Documented (README + INSTALL): device-table .bak files are not pruned
+  automatically (how to prune), and the empty device_table.lock is expected and
+  must not be deleted while running.
 * make test now runs cleanly: the test harness (t/lib/FCWebTest.pm) silences
   the "Subroutine/Constant subroutine ... redefined" and "used only once" noise
   that a deliberate second load of the CGI produced, and make_config skips

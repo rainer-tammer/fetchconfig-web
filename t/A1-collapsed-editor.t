@@ -108,4 +108,32 @@ my %FORM = (
     is($def->{_form_idx}, 0, 'default keeps its original disk index');
 }
 
+# --- edited marker (red dot) round-trips and only for actually-changed devices ---
+{
+    my $r_edit = { kind=>'device', id=>'sw1', host=>'h', model=>'generic',
+                   opts=>[['model','cisco-ios'],['user','a'],['pass','p'],['site','GPN']],
+                   _edited=>1 };
+    my $r_plain = { kind=>'device', id=>'sw2', host=>'h', model=>'generic',
+                    opts=>[['model','cisco-ios'],['user','a'],['pass','p'],['site','GPN']] };
+    like(main::render_device_expanded_row(5,$r_edit),  qr/dev-row-open dev-edited/, 'edited device gets the dev-edited marker');
+    unlike(main::render_device_expanded_row(6,$r_plain), qr/dev-edited/, 'unedited (merely opened) device has no marker');
+}
+
+# reconstruct carries _edited from the r{n}_edited form field
+{
+    my $orig = [ { kind=>'device', id=>'sw1', host=>'h', model=>'cisco-ios',
+                   opts=>[['user','x'],['pass','P']] } ];
+    local %main::_FORM = (
+        rec_count => 1,
+        r0_kind=>'device', r0_model=>'cisco-ios', r0_id=>'sw1', r0_host=>'h',
+        r0_opt_user=>'x', r0_opt_pass=>'\__unchanged__/',
+        r0_open=>1, r0_edited=>1,
+    );
+    no warnings 'redefine';
+    local *CGI::param = sub { my($s,$k)=@_; return (sort keys %main::_FORM) if @_<2||!defined $k; return $main::_FORM{$k}; };
+    local *CGI::multi_param = sub { () };
+    my ($recs) = main::reconstruct_records_from_form($orig);
+    is($recs->[0]{_edited}, 1, 'reconstruct carries _edited from the form');
+}
+
 done_testing();

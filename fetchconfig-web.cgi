@@ -37,6 +37,7 @@ use CGI;
 use CGI::Cookie;
 use Digest::MD5 ();
 use Time::HiRes ();
+use MIME::Base64 ();   # core (5.8+); inline base64 logo previews on the Tools page
 use Fcntl qw(:flock);
 use File::Path qw(make_path);
 use File::Temp qw(tempfile);
@@ -60,7 +61,16 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.50';
+use constant APP_VERSION => '1.51';
+
+# APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
+# The About dialog shows it alongside the (possibly overridden) APP_VERSION so
+# the real build is always identifiable even when a site sets its own version.
+use constant APP_VERSION_INTERNAL => '1.51';
+
+# Default copyright used in the About dialog when the config file sets no
+# COPYRIGHT key.
+use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
@@ -75,7 +85,7 @@ my $COOKIE_NAME = 'fcweb_sid';
 # as a proper page). Declared here, before any sub that closes over them.
 my ($DEVICE_TABLE, $REPOSITORY, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFIG_BIN_FULL,
     $USE_SUDO_FOR_BACKUP_NOW, $SUDO_BIN,
-    $SESSION_DIR, $BACKUP_TMP_DIR, $SESSION_TTL, $DEVICE_ID_FIELD,
+    $SESSION_DIR, $BACKUP_TMP_DIR, $SESSION_TTL, $SESSION_MAX_LIFETIME, $DEVICE_ID_FIELD,
     $BACKUP_DEVICE_TABLE,
     $DBinst, $DBuser, $DBpass, $DBhost,
     $PROTECTED_USER, $MIN_PASSWORD_LENGTH, $DEFAULT_PASSWORD,
@@ -176,6 +186,10 @@ sub read_config {
     };
 
     $SESSION_TTL         = $cfg_int->('SESSION_TTL', 8 * 3600, 1, undef);
+    # Absolute session lifetime: a session is force-expired this many seconds
+    # after LOGIN regardless of activity (the idle TTL slides, this does not).
+    # 0 disables the cap (idle timeout only). Min 0; default 24h.
+    $SESSION_MAX_LIFETIME = $cfg_int->('SESSION_MAX_LIFETIME', 24 * 3600, 0, undef);
     $DEVICE_ID_FIELD     = $cfg_int->('DEVICE_ID_FIELD', 1, 0, undef);
     $PROTECTED_USER      = defined $kv->{PROTECTED_USER}     ? $kv->{PROTECTED_USER}     : 'admin';
     $MIN_PASSWORD_LENGTH = $cfg_int->('MIN_PASSWORD_LENGTH', 8, 1, undef);
@@ -736,7 +750,7 @@ if (!-d $SESSION_DIR) {
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
 my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report);
+    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report upload_logo delete_logo);
 
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
@@ -764,13 +778,21 @@ sub main {
     } else {
         my ($sid, $user, $csrf) = current_session();
         if (!defined $user) {
-            # Remember where they were headed, so login returns them there.
-            show_login_form(undef, $action);
+            # Remember where they were headed, so login returns them there. If
+            # the browser still holds a session cookie but it no longer maps to
+            # a valid session, the session ended (idle timeout, absolute cap, or
+            # a password change/reset) -- say so, rather than a blank form.
+            my %cookies = CGI::Cookie->fetch;
+            my $had_cookie = exists $cookies{$COOKIE_NAME};
+            my $notice = $had_cookie
+                ? 'Your session has ended. Please log in again.' : undef;
+            show_login_form(undef, $action, $notice);
         }
         # CSRF check for the authenticated state-changing actions (login/logout
         # are handled separately: login has no session yet, and logout is
         # covered below).
         elsif ($STATE_CHANGING{$action} && !csrf_ok($csrf)) {
+            audit(action => 'denied', username => $user, detail => "CSRF check failed for action '$action'");
             print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
             print "Invalid or missing CSRF token. Go back, reload the page, and try again.\n";
             return;
@@ -792,6 +814,9 @@ sub main {
                     my $dev = $cgi->param('dev');
                     $dev_scoped{$action} && defined $dev && $dev ne ''
                         && !device_accessible($user, scalar $dev); }) {
+            audit(action => 'denied', username => $user, object_type => 'device',
+                  object_id => scalar($cgi->param('dev')),
+                  detail => "out-of-site device access denied for action '$action'");
             print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
             print page_head('Not available', $user);
             print qq{<p class="error">That device is not available to you.</p>\n};
@@ -872,6 +897,21 @@ sub main {
             show_tool_empty_bk($user);
         } elsif ($action eq 'tool_suffix') {
             show_tool_suffix($user);
+        } elsif ($action eq 'tool_logo') {
+            show_tool_logo($user, [ $cgi->param('err') ? scalar($cgi->param('err')) : () ],
+                           scalar($cgi->param('msg')));
+        } elsif ($action eq 'tool_diskspace') {
+            show_tool_diskspace($user);
+        } elsif ($action eq 'tool_audit') {
+            show_tool_audit($user);
+        } elsif ($action eq 'audit_data') {
+            show_audit_data($user);
+        } elsif ($action eq 'audit_csv') {
+            do_audit_csv($user);
+        } elsif ($action eq 'upload_logo') {
+            do_upload_logo($user);
+        } elsif ($action eq 'delete_logo') {
+            do_delete_logo($user);
         } elsif ($action eq 'check_site_assignment') {
             show_check_site_assignment($user);
         } elsif ($action eq 'view_log') {
@@ -959,6 +999,190 @@ sub db_connect {
     my $dbh = DBI->connect($dsn, $DBuser, $DBpass,
         { RaiseError => 0, PrintError => 0, AutoCommit => 1 });
     return $dbh;   # undef on failure
+}
+
+# --- Audit log -------------------------------------------------------------
+# Request-global set when an audit INSERT fails, so the footer can show a
+# non-fatal warning (fail-open: the action still completes).
+our $AUDIT_WARNING;
+
+# Device-table option keys whose values are secret and must NEVER be stored in
+# the audit log (logged as "***" instead). Password changes for USERS never
+# reach audit() at all.
+my %AUDIT_SECRET_KEY = map { $_ => 1 } qw(pass enable snmp_community community);
+sub audit_is_secret { my ($k) = @_; defined $k && $AUDIT_SECRET_KEY{lc $k} ? 1 : 0; }
+sub audit_redact {
+    my ($field, $val) = @_;
+    return $val unless audit_is_secret($field);
+    return (defined $val && $val ne '') ? '***' : $val;   # keep empty as empty
+}
+
+# Append one row to the audit log. Fields: action (required) plus optional
+# object_type, object_id, field, old_value, new_value, detail, username, ip.
+# username/ip default to the current session user and REMOTE_ADDR. Secret
+# fields are redacted here as a backstop. Fail-open: never dies; on any error
+# (including the audit tables not existing) it sets $AUDIT_WARNING and returns.
+# A dbh may be passed; otherwise a short-lived one is opened.
+sub audit {
+    my (%f) = @_;
+    return unless defined $f{action} && $f{action} ne '';
+    my $dbh = $f{dbh};
+    my $own = 0;
+    if (!$dbh) { $dbh = db_connect(); $own = 1; }
+    unless ($dbh) { $AUDIT_WARNING ||= 'audit log unavailable (database connection failed)'; return; }
+
+    my $user = exists $f{username} ? $f{username} : (current_user() // 'system');
+    my $ip   = exists $f{ip} ? $f{ip} : ($ENV{REMOTE_ADDR} // '');
+    my ($old, $new) = ($f{old_value}, $f{new_value});
+    if (audit_is_secret($f{field})) { $old = audit_redact($f{field}, $old); $new = audit_redact($f{field}, $new); }
+
+    my $ok = eval {
+        my $sth = $dbh->prepare(
+            'INSERT INTO audit_log
+               (username, ip, action, object_type, object_id, field,
+                old_value, new_value, detail)
+             VALUES (?,?,?,?,?,?,?,?,?)');
+        $sth && $sth->execute($user, $ip, $f{action}, $f{object_type}, $f{object_id},
+                              $f{field}, $old, $new, $f{detail});
+    };
+    if (!$ok) {
+        my $err = $dbh->errstr // $@ // 'unknown error';
+        $err =~ s/\s+/ /g; $err =~ s/^\s+|\s+$//g;
+        $AUDIT_WARNING ||= "audit log write failed: $err";
+    }
+    $dbh->disconnect if $own && $dbh;
+    return $ok ? 1 : 0;
+}
+
+# Diff the device table before/after a save and write one audit row per change:
+# a device added, removed, or an option changed (field + old -> new, secrets
+# redacted). $action is 'save_table' or 'bulk_save'. $old/$new are the record
+# arrayrefs (parse_device_table / reconstructed). default: records are keyed by
+# "default:<model>"; devices by their id. Best-effort, fail-open via audit().
+sub audit_device_table_changes {
+    my ($action, $old, $new, $user) = @_;
+    my $dbh = db_connect();
+    return unless $dbh;
+
+    my $key = sub {
+        my ($r) = @_;
+        return undef unless $r->{kind} eq 'device' || $r->{kind} eq 'default';
+        return $r->{kind} eq 'device'
+            ? 'device:' . (defined $r->{id} ? $r->{id} : '')
+            : 'default:' . (defined $r->{model} ? $r->{model} : '');
+    };
+    my $opts_of = sub {
+        my ($r) = @_;  my %h;
+        for my $p (@{ $r->{opts} || [] }) {
+            next unless defined $p->[0];
+            $h{$p->[0]} = defined $p->[1] ? $p->[1] : '';
+        }
+        return \%h;
+    };
+    my (%O, %N, %Omodel, %Nmodel, %Oid, %Nid);
+    for my $r (@$old) { my $k=$key->($r); next unless defined $k; $O{$k}=$opts_of->($r); $Omodel{$k}=$r->{model}; $Oid{$k}=$r->{id}; }
+    for my $r (@$new) { my $k=$key->($r); next unless defined $k; $N{$k}=$opts_of->($r); $Nmodel{$k}=$r->{model}; $Nid{$k}=$r->{id}; }
+
+    my %seen; my @keys = grep { !$seen{$_}++ } (keys %O, keys %N);
+    for my $k (sort @keys) {
+        my ($kind, $id) = split /:/, $k, 2;
+        my $otype = $kind eq 'device' ? 'device' : 'default';
+        if (!exists $O{$k}) {
+            audit(dbh=>$dbh, action=>$action, object_type=>$otype, object_id=>$id,
+                  detail=>"added $otype");
+            next;
+        }
+        if (!exists $N{$k}) {
+            audit(dbh=>$dbh, action=>$action, object_type=>$otype, object_id=>$id,
+                  detail=>"removed $otype");
+            next;
+        }
+        # same record: per-option diff (union of option names)
+        my ($o, $n) = ($O{$k}, $N{$k});
+        my %o2; $o2{$_}++ for (keys %$o, keys %$n);
+        for my $f (sort keys %o2) {
+            my $ov = exists $o->{$f} ? $o->{$f} : undef;
+            my $nv = exists $n->{$f} ? $n->{$f} : undef;
+            next if defined $ov && defined $nv && $ov eq $nv;   # unchanged
+            audit(dbh=>$dbh, action=>$action, object_type=>$otype, object_id=>$id,
+                  field=>$f, old_value=>$ov, new_value=>$nv,
+                  detail=>(!defined $ov ? "added option $f"
+                          : !defined $nv ? "removed option $f"
+                          :                "changed option $f"));
+        }
+    }
+    # Record the new token so the external-change tripwire is not tripped by
+    # this app's own write.
+    audit_record_device_table_token($dbh, $user);
+    $dbh->disconnect;
+}
+
+# app_state key/value helpers (mutable; used for the device-table change
+# tripwire token). Best-effort; return undef on any error.
+sub app_state_get {
+    my ($dbh, $key) = @_;
+    return undef unless $dbh;
+    my $v = eval { ($dbh->selectrow_array('SELECT value FROM app_state WHERE key = ?', undef, $key))[0] };
+    return $v;
+}
+sub app_state_set {
+    my ($dbh, $key, $value, $username) = @_;
+    return unless $dbh;
+    eval {
+        my $n = $dbh->do('UPDATE app_state SET value = ?, username = ?, ts = now() WHERE key = ?',
+                         undef, $value, $username, $key);
+        if (!$n || $n == 0) {
+            $dbh->do('INSERT INTO app_state (key, value, username, ts) VALUES (?,?,?,now())',
+                     undef, $key, $value, $username);
+        }
+    };
+}
+
+# Device-table external-change tripwire. Compares the table's current staleness
+# token (device_table_mtime() = hires-mtime:size:md5) against the last token the
+# app itself recorded (in app_state). If the CONTENT hash differs, the file was
+# changed by something other than this app (a hand edit on the server, a script,
+# a restore done outside the UI) -> log an "external_change" audit entry, then
+# store the new token so it is logged once, not on every login/edit. A pure
+# mtime touch (same md5) is ignored. Called on login and when the editor opens.
+# audit_record_device_table_token() is called by the app's own writers so a
+# normal save never trips this.
+sub _token_md5 { my ($t) = @_; return (defined $t && $t =~ /:([0-9a-f]{32})$/) ? $1 : ''; }
+
+sub audit_record_device_table_token {
+    my ($dbh, $username) = @_;
+    my $own = 0; if (!$dbh) { $dbh = db_connect(); $own = 1; }
+    return unless $dbh;
+    my $tok = device_table_mtime();
+    app_state_set($dbh, 'device_table_token', $tok, $username) if defined $tok && $tok ne '';
+    $dbh->disconnect if $own;
+}
+
+sub audit_check_device_table_change {
+    my ($username) = @_;
+    my $dbh = db_connect();
+    return unless $dbh;
+    my $cur  = device_table_mtime();
+    my $prev = app_state_get($dbh, 'device_table_token');
+    if (!defined $prev || $prev eq '') {
+        # First run / unknown: record silently, don't log a spurious change.
+        app_state_set($dbh, 'device_table_token', $cur, $username) if defined $cur && $cur ne '';
+        $dbh->disconnect; return;
+    }
+    if (defined $cur && $cur ne '' && _token_md5($cur) ne _token_md5($prev)) {
+        my $owner = '';
+        if ($DEVICE_TABLE && -e $DEVICE_TABLE) {
+            my $uid = (stat($DEVICE_TABLE))[4];
+            $owner = defined $uid ? (eval { (getpwuid($uid))[0] } // $uid) : '';
+        }
+        audit(dbh => $dbh, action => 'external_change', username => $username,
+              object_type => 'table', object_id => _basename($DEVICE_TABLE // ''),
+              old_value => $prev, new_value => $cur,
+              detail => 'device table changed outside the application'
+                      . ($owner ne '' ? " (file owner: $owner)" : ''));
+        app_state_set($dbh, 'device_table_token', $cur, $username);
+    }
+    $dbh->disconnect;
 }
 
 # Fetch one user's row as a hashref
@@ -1517,9 +1741,14 @@ sub create_session {
     # (session rewritten) once the password is changed. Kept out of the
     # cookie like everything else.
     $pw_warn = '' unless defined $pw_warn;
+    # 5th line: login time (epoch), fixed for the life of the session. The idle
+    # slide in load_session rewrites lines 1-4 but preserves this, so the
+    # absolute-lifetime cap (SESSION_MAX_LIFETIME) measures from login, not
+    # from last activity.
+    my $login_t = time();
     open(my $fh, '>', $path) or die "Cannot create session file: $!";
     flock($fh, LOCK_EX);
-    print $fh "$username\n$expiry\n$csrf\n$pw_warn\n";
+    print $fh "$username\n$expiry\n$csrf\n$pw_warn\n$login_t\n";
     close($fh);
     chmod(0600, $path);
     return $sid;
@@ -1540,18 +1769,34 @@ sub load_session {
     my $expiry   = <$fh>;
     my $csrf     = <$fh>;
     my $pw_warn  = <$fh>;
+    my $login_t  = <$fh>;
     close($fh);
     return () unless defined $username && defined $expiry;
     chomp($username, $expiry);
     chomp($csrf) if defined $csrf;
     chomp($pw_warn) if defined $pw_warn;
+    chomp($login_t) if defined $login_t;
     $pw_warn = '' unless defined $pw_warn;
+    # Legacy 4-line session files (written before the absolute cap) have no
+    # login time. Rather than log everyone out on upgrade, treat the cap as
+    # starting now for them -- so the file gets a login_time on this first load
+    # and the cap counts from the upgrade, not retroactively.
+    $login_t = time() if !defined $login_t || $login_t !~ /^\d+$/;
+    # Idle expiry.
     if ($expiry < time()) {
+        unlink($path);
+        return ();
+    }
+    # Absolute lifetime cap: force-expire SESSION_MAX_LIFETIME seconds after
+    # login, regardless of activity (0 disables).
+    if ($SESSION_MAX_LIFETIME > 0 && time() - $login_t > $SESSION_MAX_LIFETIME) {
         unlink($path);
         return ();
     }
     # Idle timeout: the session lives for SESSION_TTL after the LAST activity,
     # not after login. Slide the expiry forward on every successful load.
+    # login_time (line 5) is written back UNCHANGED so the absolute cap keeps
+    # measuring from the real login.
     #
     # This MUST be race-safe: under MAX_PARALLEL_SCAN > 1 several requests load
     # the same session file at once. A plain open('>', $path) truncates the
@@ -1562,7 +1807,7 @@ sub load_session {
     # the session file: rename is atomic on POSIX, so a concurrent reader
     # always sees either the complete old file or the complete new one.
     my $new_expiry = time() + $SESSION_TTL;
-    my $data = "$username\n$new_expiry\n" . ($csrf // '') . "\n$pw_warn\n";
+    my $data = "$username\n$new_expiry\n" . ($csrf // '') . "\n$pw_warn\n$login_t\n";
     my ($tfh, $tmp) = eval { tempfile('sess-XXXXXXXX', DIR => $SESSION_DIR) };
     if ($tfh) {
         print $tfh $data;
@@ -1583,8 +1828,102 @@ sub destroy_session {
     unlink("$SESSION_DIR/$sid");
 }
 
+# Opportunistic cleanup of stale session files. Expiry is otherwise lazy -- a
+# file is only removed when ITS id is presented again after expiry (or on
+# logout) -- so an abandoned cookie (browser closed, machine changed) leaves its
+# file behind forever. This reaps any file that load_session would reject:
+# past its idle expiry OR past the absolute cap (login_time + MAX_LIFETIME).
+# Unreadable/garbage files are reaped only if older than a grace margin, so a
+# file being written right now (create_session / the idle-slide temp+rename) is
+# never deleted mid-write. Called (throttled) from do_login; all errors ignored.
+sub sweep_sessions {
+    return unless defined $SESSION_DIR && -d $SESSION_DIR;
+    # Throttle: a stamp file whose mtime marks the last sweep. Skip if a sweep
+    # ran within the last SESSION_TTL, so logins don't all pay the scan.
+    my $stamp = "$SESSION_DIR/.last_sweep";
+    if (my @st = stat($stamp)) {
+        return if (time() - $st[9]) < $SESSION_TTL;
+    }
+    # (Re)touch the stamp up front so concurrent logins don't all sweep at once.
+    if (open(my $sf, '>', $stamp)) { close($sf); chmod(0600, $stamp); }
+
+    my $now    = time();
+    my $margin = $SESSION_TTL;
+    $margin = $SESSION_MAX_LIFETIME if $SESSION_MAX_LIFETIME > $margin;
+    opendir(my $dh, $SESSION_DIR) or return;
+    my @ids = grep { /^[0-9a-f]{48}$/ } readdir($dh);   # session files only
+    closedir($dh);
+    for my $id (@ids) {
+        my $path = "$SESSION_DIR/$id";
+        if (open(my $fh, '<', $path)) {
+            my $username = <$fh>;
+            my $expiry   = <$fh>;
+            my $csrf     = <$fh>;
+            my $pw_warn  = <$fh>;
+            my $login_t  = <$fh>;
+            close($fh);
+            if (defined $expiry && $expiry =~ /^\s*(\d+)\s*$/) {
+                my $exp = $1;
+                my $dead = ($exp < $now);
+                if (!$dead && $SESSION_MAX_LIFETIME > 0
+                    && defined $login_t && $login_t =~ /^\s*(\d+)\s*$/) {
+                    $dead = 1 if ($now - $1) > $SESSION_MAX_LIFETIME;
+                }
+                unlink($path) if $dead;
+            } else {
+                # Unparseable: reap only if clearly not a live write in progress.
+                my @st = stat($path);
+                unlink($path) if @st && ($now - $st[9]) > $margin;
+            }
+        }
+    }
+}
+
+# Delete every session file belonging to $username, except $keep_sid (pass the
+# freshly-rotated current session's id for a self password change; pass undef to
+# invalidate ALL of the user's sessions, e.g. an admin resetting someone). Used
+# so a password change/reset logs out any OTHER session for that account -- a
+# captured cookie, or a login left open elsewhere. O(session files), run only
+# on the rare password event; all errors ignored.
+# The session cookie with the app's standard attributes (HttpOnly, SameSite,
+# path, and Secure when HTTPS_ENABLED). One definition shared by login and by
+# session rotation on password change.
+sub session_cookie {
+    my ($sid) = @_;
+    return CGI::Cookie->new(
+        -name     => $COOKIE_NAME,
+        -value    => $sid,
+        -httponly => 1,
+        -samesite => 'Lax',   # defence-in-depth alongside the CSRF token
+        -path     => '/',
+        ($HTTPS_ENABLED ? (-secure => 1) : ()),
+    );
+}
+
+sub invalidate_user_sessions {
+    my ($username, $keep_sid) = @_;
+    return unless defined $username && $username ne '';
+    return unless defined $SESSION_DIR && -d $SESSION_DIR;
+    opendir(my $dh, $SESSION_DIR) or return;
+    my @ids = grep { /^[0-9a-f]{48}$/ } readdir($dh);
+    closedir($dh);
+    for my $id (@ids) {
+        next if defined $keep_sid && $id eq $keep_sid;
+        my $path = "$SESSION_DIR/$id";
+        open(my $fh, '<', $path) or next;
+        my $owner = <$fh>;
+        close($fh);
+        next unless defined $owner;
+        chomp $owner;
+        unlink($path) if $owner eq $username;
+    }
+}
+
 sub current_user {
-    my ($username) = current_session();
+    # current_session() returns ($sid, $username, ...) -- the username is the
+    # SECOND element. (A bare "my ($username) = current_session()" would capture
+    # the sid.)
+    my (undef, $username) = current_session();
     return $username;
 }
 
@@ -1690,16 +2029,13 @@ sub do_login {
         if ($password eq $DEFAULT_PASSWORD) {
             $pw_warn = ($username eq $PROTECTED_USER) ? 'admin' : 'other';
         }
+        # Reap stale session files left by abandoned cookies. Throttled to at
+        # most once per SESSION_TTL inside sweep_sessions(), so logins stay fast.
+        sweep_sessions();
+        audit(action => 'login', username => $username, detail => 'login succeeded');
+        audit_check_device_table_change($username);   # tripwire: out-of-app edit
         my $sid = create_session($username, $pw_warn);
-        my $cookie = CGI::Cookie->new(
-            -name     => $COOKIE_NAME,
-            -value    => $sid,
-            -httponly => 1,
-            -samesite => 'Lax',   # defence-in-depth alongside the CSRF token
-            -path     => '/',
-            # Secure flag set from the HTTPS_ENABLED config key (default off).
-            ($HTTPS_ENABLED ? (-secure => 1) : ()),
-        );
+        my $cookie = session_cookie($sid);
         # Return the user to the page they originally asked for (captured as a
         # hidden "next" in the login form), if it is a safe landing action;
         # otherwise the default Devices page.
@@ -1709,6 +2045,8 @@ sub do_login {
         # Slow down online brute-force attempts. Applied on every failure --
         # unknown user or wrong password alike -- so timing doesn't reveal
         # which one was wrong.
+        audit(action => 'login_failed', username => $username,
+              detail => 'invalid username or password');   # never logs the password
         sleep 2;
         show_login_form('Invalid username or password.');
     }
@@ -1725,6 +2063,7 @@ sub do_logout {
     # session.
     my ($username, $csrf) = defined $sid ? load_session($sid) : ();
     if (defined $username && csrf_ok($csrf)) {
+        audit(action => 'logout', username => $username, detail => 'logout');
         destroy_session($sid);
         my $cookie = CGI::Cookie->new(-name => $COOKIE_NAME, -value => '', -path => '/',
                                       -httponly => 1, -samesite => 'Lax', -expires => '-1d',
@@ -1744,7 +2083,7 @@ sub script_url {
 # --------------------------------------------------------------------------
 
 sub show_login_form {
-    my ($error, $next) = @_;
+    my ($error, $next, $notice) = @_;
     # Fall back to the "next" the browser submitted (e.g. a failed login retry).
     $next = $cgi->param('next') unless defined $next;
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
@@ -1755,6 +2094,10 @@ sub show_login_form {
     print qq{<h1>Log in</h1>\n};
     if ($error) {
         print qq{<p class="error">} . esc($error) . qq{</p>\n};
+    }
+    # Informational notice (e.g. the session ended) -- distinct from an error.
+    if (defined $notice && $notice ne '') {
+        print qq{<p class="login-notice">} . esc($notice) . qq{</p>\n};
     }
     print $cgi->start_form(-method => 'POST', -action => script_url());
     print qq{<input type="hidden" name="action" value="login">\n};
@@ -4054,6 +4397,10 @@ sub show_backup_now {
 
     my ($output, $status, $err) = run_backup_now($dev);
     my $return_link = script_url() . '?dev=' . CGI::escape($dev);
+    audit(action => 'backup_now', object_type => 'device', object_id => $dev,
+          detail => $err ? "backup failed: $err"
+                  : (defined $status && $status == 0 ? 'backup run finished (exit 0)'
+                     : "backup run exited with status " . (defined $status ? $status : '?')));
 
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
@@ -4161,6 +4508,9 @@ my %TOOL_TITLE = (
     nobackup   => 'Devices without backups',
     empty_bk   => 'Check devices for empty backups',
     suffix     => 'Check devices for consistent backup suffixes',
+    logo       => 'Upload report logo',
+    diskspace  => 'Disk space',
+    audit      => 'Audit log',
 );
 # Render a single Tools tool as its own page: $only is one of the %TOOL_TITLE
 # keys naming which tool to show. Called without $only (?action=tools, no tool
@@ -4460,6 +4810,499 @@ sub show_tool_nobackup   { show_tools($_[0], 'nobackup'); }
 sub show_tool_empty_bk   { show_tools($_[0], 'empty_bk'); }
 sub show_tool_suffix     { show_tools($_[0], 'suffix'); }
 
+# "Upload report logo" tool page: upload a logo image into the report_dir and
+# manage (list/delete) the logos already there. Separate from the device-table
+# editor so the editor form need not become multipart. $errs is an optional
+# arrayref of messages to show (from a failed upload/delete).
+sub show_tool_logo {
+    my ($user, $errs, $msg) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to use Tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Upload report logo', $user);
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Upload report logo</h2>\n};
+    if ($msg) { print qq{<p class="msg">} . esc($msg) . qq{</p>\n}; }
+    for my $e (@{ $errs || [] }) { print qq{<p class="error">} . esc($e) . qq{</p>\n}; }
+
+    my $dir = report_directory();
+    if (!defined $dir) {
+        print qq{<p>No usable <code>report_dir</code> is configured. Set and save a }
+            . qq{valid <code>report_dir</code> on the <code>email:</code> line }
+            . qq{(Setup devices &rarr; Edit device table &rarr; Email notification) first; }
+            . qq{logos are stored in that directory.</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+    print qq{<p class="muted">Logos are stored in the report directory: <code>}
+        . esc($dir) . qq{</code>. Requirements: 250x50 pixel; .png/.jpg/.gif; 100KB max. }
+        . qq{Filenames are case-sensitive.</p>\n};
+
+    # Existing logos with Delete.
+    my ($imgs, $total) = list_report_images($dir, 1000);
+    print qq{<h3>Existing logos</h3>\n};
+    if (!@$imgs) {
+        print qq{<p class="muted">No logo images in the report directory yet.</p>\n};
+    } else {
+        print qq{<table class="logo-list"><tr><th>Preview</th><th>Filename</th>}
+            . qq{<th>Size</th><th></th></tr>\n};
+        for my $f (@$imgs) {
+            my $sz = (stat("$dir/$f"))[7];
+            print qq{<tr>};
+            # The report directory is NOT web-served, so an <img src="filename">
+            # cannot work. Read the file and embed it as an inline data: URI so
+            # the preview renders without the web server touching that directory.
+            # Only files that pass the magic-byte sniff are shown as images;
+            # anything too big to be a logo (shouldn't happen, 100KB cap) or not
+            # a real image falls back to a dash.
+            my $thumb = logo_data_uri("$dir/$f");
+            if (defined $thumb) {
+                print qq{<td><img class="logo-thumb" src="$thumb" alt="} . esc($f) . qq{"></td>};
+            } else {
+                print qq{<td class="muted">&mdash;</td>};
+            }
+            print qq{<td><code>} . esc($f) . qq{</code></td>};
+            print qq{<td>} . esc(human_size($sz)) . qq{</td>};
+            print qq{<td>};
+            print $cgi->start_form(-method => 'POST', -action => script_url(),
+                -data_confirm => 'Delete logo ' . esc($f) . '?');
+            print qq{<input type="hidden" name="action" value="delete_logo">\n};
+            print qq{<input type="hidden" name="name" value="} . esc($f) . qq{">\n};
+            print csrf_field();
+            print qq{<button type="submit" class="btn btn-small btn-danger">Delete</button>\n};
+            print $cgi->end_form;
+            print qq{</td></tr>\n};
+        }
+        print qq{</table>\n};
+    }
+
+    # Upload form (its own multipart POST, independent of the editor form).
+    print qq{<h3>Upload a new logo</h3>\n};
+    print $cgi->start_multipart_form(-method => 'POST', -action => script_url());
+    print qq{<input type="hidden" name="action" value="upload_logo">\n};
+    print csrf_field();
+    print qq{<input type="file" name="logofile" accept=".png,.jpg,.jpeg,.gif">\n};
+    print qq{<button type="submit" class="btn">Upload</button>\n};
+    print qq{<p class="opt-hint muted">Accepted: .png/.jpg/.gif, 100KB max. The }
+        . qq{name is kept as-is (case-sensitive); re-uploading the same name overwrites it.</p>\n};
+    print $cgi->end_form;
+
+    print qq{</div>\n};   # .tool-section
+    print page_foot();
+}
+
+# Collect the distinct directories fetchconfig-web writes into, for the Disk
+# space tool. Returns an arrayref of { purpose, dir } in display order:
+#   - every repository: the global $REPOSITORY plus each distinct repository=
+#     actually used by a device/default (resolved through the allow-list),
+#   - the report_dir.
+# Deduped by real path (a repo that equals the report_dir still appears once per
+# purpose, but identical repository paths collapse to one row).
+sub collect_repo_dirs {
+    # Rows keyed by "purpose\0realpath" so the same directory from both sources
+    # merges into one row whose source becomes "allowed and configured".
+    # Everything is reduced to the REAL path first ($aliases expanded), so an
+    # aliased repository= and its directory: allow-list entry collapse together.
+    my @order;        # preserve first-seen order of the keys
+    my %row;          # key => { purpose, dir, configured, allowed }
+    my $add = sub {
+        my ($purpose, $dir, $flag) = @_;   # $flag: 'configured' | 'allowed'
+        return unless defined $dir && $dir ne '';
+        my $key = "$purpose\0$dir";
+        unless (exists $row{$key}) {
+            $row{$key} = { purpose => $purpose, dir => $dir, configured => 0, allowed => 0 };
+            push @order, $key;
+        }
+        $row{$key}{$flag} = 1;
+    };
+    my $real = sub {
+        my ($kind, $val) = @_;
+        return $val unless defined $val && $val =~ /^\$/;
+        my $p = resolve_allowed_path($kind, $val);
+        return defined $p ? $p : $val;      # unresolved alias: keep as-is
+    };
+
+    # --- CONFIGURED: directories actually in use ---
+    # Global repository.
+    $add->('Repository', $real->('repository', $REPOSITORY), 'configured')
+        if defined $REPOSITORY && $REPOSITORY ne '';
+    # Per-device / per-default repository= values.
+    my ($content, $err) = slurp_device_table();
+    if (!$err && defined $content) {
+        my $recs = parse_device_table($content);
+        for my $r (@$recs) {
+            next unless $r->{kind} eq 'device' || $r->{kind} eq 'default';
+            for my $p (@{ $r->{opts} || [] }) {
+                next unless defined $p->[0] && $p->[0] eq 'repository'
+                         && defined $p->[1] && $p->[1] ne '';
+                $add->('Repository', $real->('repository', $p->[1]), 'configured');
+            }
+        }
+    }
+    # Configured report directory.
+    my $rdir = report_directory();
+    $add->('Report dir', $rdir, 'configured') if defined $rdir && $rdir ne '';
+
+    # --- ALLOWED: every directory: allow-list entry (repository + report) ---
+    my $al = read_allowed_dirs();
+    if ($al->{present}) {
+        for my $e (@{ $al->{repository} || [] }) {
+            $add->('Repository', $e->{path}, 'allowed') if defined $e->{path} && $e->{path} ne '';
+        }
+        for my $e (@{ $al->{report} || [] }) {
+            $add->('Report dir', $e->{path}, 'allowed') if defined $e->{path} && $e->{path} ne '';
+        }
+    }
+
+    # Build the result with a human source tag.
+    my @rows;
+    for my $k (@order) {
+        my $o = $row{$k};
+        my $src = ($o->{configured} && $o->{allowed}) ? 'allowed and configured'
+                : $o->{configured}                    ? 'configured'
+                :                                       'allowed';
+        push @rows, { purpose => $o->{purpose}, dir => $o->{dir}, source => $src };
+    }
+    return \@rows;
+}
+
+# Disk space tool (?action=tool_diskspace, admin only, read-only). Shows free
+# space for every repository directory and the report_dir, with the filesystem
+# device id (st_dev) in gray so directories on the same filesystem are obvious.
+# Uses Filesys::Df (loaded lazily); if that module is absent the box explains
+# how to install it rather than breaking the app.
+sub show_tool_diskspace {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to use Tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Disk space', $user);
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Disk space</h2>\n};
+
+    my $have_df = eval { require Filesys::Df; 1 };
+    unless ($have_df) {
+        print qq{<p class="error">This tool needs the <code>Filesys::Df</code> Perl }
+            . qq{module, which is not installed. Install it and reload: }
+            . qq{<code>libfilesys-df-perl</code> (Debian/Ubuntu), }
+            . qq{<code>perl-Filesys-Df</code> (RHEL/Rocky), or }
+            . qq{<code>cpan Filesys::Df</code>.</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    my $rows = collect_repo_dirs();
+    unless (@$rows) {
+        print qq{<p class="muted">No repository or report directories are configured.</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    # Group directories by filesystem (st_dev). A directory that doesn't exist
+    # has no st_dev and is collected separately into "Unavailable".
+    my @groups;        # ordered: { dev, dirs => [ {purpose,dir}, ... ] }
+    my %group_of;      # dev => index into @groups
+    my @unavailable;   # { purpose, dir } with no st_dev (missing dir)
+    for my $r (@$rows) {
+        my $dir = $r->{dir};
+        my $dev = (-e $dir) ? (stat($dir))[0] : undef;
+        if (!defined $dev) {
+            push @unavailable, $r;
+            next;
+        }
+        if (!exists $group_of{$dev}) {
+            $group_of{$dev} = scalar @groups;
+            push @groups, { dev => $dev, dirs => [] };
+        }
+        push @{ $groups[$group_of{$dev}]{dirs} }, $r;
+    }
+
+    # For each filesystem read the space figures ONCE, from the first directory
+    # in the group whose values can be read (all its directories are the same
+    # filesystem, so a single reading avoids showing divergent numbers that a
+    # second df() call might return). "unknown" if none can be read.
+    for my $g (@groups) {
+        my ($free, $total, $per);
+        for my $d (@{ $g->{dirs} }) {
+            next unless -d $d->{dir};
+            my $df = eval { Filesys::Df::df($d->{dir}, 1024) };   # 1K blocks
+            next unless $df;
+            $free  = (defined $df->{bavail} ? $df->{bavail} : $df->{bfree}) * 1024;
+            $total = $df->{blocks} * 1024;
+            $per   = $df->{per};
+            last;
+        }
+        $g->{free} = $free; $g->{total} = $total; $g->{per} = $per;
+        $g->{known} = (defined $free && defined $total) ? 1 : 0;
+    }
+
+    print qq{<p class="muted">Free space grouped by filesystem. Directories in the }
+        . qq{same table are on the same filesystem, so the size figures are read }
+        . qq{once (shown in black on the first directory, repeated in gray on the }
+        . qq{rest).</p>\n};
+
+    my $hdr = qq{<tr><th>Purpose</th><th>Directory</th><th>Source</th><th>Free</th>}
+            . qq{<th>Total</th><th>Use%</th></tr>\n};
+    my $n = 0;
+    for my $g (@groups) {
+        $n++;
+        print qq{<h3 class="fs-group-title">Filesystem $n</h3>\n};
+        print qq{<table class="disk-list">$hdr};
+        my $free_s  = $g->{known} ? esc(human_size($g->{free}))  : 'unknown';
+        my $total_s = $g->{known} ? esc(human_size($g->{total})) : 'unknown';
+        my $per_s   = $g->{known} ? (defined $g->{per} ? esc($g->{per}) . '%' : '&mdash;') : 'unknown';
+        my $first = 1;
+        for my $d (@{ $g->{dirs} }) {
+            print qq{<tr>};
+            print qq{<td>} . esc($d->{purpose}) . qq{</td>};
+            print qq{<td><code>} . esc($d->{dir}) . qq{</code></td>};
+            print qq{<td class="muted">} . esc($d->{source}) . qq{</td>};
+            # Figures in black on the first row, gray (same values) on the rest.
+            my $cls = $first ? '' : ' class="muted"';
+            print qq{<td$cls>$free_s</td><td$cls>$total_s</td><td$cls>$per_s</td>};
+            print qq{</tr>\n};
+            $first = 0;
+        }
+        print qq{</table>\n};
+    }
+
+    if (@unavailable) {
+        print qq{<h3 class="fs-group-title">Unavailable</h3>\n};
+        print qq{<table class="disk-list"><tr><th>Purpose</th><th>Directory</th>}
+            . qq{<th>Source</th><th colspan="3">Status</th></tr>\n};
+        for my $d (@unavailable) {
+            print qq{<tr><td>} . esc($d->{purpose}) . qq{</td>}
+                . qq{<td><code>} . esc($d->{dir}) . qq{</code></td>}
+                . qq{<td class="muted">} . esc($d->{source}) . qq{</td>}
+                . qq{<td colspan="3" class="muted">directory not found</td></tr>\n};
+        }
+        print qq{</table>\n};
+    }
+
+    print qq{</div>\n};   # .tool-section
+    print page_foot();
+}
+
+use constant AUDIT_PAGE_SIZE => 100;
+
+# Build the WHERE clause + bind values for the audit viewer's filters, from the
+# CGI params (f_user, f_action, f_object, f_text, f_from, f_to). Returns
+# ($where_sql, \@binds). All comparisons are parameterized (no SQL injection).
+sub audit_filter_sql {
+    my @w; my @b;
+    my $p = sub { my $v = $cgi->param($_[0]); return (defined $v && $v ne '') ? $v : undef; };
+    if (defined(my $u = $p->('f_user')))   { push @w, 'username = ?';    push @b, $u; }
+    if (defined(my $a = $p->('f_action'))) { push @w, 'action = ?';      push @b, $a; }
+    if (defined(my $o = $p->('f_object'))) { push @w, 'object_id = ?';   push @b, $o; }
+    if (defined(my $t = $p->('f_text'))) {
+        push @w, '(detail ILIKE ? OR old_value ILIKE ? OR new_value ILIKE ? OR field ILIKE ?)';
+        my $like = '%' . $t . '%'; push @b, ($like) x 4;
+    }
+    # Dates as YYYY-MM-DD (inclusive). 'to' is extended to end-of-day.
+    if (defined(my $from = $p->('f_from'))) { push @w, 'ts >= ?'; push @b, $from; }
+    if (defined(my $to   = $p->('f_to')))   { push @w, 'ts <  (?::date + 1)'; push @b, $to; }
+    my $sql = @w ? (' WHERE ' . join(' AND ', @w)) : '';
+    return ($sql, \@b);
+}
+
+# JSON data endpoint for the audit viewer (?action=audit_data, admin only).
+# Returns one page of rows (newest first) plus the total, so the client can
+# page without ever receiving the whole table. Params: offset (0,100,...) and
+# the f_* filters.
+sub show_audit_data {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) {
+        $dbh->disconnect if $dbh;
+        print $cgi->header(-type => 'application/json', -status => '403 Forbidden');
+        print '{"error":"forbidden"}';
+        return;
+    }
+    my $offset = $cgi->param('offset') // 0;
+    $offset = 0 unless $offset =~ /^\d+$/;
+    my $limit = AUDIT_PAGE_SIZE;
+    my ($where, $binds) = audit_filter_sql();
+
+    my $total = 0;
+    my $rows  = [];
+    my $ok = eval {
+        ($total) = $dbh->selectrow_array("SELECT count(*) FROM audit_log$where", undef, @$binds);
+        my $sth = $dbh->prepare(
+            "SELECT id, to_char(ts,'YYYY-MM-DD HH24:MI:SS') AS ts, username, ip,
+                    action, object_type, object_id, field, old_value, new_value, detail
+               FROM audit_log$where
+              ORDER BY id DESC LIMIT $limit OFFSET $offset");
+        $sth->execute(@$binds);
+        $rows = $sth->fetchall_arrayref({});
+        1;
+    };
+    $dbh->disconnect;
+    unless ($ok) {
+        print $cgi->header(-type => 'application/json', -status => '500 Internal Server Error');
+        print '{"error":"query failed"}';
+        return;
+    }
+    # Hand-build JSON (pure ASCII) via json_string for each value.
+    my @items;
+    for my $r (@$rows) {
+        push @items, '{'
+            . join(',', map { json_string($_) . ':' . json_string(defined $r->{$_} ? "$r->{$_}" : '') }
+                   qw(ts username ip action object_type object_id field old_value new_value detail))
+            . '}';
+    }
+    print $cgi->header(-type => 'application/json', -charset => 'UTF-8');
+    print '{"total":' . ($total+0) . ',"offset":' . ($offset+0)
+        . ',"limit":' . $limit . ',"rows":[' . join(',', @items) . ']}';
+}
+
+# CSV export of the audit log for the current filter (?action=audit_csv, admin).
+# Streams all matching rows (no paging) as a download.
+sub do_audit_csv {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) {
+        $dbh->disconnect if $dbh;
+        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
+    my ($where, $binds) = audit_filter_sql();
+    print $cgi->header(-type => 'text/csv', -charset => 'UTF-8',
+                       -attachment => 'audit-log.csv');
+    my $csv = sub {   # minimal RFC-4180 quoting
+        join(',', map { my $v = defined $_ ? $_ : '';
+                        $v =~ s/"/""/g; '"' . $v . '"' } @_) . "\r\n";
+    };
+    print $csv->(qw(ts username ip action object_type object_id field old_value new_value detail));
+    my $ok = eval {
+        my $sth = $dbh->prepare(
+            "SELECT to_char(ts,'YYYY-MM-DD HH24:MI:SS') AS ts, username, ip, action,
+                    object_type, object_id, field, old_value, new_value, detail
+               FROM audit_log$where ORDER BY id DESC");
+        $sth->execute(@$binds);
+        while (my $r = $sth->fetchrow_arrayref) { print $csv->(@$r); }
+        1;
+    };
+    $dbh->disconnect;
+    print $csv->('(export failed)') unless $ok;
+}
+
+# Audit log viewer page (?action=tool_audit, admin only). Renders the filter
+# controls, an empty results table and the pager; the rows are fetched by AJAX
+# from show_audit_data() so the (potentially large) table is never sent whole.
+sub show_tool_audit {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
+    $dbh->disconnect if $dbh;
+    unless ($is_admin) {
+        print page_head('Error', $user);
+        print qq{<p class="error">The audit log is available to administrators only.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Audit log', $user, 'full');
+    print qq{<div class="tool-section" id="audit-section">\n};
+    print qq{<h2 class="tool-section-title">Audit log</h2>\n};
+    print qq{<p class="muted">Immutable record of changes. Newest first, }
+        . AUDIT_PAGE_SIZE . qq{ per page.</p>\n};
+    my $su = script_url();
+    print <<"HTML";
+<div class="audit-filters">
+  <label>User <input type="text" id="af-user" size="10"></label>
+  <label>Action <input type="text" id="af-action" size="12"></label>
+  <label>Object <input type="text" id="af-object" size="12"></label>
+  <label>Text <input type="text" id="af-text" size="14"></label>
+  <label>From <input type="date" id="af-from"></label>
+  <label>To <input type="date" id="af-to"></label>
+  <button type="button" class="btn btn-small" id="af-apply">Filter</button>
+  <button type="button" class="btn btn-small" id="af-clear">Clear</button>
+  <button type="button" class="btn btn-small" id="af-reload">Reload</button>
+  <a class="btn btn-small" id="af-csv" href="#">Export CSV</a>
+</div>
+<div class="audit-pager">
+  <button type="button" class="btn btn-small" id="ap-first">&laquo; First</button>
+  <button type="button" class="btn btn-small" id="ap-prev">&larr; Prev</button>
+  <span id="ap-info" class="pageinfo"></span>
+  <button type="button" class="btn btn-small" id="ap-next">Next &rarr;</button>
+  <button type="button" class="btn btn-small" id="ap-last">Last &raquo;</button>
+</div>
+<div class="audit-scroll">
+<table class="list audit-list" id="audit-table">
+  <thead><tr><th>Time</th><th>User</th><th>IP</th><th>Action</th><th>Object</th>
+    <th>Field</th><th>Old &rarr; New</th><th>Detail</th></tr></thead>
+  <tbody id="audit-body"></tbody>
+</table>
+</div>
+<p id="audit-empty" class="muted" style="display:none;">No matching entries.</p>
+<script>
+(function () {
+  var url = "$su";
+  var PAGE = @{[ AUDIT_PAGE_SIZE ]};
+  var offset = 0, total = 0;
+  function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];}); }
+  function qs() {
+    var p = [];
+    function add(id,name){ var v=document.getElementById(id).value; if(v!=='') p.push(name+'='+encodeURIComponent(v)); }
+    add('af-user','f_user'); add('af-action','f_action'); add('af-object','f_object');
+    add('af-text','f_text'); add('af-from','f_from'); add('af-to','f_to');
+    return p.join('&');
+  }
+  function arrow(o,n){ if(o==='' && n==='') return ''; return esc(o)+' \\u2192 '+esc(n); }
+  function render(d) {
+    total = d.total; offset = d.offset;
+    var b = document.getElementById('audit-body'); b.innerHTML='';
+    for (var i=0;i<d.rows.length;i++){ var r=d.rows[i];
+      var tr=document.createElement('tr');
+      tr.innerHTML='<td>'+esc(r.ts)+'</td><td>'+esc(r.username)+'</td><td>'+esc(r.ip)+'</td>'
+        +'<td>'+esc(r.action)+'</td><td>'+esc(r.object_type? (r.object_type+(r.object_id?' '+r.object_id:'')) : r.object_id)+'</td>'
+        +'<td>'+esc(r.field)+'</td><td>'+arrow(r.old_value,r.new_value)+'</td><td>'+esc(r.detail)+'</td>';
+      b.appendChild(tr);
+    }
+    document.getElementById('audit-empty').style.display = (total===0?'':'none');
+    var from = total? offset+1 : 0, to = Math.min(offset+PAGE,total);
+    document.getElementById('ap-info').textContent = total? (from+'\\u2013'+to+' of '+total) : '0 of 0';
+    document.getElementById('ap-first').disabled = offset<=0;
+    document.getElementById('ap-prev').disabled  = offset<=0;
+    document.getElementById('ap-next').disabled  = offset+PAGE>=total;
+    document.getElementById('ap-last').disabled  = offset+PAGE>=total;
+    document.getElementById('af-csv').href = url+'?action=audit_csv'+(qs()?'&'+qs():'');
+  }
+  function load() {
+    var u = url+'?action=audit_data&offset='+offset+(qs()?'&'+qs():'');
+    fetch(u,{credentials:'same-origin'}).then(function(r){return r.json();})
+      .then(render).catch(function(){ document.getElementById('ap-info').textContent='(load failed)'; });
+  }
+  document.getElementById('af-apply').addEventListener('click',function(){ offset=0; load(); });
+  document.getElementById('af-reload').addEventListener('click',function(){ load(); });
+  document.getElementById('af-clear').addEventListener('click',function(){
+    ['af-user','af-action','af-object','af-text','af-from','af-to'].forEach(function(id){document.getElementById(id).value='';});
+    offset=0; load();
+  });
+  document.getElementById('ap-first').addEventListener('click',function(){ offset=0; load(); });
+  document.getElementById('ap-prev').addEventListener('click',function(){ offset=Math.max(0,offset-PAGE); load(); });
+  document.getElementById('ap-next').addEventListener('click',function(){ if(offset+PAGE<total){offset+=PAGE; load();} });
+  document.getElementById('ap-last').addEventListener('click',function(){ offset=Math.max(0,Math.floor((total-1)/PAGE)*PAGE); load(); });
+  load();
+})();
+</script>
+HTML
+    print qq{</div>\n};
+    print page_foot();
+}
+
 # Full-page fetchconfig log viewer (?action=view_log, admin only, read-only).
 # Reads FETCHCONFIG_LOG and shows it split into collapsible sections at each
 # "-----[NAME]-----" header. Section names are bold; the [NAME] is green, or
@@ -4591,6 +5434,65 @@ sub show_fetchconfig_log {
 # The resolved report directory (the email: report_dir option -> allow-list
 # path), or undef if reporting is not configured / disabled / the dir is not
 # resolvable. Reads the device table directly (server-side).
+# A filename is an acceptable logo name iff it is a bare basename (no path
+# separators, no "..") ending in .png/.jpg/.gif (case-insensitive extension,
+# case-PRESERVED name -- Linux is case-sensitive).
+sub valid_logo_name {
+    my ($f) = @_;
+    return 0 unless defined $f && $f ne '';
+    return 0 if $f =~ m{[/\\]} || $f eq '.' || $f eq '..' || $f =~ /\0/;
+    return $f =~ /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|gif)$/i ? 1 : 0;
+}
+
+# List image files (.png/.jpg/.gif) in $dir, case-preserved, sorted. Returns
+# (\@first_n, $total). @first_n is capped at $limit (default 25). ($dir undef or
+# unreadable -> ([], 0).)
+sub list_report_images {
+    my ($dir, $limit) = @_;
+    $limit = 25 unless defined $limit;
+    return ([], 0) unless defined $dir && $dir ne '' && -d $dir;
+    opendir(my $dh, $dir) or return ([], 0);
+    my @imgs = sort grep { valid_logo_name($_) && -f "$dir/$_" } readdir($dh);
+    closedir($dh);
+    my $total = scalar @imgs;
+    @imgs = @imgs[0 .. $limit - 1] if $total > $limit;
+    return (\@imgs, $total);
+}
+
+# Quick content sniff: return 'png'|'jpg'|'gif' if $bytes begins with that
+# format's magic, else undef. Used to reject a mislabeled upload regardless of
+# its extension. (Dimensions are NOT checked -- no core module reads them; the
+# "250x50" guidance is advisory.)
+sub image_magic_type {
+    my ($bytes) = @_;
+    return undef unless defined $bytes && length($bytes) >= 4;
+    return 'png' if substr($bytes, 0, 8) eq "\x89PNG\x0d\x0a\x1a\x0a";
+    return 'jpg' if substr($bytes, 0, 3) eq "\xff\xd8\xff";
+    return 'gif' if substr($bytes, 0, 6) eq 'GIF87a' || substr($bytes, 0, 6) eq 'GIF89a';
+    return undef;
+}
+
+# Read a logo image and return a "data:image/<type>;base64,<...>" URI for inline
+# preview (the report directory is not web-served, so <img src="name"> can't
+# work). Returns undef if the file can't be read, exceeds the 100KB logo cap, or
+# isn't a real PNG/JPEG/GIF. Uses MIME::Base64 (core since Perl 5.8).
+sub logo_data_uri {
+    my ($path) = @_;
+    return undef unless defined $path && -f $path;
+    my $sz = (stat($path))[7];
+    return undef unless defined $sz && $sz > 0 && $sz <= 100 * 1024;
+    open(my $fh, '<', $path) or return undef;
+    binmode($fh);
+    local $/;
+    my $bytes = <$fh>;
+    close($fh);
+    my $type = image_magic_type($bytes);
+    return undef unless $type;
+    my $mime = $type eq 'jpg' ? 'image/jpeg' : "image/$type";
+    my $b64  = MIME::Base64::encode_base64($bytes, '');   # no line breaks
+    return "data:$mime;base64,$b64";
+}
+
 sub report_directory {
     my ($content, $err) = slurp_device_table();
     return undef if $err;
@@ -4976,9 +5878,109 @@ sub do_delete_report {
         return;
     }
     if (unlink("$dir/$file")) {
+        audit(action=>'delete_report', object_type=>'report', object_id=>$file, detail=>'deleted report');
         redirect_to_reports(msg => "Deleted report $file.");
     } else {
         redirect_to_reports(err => "Could not delete $file: $!");
+    }
+}
+
+# Redirect back to the Upload report logo tool page, carrying a message.
+sub redirect_to_logo_tool {
+    my (%o) = @_;
+    my $url = script_url() . '?action=tool_logo';
+    $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
+    $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
+    print $cgi->header(-location => $url, -status => '302 Found');
+}
+
+# Upload a report logo into report_dir (POST + CSRF, multipart). Enforces:
+# <=100KB, PNG/JPEG/GIF magic bytes (independent of the extension), a safe
+# case-preserved basename. Dimensions are not checked (no core module reads
+# them). The report dir must be web-writable (reports are written there).
+sub do_upload_logo {
+    my ($user) = @_;
+    my $dir = report_directory();
+    unless (defined $dir && -d $dir) {
+        redirect_to_logo_tool(err => 'No usable report_dir is configured; set it first.');
+        return;
+    }
+    my $fn = $cgi->param('logofile');
+    unless (defined $fn && "$fn" ne '') {
+        redirect_to_logo_tool(err => 'No file was selected.');
+        return;
+    }
+    # The submitted name -> a safe, case-preserved basename.
+    my $base = "$fn";
+    $base =~ s{^.*[/\\]}{};          # strip any client path
+    unless (valid_logo_name($base)) {
+        redirect_to_logo_tool(err =>
+            'Invalid filename. Use letters/digits/._- and a .png/.jpg/.gif extension.');
+        return;
+    }
+    # Read the upload with a hard byte cap (101 KB: 100KB + 1 to detect oversize).
+    my $fh = $cgi->upload('logofile');
+    unless (defined $fh) {
+        redirect_to_logo_tool(err => 'Upload failed (no file handle).');
+        return;
+    }
+    my $limit = 100 * 1024;
+    my $data = '';
+    my $buf;
+    binmode($fh);
+    while (read($fh, $buf, 8192)) {
+        $data .= $buf;
+        if (length($data) > $limit) {
+            redirect_to_logo_tool(err => 'File is larger than 100KB.');
+            return;
+        }
+    }
+    if (length($data) == 0) {
+        redirect_to_logo_tool(err => 'The uploaded file is empty.');
+        return;
+    }
+    # Content sniff: must actually be PNG/JPEG/GIF, whatever the extension says.
+    my $magic = image_magic_type($data);
+    unless ($magic) {
+        redirect_to_logo_tool(err =>
+            'That file is not a PNG, JPEG or GIF image (content check failed).');
+        return;
+    }
+    # Write atomically-ish: temp file in the same dir + rename.
+    my $path = "$dir/$base";
+    my ($tfh, $tmp) = eval { tempfile('logo-XXXXXXXX', DIR => $dir) };
+    unless ($tfh) {
+        redirect_to_logo_tool(err => "Could not write to the report directory: $!");
+        return;
+    }
+    binmode($tfh);
+    print $tfh $data;
+    unless (close($tfh) && rename($tmp, $path)) {
+        unlink($tmp);
+        redirect_to_logo_tool(err => "Could not save $base to the report directory: $!");
+        return;
+    }
+    chmod(0644, $path);
+    audit(action=>'upload_logo', object_type=>'logo', object_id=>$base,
+          detail=>"uploaded logo (" . human_size(length($data)) . ")");
+    redirect_to_logo_tool(msg => "Uploaded $base (" . human_size(length($data)) . ").");
+}
+
+# Delete a report logo from report_dir (POST + CSRF).
+sub do_delete_logo {
+    my ($user) = @_;
+    my $dir  = report_directory();
+    my $name = $cgi->param('name');
+    $name = '' unless defined $name;
+    unless (defined $dir && valid_logo_name($name) && -f "$dir/$name") {
+        redirect_to_logo_tool(err => 'Logo not found, or not a valid image filename.');
+        return;
+    }
+    if (unlink("$dir/$name")) {
+        audit(action=>'delete_logo', object_type=>'logo', object_id=>$name, detail=>'deleted report logo');
+        redirect_to_logo_tool(msg => "Deleted logo $name.");
+    } else {
+        redirect_to_logo_tool(err => "Could not delete $name: $!");
     }
 }
 
@@ -5006,6 +6008,8 @@ sub do_prune_reports {
         next unless defined $age_time && $age_time < $cutoff;
         $deleted++ if unlink("$dir/$r->{name}");
     }
+    audit(action=>'prune_reports', object_type=>'report',
+          detail=>"pruned $deleted report(s) older than $days day(s)");
     redirect_to_reports(msg => "Deleted $deleted report" . ($deleted == 1 ? '' : 's')
                              . " older than $days day" . ($days == 1 ? '' : 's') . '.');
 }
@@ -5398,6 +6402,8 @@ sub do_save_template {
         return;
     }
     my ($sok, $smsg) = save_template($path, $content);
+    audit(action=>'save_template', object_type=>'template', object_id=>_basename($path),
+          detail=>($sok ? 'saved template' : "save failed: $smsg"));
     my $cls = $sok ? 'success' : 'error';
     my $box = qq{<div class="config-wrap"><p class="$cls">} . esc($smsg) . qq{</p></div>\n};
     show_edit_template($user, no_header => 1, path => $path, content => $content,
@@ -5420,6 +6426,8 @@ sub do_revert_template {
         print page_foot(); return;
     }
     my ($rok, $rmsg) = revert_template($path);
+    audit(action=>'revert_template', object_type=>'template', object_id=>_basename($path),
+          detail=>($rok ? 'reverted template' : "revert failed: $rmsg"));
     my $cls = $rok ? 'success' : 'error';
     my $box = qq{<div class="config-wrap"><p class="$cls">} . esc($rmsg) . qq{</p></div>\n};
     # Reload from the (restored) file: pass no content so the editor re-reads.
@@ -5990,6 +6998,8 @@ sub do_restore_backup {
         redirect_to_tools(err => $info);
         return;
     }
+    audit(action=>'restore_backup', object_type=>'table', object_id=>$name,
+          detail=>"restored device table from backup $name");
     redirect_to_tools(msg => "Device table restored from $name. "
         . "(Previous table backed up as $info.)");
 }
@@ -6009,6 +7019,7 @@ sub do_delete_backup {
         return;
     }
     if (unlink($path)) {
+        audit(action=>'delete_backup', object_type=>'backup', object_id=>$name, detail=>'deleted backup');
         redirect_to_tools(msg => "Deleted backup $name.");
     } else {
         redirect_to_tools(err => "Could not delete $name: $!.");
@@ -6055,6 +7066,8 @@ sub do_delete_old_backups {
     my $msg = "Deleted $deleted backup" . ($deleted == 1 ? '' : 's')
             . " older than $days day" . ($days == 1 ? '' : 's')
             . " (newest backup $newest->{name} kept).";
+    audit(action=>'delete_old_backups', object_type=>'backup',
+          detail=>"deleted $deleted backup(s) older than $days day(s)");
     if (@failed) {
         redirect_to_tools(err => "$msg Could not delete: " . join(', ', @failed) . ".");
     } else {
@@ -6147,6 +7160,8 @@ sub do_orphan_delete {
             my $removed = ($output =~ /removed\s+(\d+)\s+of\s+\d+\s+orphan/i)
                         ? $1
                         : (($output =~ /\bdeleted\b/i) ? undef : 0);
+            audit(action=>'orphan_delete', object_type=>'backup',
+                  detail=>(defined $removed ? "removed $removed orphaned backup(s)" : 'orphaned-backup cleanup run'));
             if (defined $removed && $removed == 0) {
                 print qq{<p class="success">No orphaned backups to delete.</p>\n};
             } elsif (defined $removed) {
@@ -6253,6 +7268,8 @@ sub do_empty_delete {
             #   "removed 1 of 1 empty directory"
             my $removed = ($output =~ /removed\s+(\d+)\s+of\s+\d+\s+empty director/i)
                         ? $1 : undef;
+            audit(action=>'empty_delete', object_type=>'backup',
+                  detail=>(defined $removed ? "removed $removed empty director(y/ies)" : 'empty-directory cleanup run'));
             if (defined $removed && $removed == 0) {
                 print qq{<p class="success">No empty directories to delete.</p>\n};
             } elsif (defined $removed) {
@@ -6282,7 +7299,9 @@ sub redirect_to_user_page {
     my $url = script_url() . '?action=' . $act;
     $url .= '&msg=' . CGI::escape($opts{msg}) if defined $opts{msg} && $opts{msg} ne '';
     $url .= '&err=' . CGI::escape($opts{err}) if defined $opts{err} && $opts{err} ne '';
-    print $cgi->header(-location => $url, -status => '302 Found');
+    my @hdr = (-location => $url, -status => '302 Found');
+    push @hdr, (-cookie => $opts{cookie}) if defined $opts{cookie};  # session rotation
+    print $cgi->header(@hdr);
 }
 
 # =============================================================================
@@ -6408,7 +7427,7 @@ sub do_add_site {
     if ($dup) { $dbh->disconnect; _sites_redirect(err=>"Site code '$code' already exists."); return; }
     my ($ok, $dberr) = db_add_site($dbh, $code, $desc);
     $dbh->disconnect;
-    if ($ok) { _sites_redirect(msg=>"Added site '$code'."); }
+    if ($ok) { audit(dbh=>$dbh, action=>'add_site', object_type=>'site', object_id=>$code, detail=>'added site'); _sites_redirect(msg=>"Added site '$code'."); }
     else     { _sites_redirect(err=>"Could not add site '$code': " . ($dberr // 'database error') . '.'); }
 }
 
@@ -6456,6 +7475,8 @@ sub do_edit_site {
         }
     }
     $dbh->disconnect;
+    audit(dbh=>$dbh, action=>'edit_site', object_type=>'site', object_id=>$code,
+          old_value=>$site->{code}, new_value=>$code, detail=>'renamed/updated site');
     _sites_redirect(msg=>"Updated site '$code'.");
 }
 
@@ -6475,7 +7496,7 @@ sub do_delete_site {
     }
     my ($dok, $derr) = db_delete_site($dbh, $id);
     $dbh->disconnect;
-    if ($dok) { _sites_redirect(msg=>"Deleted site '$site->{code}'."); }
+    if ($dok) { audit(dbh=>$dbh, action=>'delete_site', object_type=>'site', object_id=>$site->{code}, detail=>'deleted site'); _sites_redirect(msg=>"Deleted site '$site->{code}'."); }
     else      { _sites_redirect(err=>"Could not delete site '$site->{code}': " . ($derr // 'database error') . '.'); }
 }
 
@@ -6599,6 +7620,7 @@ sub do_set_user_sites {
     my $dfr = $cgi->param('download_full_report') ? 1 : 0;
     $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $dfr, $target);
     $dbh->disconnect;
+    audit(dbh=>$dbh, action=>'set_user_sites', object_type=>'user', object_id=>$target, detail=>'updated site assignment');
     redirect_to_user_page(action=>"user_list", msg=>"Updated sites for $target.");
 }
 
@@ -6612,6 +7634,7 @@ sub do_set_download_full_report {
     $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $val, $target)
         if $target ne '';
     $dbh->disconnect;
+    audit(dbh=>$dbh, action=>'set_download_full_report', object_type=>'user', object_id=>$target, detail=>'updated report-download right');
     redirect_to_user_page(action=>"user_list", msg=>"Updated report-download right for $target.");
 }
 
@@ -6885,11 +7908,29 @@ sub do_change_password {
         return;
     }
 
-    # If they were on the default password and just picked something else,
-    # clear the "change it" warning on this session.
-    clear_pw_warning_if_changed($new);
+    # Rotate the session on a password change: mint a fresh session id (new
+    # login time, and no default-password warning since they just set a real
+    # one), move the cookie to it, delete the old session, and invalidate every
+    # OTHER session for this user -- so a captured cookie or a login left open
+    # elsewhere stops working immediately. The user stays logged in seamlessly
+    # on the new id. If rotation can't create the new session, fall back to
+    # keeping the current one (password change still succeeded).
+    my ($old_sid) = current_session();
+    my $cookie;
+    my $new_sid = eval { create_session($user, '') };
+    if ($new_sid) {
+        $cookie = session_cookie($new_sid);
+        destroy_session($old_sid) if defined $old_sid;
+        invalidate_user_sessions($user, $new_sid);
+    } else {
+        # Couldn't rotate; at least clear the default-password warning in place.
+        clear_pw_warning_if_changed($new);
+    }
 
-    redirect_to_user_page(action=>"change_password_form", msg => 'Password changed.');
+    audit(dbh=>$dbh, action=>'change_password', object_type=>'user', object_id=>$user,
+          detail=>'changed own password');   # never logs the password
+    redirect_to_user_page(action=>"change_password_form",
+        msg => 'Password changed.', cookie => $cookie);
 }
 
 # Small form for $PROTECTED_USER to set a new password for ANOTHER user
@@ -7006,7 +8047,30 @@ sub do_reset_password {
         redirect_to_user_page(action=>"user_list", err => "Could not update password: " . ($err // 'unknown error'));
         return;
     }
-    redirect_to_user_page(action=>"user_list", msg => "Password for '$target' changed.");
+    audit(action => 'reset_password', object_type => 'user', object_id => $target,
+          detail => ($target eq $user ? 'reset own password' : "reset password for '$target'"));  # no password value
+    # An admin resetting their OWN (non-protected) account behaves like a
+    # self-change: rotate the current session so the admin isn't logged out from
+    # under themselves, and invalidate their other sessions.
+    if ($target eq $user) {
+        my ($old_sid) = current_session();
+        my $new_sid = eval { create_session($user, '') };
+        my $cookie;
+        if ($new_sid) {
+            $cookie = session_cookie($new_sid);
+            destroy_session($old_sid) if defined $old_sid;
+            invalidate_user_sessions($user, $new_sid);
+        }
+        redirect_to_user_page(action=>"user_list",
+            msg => "Your password was reset.", cookie => $cookie);
+        return;
+    }
+    # Resetting another user: invalidate ALL of that user's sessions, so they
+    # are signed out everywhere and must log in with the new password. The
+    # admin's own session is untouched.
+    invalidate_user_sessions($target, undef);
+    redirect_to_user_page(action=>"user_list",
+        msg => "Password for '$target' reset. They have been signed out and must log in with the new password.");
 }
 
 # Add a new user. Restricted to $PROTECTED_USER -- checked here as well as
@@ -7057,6 +8121,8 @@ sub do_add_user {
         redirect_to_user_page(action=>"user_add", err => "Could not add user: " . ($err // 'unknown error'));
         return;
     }
+    audit(dbh=>$dbh, action=>'add_user', object_type=>'user', object_id=>$new_user,
+          detail=>"added user (edit=$edit, admin=$admin)");
     redirect_to_user_page(action=>"user_list", msg => "User '$new_user' added.");
 }
 
@@ -7098,6 +8164,7 @@ sub do_delete_user {
         redirect_to_user_page(action=>"user_list", err => "Could not delete user: " . ($err // 'unknown error'));
         return;
     }
+    audit(dbh=>$dbh, action=>'delete_user', object_type=>'user', object_id=>$target, detail=>'deleted user');
     redirect_to_user_page(action=>"user_list", msg => "User '$target' deleted.");
 }
 
@@ -7139,6 +8206,9 @@ sub do_set_edit_right {
         redirect_to_user_page(action=>"user_list", err => "Could not update edit right: " . ($err // 'unknown error'));
         return;
     }
+    audit(dbh=>$dbh, action=>'set_edit_right', object_type=>'user', object_id=>$target,
+          field=>'edit_device_table', new_value=>($edit?'yes':'no'),
+          detail=>($edit?'granted edit right':'revoked edit right'));
     redirect_to_user_page(action=>"user_list", msg => $edit
         ? "Granted device-table edit right to '$target'."
         : "Revoked device-table edit right from '$target'.");
@@ -7184,6 +8254,9 @@ sub do_set_admin_right {
         redirect_to_user_page(action=>"user_list", err => "Could not update admin functions: " . ($err // 'unknown error'));
         return;
     }
+    audit(dbh=>$dbh, action=>'set_admin_right', object_type=>'user', object_id=>$target,
+          field=>'admin_function', new_value=>($admin?'yes':'no'),
+          detail=>($admin?'granted admin functions':'revoked admin functions'));
     redirect_to_user_page(action=>"user_list", msg => $admin
         ? "Granted admin functions to '$target'."
         : "Revoked admin functions from '$target'.");
@@ -7198,9 +8271,16 @@ sub clear_pw_warning_if_changed {
     return unless defined $sid && $pw_warn;         # nothing to clear
     my $path = "$SESSION_DIR/$sid";
     my $expiry = time() + $SESSION_TTL;
+    # Preserve the session's login_time (5th line) so the absolute cap keeps
+    # measuring from the real login; read it back from the current file.
+    my $login_t = time();
+    if (open(my $rf, '<', $path)) {
+        my @L = <$rf>; close($rf);
+        if (defined $L[4]) { chomp $L[4]; $login_t = $L[4] if $L[4] =~ /^\d+$/; }
+    }
     # Atomic rewrite (see load_session): temp file + rename, never a
     # truncating open that a concurrent reader could catch empty.
-    my $data = "$username\n$expiry\n$csrf\n\n";   # empty warning line
+    my $data = "$username\n$expiry\n$csrf\n\n$login_t\n";   # empty warning line
     my ($tfh, $tmp) = eval { tempfile('sess-XXXXXXXX', DIR => $SESSION_DIR) };
     if ($tfh) {
         print $tfh $data;
@@ -7500,7 +8580,7 @@ my %EMAIL_OPTS = (
     mask_secrets   => { type => 'enum_onoff',      mandatory => 0 },
     email_max_diff => { type => 'int',             mandatory => 0 },
     web_report_url => { type => 'report_url',      mandatory => 0 },
-    report_logo    => { type => 'text',            mandatory => 0 },
+    report_logo    => { type => 'enum_report_logo', mandatory => 0 },
     report_days    => { type => 'int',             mandatory => 0 },
     report_hide    => { type => 'report_hide',     mandatory => 0, repeatable => 1 },
 );
@@ -7852,6 +8932,8 @@ sub lock_device_table {
     unless (open($fh, '>>', $lock)) {
         return (undef, "Could not open lock file $lock: $!");
     }
+    chmod(0600, $lock);   # owner-only, like the session files; the file is
+                          # a 0-byte flock target and is reused, never deleted.
     unless (flock($fh, LOCK_EX)) {
         close($fh);
         return (undef, "Could not lock the device table ($lock): $!");
@@ -8120,6 +9202,45 @@ sub render_option_field {
         $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="40">}
                  . qq{ <span class="opt-hint muted">report_hide=(?&lt;=wpa-passphrase )\\S+ }
                  . qq{-&gt; "wpa-passphrase ****"</span>};
+    } elsif ($type eq 'enum_report_logo') {
+        # Drop-down of image files (.png/.jpg/.gif, case-insensitive match but
+        # case-preserved names -- Linux is case-sensitive and fetchconfig.pl
+        # needs the exact filename) found in the resolved report_dir. Upload and
+        # delete are done on the Tools -> Upload report logo page. The stored
+        # value is the bare filename.
+        my $v   = defined $val ? $val : '';
+        my $dir = report_directory();
+        my ($imgs, $total) = list_report_images($dir, 25);
+        if (!defined $dir) {
+            # No usable report_dir yet: keep any current value in a text field so
+            # it is not lost, and tell the user to set report_dir first.
+            $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="30">}
+                     . qq{ <span class="opt-hint muted">250x50 pixel; .png/.jpg/.gif; 100KB max</span>}
+                     . qq{ <span class="error">set a report_dir first to choose from uploaded logos</span>};
+        } else {
+            $control = qq{<select name="} . esc($name) . qq{">}
+                     . qq{<option value=""} . ($v eq '' ? ' selected' : '') . qq{>(none)</option>};
+            my %seen;
+            for my $f (@$imgs) {
+                $seen{$f} = 1;
+                my $sel = ($v eq $f) ? ' selected' : '';
+                $control .= qq{<option value="} . esc($f) . qq{"$sel>} . esc($f) . qq{</option>};
+            }
+            # A stored logo that is not in the directory (deleted, or dir has
+            # >25 and it's past the listed slice): keep it selectable so it is
+            # not silently dropped.
+            if ($v ne '' && !$seen{$v}) {
+                $control .= qq{<option value="} . esc($v) . qq{" selected>} . esc($v)
+                          . qq{ (current, not in directory)</option>};
+            }
+            $control .= qq{</select>};
+            $control .= qq{ <span class="opt-hint muted">250x50 pixel; .png/.jpg/.gif; 100KB max}
+                      . qq{ &mdash; upload via Tools</span>};
+            if (defined $total && $total > 25) {
+                $control .= qq{ <span class="error">Showing the first 25 of $total images; }
+                          . qq{upload/delete on the Tools page to narrow the list.</span>};
+            }
+        }
     } elsif ((($key eq 'repository' || $key eq 'template_dir')
               || $type eq 'enum_report_dir')
              && read_allowed_dirs()->{present}) {
@@ -8240,6 +9361,10 @@ sub render_add_option {
 sub show_edit_table {
     my ($user) = @_;
     my $render_t0 = [Time::HiRes::gettimeofday()];
+
+    # Tripwire: note if the device table changed outside the app since the app
+    # last wrote it (logged once; see audit_check_device_table_change).
+    audit_check_device_table_change($user);
 
     print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
 
@@ -8426,8 +9551,8 @@ sub show_edit_table {
         if (!$unrestricted) {
             if ($r->{kind} eq 'device') {
                 next unless device_visible_to_acc($site_acc, $r);
-                push @dev_html, (($from_form && $r->{_was_expanded})
-                    ? render_device_expanded_row($orig_idx, $r)
+                push @dev_html, (($from_form && ($r->{_was_expanded} || $r->{_edited}))
+                    ? render_device_expanded_row($orig_idx, $r, $r->{_was_expanded} ? 1 : 0)
                     : render_device_summary_row($orig_idx, $r));
             } elsif ($r->{kind} eq 'default') {
                 my $m = defined $r->{model} ? $r->{model} : '';
@@ -8453,8 +9578,8 @@ sub show_edit_table {
         } elsif ($r->{kind} eq 'default') {
             push @def_html, render_record_card($rk, $r, 'default');
         } elsif ($r->{kind} eq 'device') {
-            push @dev_html, (($from_form && $r->{_was_expanded})
-                ? render_device_expanded_row($orig_idx, $r)
+            push @dev_html, (($from_form && ($r->{_was_expanded} || $r->{_edited}))
+                ? render_device_expanded_row($orig_idx, $r, $r->{_was_expanded} ? 1 : 0)
                 : render_device_summary_row($orig_idx, $r));
         }
     }
@@ -8739,6 +9864,7 @@ sub reconstruct_records_from_form {
             my %dev = (kind => 'device', model => $model, id => $id,
                        host => $host, opts => \@opts, _form_idx => $n);
             $dev{_was_expanded} = 1 if $cgi->param("${rk}_open");
+            $dev{_edited}       = 1 if $cgi->param("${rk}_edited");
             push @records, \%dev;
         }
     }
@@ -9235,6 +10361,7 @@ sub do_save_table {
         redirect_to_editor(err => $info);
         return;
     }
+    audit_device_table_changes('save_table', $orig, \@records, $user);
 
     my $note = @warnings ? '  Warnings: ' . join('  ', @warnings) : '';
     redirect_to_editor(msg => "Device table saved. Backup: $info.$note");
@@ -9282,16 +10409,29 @@ sub backup_and_write_table {
         return (0, "Could not open $DEVICE_TABLE for writing: $!. "
             . "Nothing was changed (a backup is at $bak).");
     }
+    # If the write fails partway, the in-place table may now be truncated or
+    # incomplete. A backup of the previous good table was just written, so tell
+    # the admin plainly what happened and exactly how to put it back (no
+    # auto-recover: a disk-full failure would hit the same wall rewriting it).
+    my $recover = _basename($bak);
+    my $fail_msg = sub {
+        my ($what, $err) = @_;
+        return "Writing the device table FAILED and it may now be incomplete or "
+             . "corrupt ($what: $err). A backup of the previous good table was "
+             . "saved as '$recover' immediately before this write. Restore it now: "
+             . "go to Tools -> Restore device table and restore '$recover' (or, on "
+             . "the server, copy it back over $DEVICE_TABLE). The likely cause is a "
+             . "full disk or a filesystem/permission error -- check free space "
+             . "before retrying.";
+    };
     unless (print $tf $new_content) {
         my $e = $!;
         close($tf);
-        return (0, "Error writing $DEVICE_TABLE: $e. "
-            . "The table may be incomplete -- restore from the backup at " . _basename($bak) . ".");
+        return (0, $fail_msg->('error while writing', $e));
     }
     unless (close($tf)) {
         my $e = $!;
-        return (0, "Error finishing write to $DEVICE_TABLE: $e. "
-            . "The table may be incomplete -- restore from the backup at " . _basename($bak) . ".");
+        return (0, $fail_msg->('error while finishing the write', $e));
     }
     return (1, _basename($bak));
 }
@@ -9671,6 +10811,7 @@ sub do_bulk_save {
         show_bulk_edit($user, $text, [$info]);
         return;
     }
+    audit_device_table_changes('bulk_save', $orig, \@records, $user);
 
     my $n = scalar @$new_devices;
     redirect_to_setup(msg => "Device list saved ($n device" . ($n == 1 ? '' : 's')
@@ -9819,8 +10960,15 @@ sub render_device_summary_row {
 # unedited device from disk, losing the edits (and, because the reconstructed
 # record order can differ from disk, show the wrong device). No "untouched"
 # marker: the real fields are submitted.
+# A device row that carries its FULL editable card inline (so its submitted
+# fields are preserved on the next save), used for the "Back to editor"
+# (from_form) render. $open controls whether it is shown expanded or as a
+# collapsed summary line with the card hidden (but still in the DOM, so its
+# fields still submit). This lets an edited-then-collapsed device come back
+# COLLAPSED yet keep both its edits and its red dot.
 sub render_device_expanded_row {
-    my ($idx, $r) = @_;
+    my ($idx, $r, $open) = @_;
+    $open = 1 unless defined $open;
     my $rk = "r$idx";
     my $id    = defined $r->{id}    ? $r->{id}    : '';
     my $model = defined $r->{model} ? $r->{model} : '';
@@ -9829,15 +10977,26 @@ sub render_device_expanded_row {
     my ($comment) = map { $_->[1] } grep { $_->[0] eq 'comment' } @{ $r->{opts} || [] };
     $comment = '' unless defined $comment;
     my $site_cls = ($site eq '') ? ' dev-row-nosite' : '';
-    my $h = qq{<div class="dev-row dev-row-open$site_cls" data-rk="$rk" data-idx="$idx" }
-          . qq{data-expanded="1" data-id="} . esc($id) . qq{" data-site="} . esc($site)
+    # "edited" marker (red dot): only for devices the user actually changed.
+    my $edited = $r->{_edited} ? 1 : 0;
+    my $edit_cls = $edited ? ' dev-edited' : '';
+    # Open vs collapsed. When collapsed we still embed the card (hidden by
+    # .dev-row-collapsed) so the edits round-trip; the Edit button reads "Edit".
+    my $state_cls = $open ? ' dev-row-open' : ' dev-row-collapsed';
+    my $btn_label = $open ? 'Collapse' : 'Edit';
+    my $h = qq{<div class="dev-row$state_cls$edit_cls$site_cls" data-rk="$rk" data-idx="$idx" }
+          . qq{data-expanded="1"} . ($edited ? qq{ data-edited="1"} : '')
+          . qq{ data-id="} . esc($id) . qq{" data-site="} . esc($site)
           . qq{" data-comment="} . esc($comment) . qq{">}
-          . qq{<button type="button" class="btn btn-small dev-row-edit">Collapse</button>}
+          . qq{<button type="button" class="btn btn-small dev-row-edit">$btn_label</button>}
           . qq{<span class="dev-row-id">} . esc($id) . qq{</span>}
           . qq{<span class="dev-row-model">} . esc($model) . qq{</span>}
           . qq{<span class="dev-row-site">} . esc($site) . qq{</span>}
           . qq{<span class="dev-row-comment">} . esc($comment) . qq{</span>}
-          . qq{<input type="hidden" name="${rk}_open" value="1">}
+          # Preserve open state across the NEXT round-trip only when actually open.
+          . ($open ? qq{<input type="hidden" name="${rk}_open" value="1">} : '')
+          # Preserve the edited marker across the NEXT round-trip.
+          . ($edited ? qq{<input type="hidden" name="${rk}_edited" value="1">} : '')
           . qq{<div class="dev-row-card">}
           . render_record_card($rk, $r, 'device')
           . qq{</div></div>\n};
@@ -10268,6 +11427,7 @@ sub edit_table_script {
     if (e.target.classList.contains('opt-del')) {
       var field = e.target.closest('.opt-field');
       if (!field) return;
+      markRowEdited(e.target);   // removing an option is an edit
       // If a template_dir (or model) field is being removed, re-evaluate the
       // model dropdowns afterwards (a device with no template_dir falls back to
       // the default directory).
@@ -10403,6 +11563,7 @@ sub edit_table_script {
     div.innerHTML = '<label>' + dispKey + '</label> ' + control + ' ' +
       '<button type="button" class="opt-del" title="Remove this option">\u00d7</button>';
     list.appendChild(div);
+    markRowEdited(list);   // adding an option is an edit
     // Remove the option from the menu so it can't be added twice -- EXCEPT for
     // repeatable options (report_hide), which may be added any number of times.
     var repeatable = { report_hide: 1 };
@@ -10489,6 +11650,9 @@ sub edit_table_script {
     } else {
       form.querySelector('.tab-panel[data-panel="' + panelName + '"]').appendChild(card);
     }
+    // A newly added record is, by definition, a change.
+    card.setAttribute('data-edited', '1');
+    card.classList.add('dev-edited');
     // populate the add-option select for the initially-selected model
     refreshAddOptions(card);
     card.querySelector('.rec-model').addEventListener('change', function(){ refreshAddOptions(card); });
@@ -10647,12 +11811,38 @@ sub edit_table_script {
       if (editDevFilter) editDevFilter.focus();
     });
   }
-  // Re-filter live as the user edits a Device-ID or comment field.
+  // Mark a device row as EDITED (red dot after its Device-ID) when a field
+  // inside its card actually changes -- not merely on expand/collapse. Both
+  // "input" (typing) and "change" (selects, checkboxes) count. The marker is a
+  // data-edited attribute + .dev-edited class on the .dev-row (or on a new,
+  // not-yet-saved .rec-card that was added via "+ Add device").
+  function markRowEdited(el) {
+    if (!el || !el.closest) return;
+    var row = el.closest('.dev-row') || el.closest('.rec-card');
+    if (!row) return;
+    row.setAttribute('data-edited', '1');
+    row.classList.add('dev-edited');
+    // Persist the flag through a Preview -> Back to editor round-trip: add a
+    // hidden r{n}_edited=1 so the server re-renders the red dot for this device.
+    var rk = row.getAttribute('data-rk');
+    if (rk && !row.querySelector('input[name="' + rk + '_edited"]')) {
+      var inp = document.createElement('input');
+      inp.type = 'hidden'; inp.name = rk + '_edited'; inp.value = '1';
+      row.appendChild(inp);
+    }
+  }
+  // Re-filter live as the user edits a Device-ID or comment field, and flag the
+  // row as edited on any field change within a device card.
   if (devCards) {
-    devCards.addEventListener('input', function (e) {
+    var onDevEdit = function (e) {
       var n = e.target.name || '';
       if (/_id$/.test(n) || /_opt_comment$/.test(n)) renderDevPage();
-    });
+      // Only field elements inside a card count as an edit (ignore the Edit/
+      // Collapse buttons, which carry no name and fire no input/change anyway).
+      if (e.target.name) markRowEdited(e.target);
+    };
+    devCards.addEventListener('input', onDevEdit);
+    devCards.addEventListener('change', onDevEdit);
   }
 
   // Expand a collapsed device row: fetch its full editable card and APPEND it to
@@ -12336,14 +13526,17 @@ sub page_head {
         my $tools_menu = '';
         if ($is_admin) {
             $tools_menu = $group->('Tools',
+                $su->('Audit log',                                    '?action=tool_audit'),
                 $su->('Check devices for consistent backup suffixes', '?action=tool_suffix'),
                 $su->('Check devices for empty backups',              '?action=tool_empty_bk'),
                 $su->('Check site assignment',                        '?action=check_site_assignment'),
                 $su->('Devices without backups',                      '?action=tool_nobackup'),
+                $su->('Disk space',                                   '?action=tool_diskspace'),
                 $su->('Empty Directory Cleanup',                      '?action=tool_empty_dir'),
                 $su->('Orphaned Backup Cleanup',               '?action=tool_orphan'),
                 $su->('Restore device table',                         '?action=tool_restore'),
                 $su->('Template viewer',                              '?action=view_templates'),
+                $su->('Upload report logo',                           '?action=tool_logo'),
                 $su->('View fetchconfig log',                         '?action=view_log'));
         }
 
@@ -12602,6 +13795,8 @@ $backdrop_css
       width: 100%; box-sizing: border-box; padding: 0.4em; margin-top: 0.2em; }
   .login-box input[type=submit] { margin-top: 1.2em; padding: 0.5em 1em; }
   .error { color: #b00020; }
+  .login-notice { color: #1a5fb4; background: #eaf2fb; border: 1px solid #9bc3e6;
+                  border-radius: 4px; padding: 0.5em 0.7em; font-size: 0.9em; }
   /* .btn is used on both <button> and <a>; normalise the box model so the two
      render at exactly the same height (buttons otherwise carry UA line-height
      and font defaults that make them a bit taller/shorter than links). */
@@ -12734,6 +13929,45 @@ $backdrop_css
      past its right edge: fit-content sizes it to its content, min-width:100%
      keeps it at least as wide as the available area. box-sizing so the padding
      is included. */
+  /* Title-bar program icon as the About trigger: strip button chrome. */
+  .app-about-btn { background: none; border: none; padding: 0; margin: 0;
+                   cursor: pointer; line-height: 0; display: inline-flex; }
+  .app-about-btn:focus-visible { outline: 2px solid #9bc3e6; outline-offset: 2px; border-radius: 4px; }
+  /* About dialog (reuses .fc-modal overlay). */
+  .fc-about-box { position: relative; text-align: left; max-width: 30em; }
+  .fc-about-close { position: absolute; top: 0.5em; right: 0.6em; background: none;
+                    border: none; font-size: 1.4em; line-height: 1; cursor: pointer;
+                    color: #777; }
+  .fc-about-close:hover { color: #333; }
+  .fc-about-title { margin: 0 0 0.3em; font-size: 1.25em; color: #16232e; }
+  .fc-about-lead { margin: 0 0 1em; color: #555; }
+  .fc-about-table { border-collapse: collapse; margin: 0 0 1em; width: 100%; }
+  .fc-about-table th { text-align: left; font-weight: 600; color: #444;
+                       padding: 0.2em 1em 0.2em 0; vertical-align: top; white-space: nowrap; }
+  .fc-about-table td { padding: 0.2em 0; color: #16232e; overflow-wrap: anywhere; }
+  .fc-about-license { margin: 0 0 1.3em; font-size: 0.9em; color: #555; }
+  .logo-thumb { max-width: 250px; max-height: 50px; vertical-align: middle;
+                background: #fff; border: 1px solid #eee; }
+  .audit-warn { color: #8a6d00; background: #fff3cd; border: 1px solid #ffe08a;
+                border-radius: 4px; padding: 0.05em 0.5em; margin-left: 0.6em; }
+  .audit-filters { margin: 0.5em 0; display: flex; flex-wrap: wrap; gap: 0.6em; align-items: end; }
+  .audit-filters label { font-size: 0.85em; color: #444; display: flex; flex-direction: column; }
+  .audit-pager { margin: 0.5em 0; display: flex; gap: 0.5em; align-items: center; }
+  /* The audit table lives in a scroll wrapper so, however wide its content,
+     it stays INSIDE the green box (the box never has to grow past the page).
+     table.list gives width:100%; audit-list only tweaks density + wrapping. */
+  /* Full-width box (override the default fit-content tool box): the inner
+     scroll wrapper handles any overflow, so the box fills main.full exactly. */
+  #audit-section { width: 100%; min-width: 0; }
+  .audit-scroll { width: 100%; max-width: 100%; overflow-x: auto; }
+  .audit-list th, .audit-list td { font-size: 0.82em; vertical-align: top;
+                                   white-space: normal; overflow-wrap: anywhere; }
+  .fs-group-title { margin: 1em 0 0.3em; font-size: 1em; color: #16232e; }
+  .logo-list, .disk-list { border-collapse: collapse; margin: 0.2em 0 1em; background: #fff; }
+  .logo-list th, .logo-list td,
+  .disk-list th, .disk-list td { border: 1px solid #d9d9d9; padding: 0.3em 0.6em;
+                                 text-align: left; font-size: 0.9em; vertical-align: middle; }
+  .logo-list th, .disk-list th { background: #f6f6f6; }
   .user-section, .tool-section { background: #e8faf1; border: 1px solid #cdeede;
                   border-radius: 6px; padding: 0 1.1em 1em; margin: 1em 0;
                   box-sizing: border-box; width: fit-content; min-width: 100%; }
@@ -12834,6 +14068,12 @@ $backdrop_css
   .dev-row-head { font-weight: 600; color: #555; background: #f6f6f6;
              border-bottom: 1px solid #ddd; }
   .dev-row-id   { font-family: monospace; }
+  /* Red dot after the Device-ID when this device has unsaved edits (not merely
+     expanded/collapsed). The head row never gets it. */
+  .dev-row.dev-edited:not(.dev-row-head) .dev-row-id::after {
+    content: ''; display: inline-block; width: 0.55em; height: 0.55em;
+    margin-left: 0.5em; border-radius: 50%; background: #b00020;
+    vertical-align: middle; }
   .dev-row-site { color: #1a7f37; }
   .dev-row-comment { color: #555; overflow-wrap: anywhere; }
   .dev-row.dev-row-nosite .dev-row-site::after { content: '\2014'; color: #b00020; }
@@ -12890,7 +14130,7 @@ $backdrop_css
 <body class="$body_class">
 <header class="app-titlebar">
 <div class="app-titlebar-brand">
-<img src="data:image/png;base64,$LOGO_BASE64" alt="$APP_TITLE logo">
+<button type="button" id="fc-about-trigger" class="app-about-btn" title="About $APP_TITLE" aria-label="About $APP_TITLE"><img src="data:image/png;base64,$LOGO_BASE64" alt="$APP_TITLE logo"></button>
 <span class="app-name">$APP_TITLE</span>
 </div>
 $menu
@@ -12994,9 +14234,84 @@ sub page_foot {
     # if unknown, so the footer never shows a broken "using fetchconfig v".
     my $fc = fetchconfig_version_cached();
     $name_ver .= ' using fetchconfig v' . esc($fc) if defined $fc && $fc ne '';
-    my $cr = esc($COPYRIGHT);
+    # Use the configured COPYRIGHT, or the built-in default when none is set
+    # (same fallback as the About dialog), so the footer never ends in a bare dash.
+    my $cr = esc($COPYRIGHT ne '' ? $COPYRIGHT : DEFAULT_COPYRIGHT);
     my $confirm_html = confirm_modal_html();
-    return qq{</main>\n<footer class="app-footer">$name_ver &mdash; $cr</footer>\n$confirm_html</body>\n</html>\n};
+    my $about_html   = about_modal_html();
+    # Fail-open audit warning: if an audit INSERT failed during this request,
+    # the action still completed -- flag it here (yellow warning) after the
+    # copyright so it is noticed without blocking anything.
+    my $warn = '';
+    if (defined $AUDIT_WARNING && $AUDIT_WARNING ne '') {
+        $warn = qq{ <span class="audit-warn">&#9888; } . esc($AUDIT_WARNING) . qq{</span>};
+    }
+    return qq{</main>\n<footer class="app-footer">$name_ver &mdash; $cr$warn</footer>\n$confirm_html$about_html</body>\n</html>\n};
+}
+
+# About dialog: reached from the title-bar program icon. Shows the internal
+# (shipped) version, the configured/effective version (overridable via the
+# config APP_VERSION key), the copyright (config COPYRIGHT or the built-in
+# default), the installed fetchconfig.pl version, and the GPLv3 note. Styled
+# like the confirm modal; OK / x / Esc / backdrop all close it.
+sub about_modal_html {
+    my $internal = esc(APP_VERSION_INTERNAL);
+    my $effective = esc($APP_VERSION);
+    my $cr = ($COPYRIGHT ne '') ? $COPYRIGHT : DEFAULT_COPYRIGHT;
+    $cr = esc($cr);
+    my $fc = fetchconfig_version_cached();
+    $fc = (defined $fc && $fc ne '') ? esc($fc) : 'unknown';
+    my $name = esc($APP_TITLE);
+    return <<"HTML";
+<div id="fc-about" class="fc-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="fc-about-title">
+  <div class="fc-modal-box fc-about-box">
+    <button type="button" id="fc-about-x" class="fc-about-close" aria-label="Close">&times;</button>
+    <h2 id="fc-about-title" class="fc-about-title">About $name</h2>
+    <p class="fc-about-lead">A web front-end for <code>fetchconfig</code>.</p>
+    <table class="fc-about-table">
+      <tr><th>Internal version</th><td>$internal</td></tr>
+      <tr><th>Configured version</th><td>$effective</td></tr>
+      <tr><th>Copyright</th><td>$cr</td></tr>
+      <tr><th>fetchconfig.pl</th><td>$fc</td></tr>
+    </table>
+    <p class="fc-about-license">Licensed under the GNU General Public License
+       version 3 (GPLv3).</p>
+    <div class="fc-modal-actions">
+      <button type="button" id="fc-about-ok" class="btn">OK</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var ov = document.getElementById('fc-about');
+  if (!ov) return;
+  var okBtn = document.getElementById('fc-about-ok');
+  var xBtn  = document.getElementById('fc-about-x');
+  var lastFocus = null;
+  function close() {
+    ov.style.display = 'none';
+    document.removeEventListener('keydown', onKey, true);
+    if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+  }
+  function onKey(e) {
+    if (ov.style.display === 'none') return;
+    if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); close(); }
+  }
+  function open() {
+    lastFocus = document.activeElement;
+    ov.style.display = 'flex';
+    document.addEventListener('keydown', onKey, true);
+    if (okBtn && okBtn.focus) { try { okBtn.focus(); } catch (e) {} }
+  }
+  if (okBtn) okBtn.addEventListener('click', close);
+  if (xBtn)  xBtn.addEventListener('click', close);
+  ov.addEventListener('click', function (e) { if (e.target === ov) close(); });
+  // Wire the title-bar program icon to open the dialog.
+  var trigger = document.getElementById('fc-about-trigger');
+  if (trigger) trigger.addEventListener('click', function (e) { e.preventDefault(); open(); });
+})();
+</script>
+HTML
 }
 
 # A custom confirmation dialog styled like the Backup-Now spinner box (centred

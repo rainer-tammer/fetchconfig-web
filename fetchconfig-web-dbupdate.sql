@@ -1,5 +1,5 @@
 -- ===========================================================================
--- fetchconfig-web database update -- per-site device access (v1.50)
+-- fetchconfig-web database update -- per-site device access + audit log (v1.50, v1.51)
 --
 -- Adds the site-based access-control tables and columns to an existing
 -- fetchconfig-web database. Run it once with psql:
@@ -110,6 +110,53 @@ BEGIN
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON sites TO ' || quote_ident(webuser);
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON user_sites TO ' || quote_ident(webuser);
         EXECUTE 'GRANT USAGE, SELECT, UPDATE ON SEQUENCE sites_id_seq TO ' || quote_ident(webuser);
+    END IF;
+
+    -- 6. Audit log (v1.51): append-only audit_log + its sequence/indexes, plus
+    --    the mutable app_state key/value table. audit_log is granted INSERT +
+    --    SELECT only (Level B immutability: the web user cannot alter/erase it).
+    PERFORM 1 FROM pg_class WHERE relkind = 'S' AND relname = 'audit_log_id_seq';
+    IF NOT FOUND THEN
+        EXECUTE 'CREATE SEQUENCE audit_log_id_seq START WITH 1 MINVALUE 1';
+    END IF;
+    PERFORM 1 FROM information_schema.tables WHERE table_name = 'audit_log';
+    IF NOT FOUND THEN
+        EXECUTE 'CREATE TABLE audit_log (
+                    id           BIGINT      NOT NULL PRIMARY KEY
+                                             DEFAULT nextval(''audit_log_id_seq''),
+                    ts           TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    username     TEXT,
+                    ip           TEXT,
+                    action       TEXT        NOT NULL,
+                    object_type  TEXT,
+                    object_id    TEXT,
+                    field        TEXT,
+                    old_value    TEXT,
+                    new_value    TEXT,
+                    detail       TEXT
+                 )';
+    END IF;
+    PERFORM 1 FROM pg_class WHERE relkind = 'i' AND relname = 'audit_log_ts_idx';
+    IF NOT FOUND THEN EXECUTE 'CREATE INDEX audit_log_ts_idx     ON audit_log (ts)';       END IF;
+    PERFORM 1 FROM pg_class WHERE relkind = 'i' AND relname = 'audit_log_user_idx';
+    IF NOT FOUND THEN EXECUTE 'CREATE INDEX audit_log_user_idx   ON audit_log (username)'; END IF;
+    PERFORM 1 FROM pg_class WHERE relkind = 'i' AND relname = 'audit_log_action_idx';
+    IF NOT FOUND THEN EXECUTE 'CREATE INDEX audit_log_action_idx ON audit_log (action)';   END IF;
+    PERFORM 1 FROM pg_class WHERE relkind = 'i' AND relname = 'audit_log_object_idx';
+    IF NOT FOUND THEN EXECUTE 'CREATE INDEX audit_log_object_idx ON audit_log (object_id)';END IF;
+    PERFORM 1 FROM information_schema.tables WHERE table_name = 'app_state';
+    IF NOT FOUND THEN
+        EXECUTE 'CREATE TABLE app_state (
+                    key       TEXT        PRIMARY KEY,
+                    value     TEXT,
+                    username  TEXT,
+                    ts        TIMESTAMPTZ
+                 )';
+    END IF;
+    IF webuser IS NOT NULL THEN
+        EXECUTE 'GRANT SELECT, INSERT ON audit_log TO ' || quote_ident(webuser);
+        EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO ' || quote_ident(webuser);
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON app_state TO ' || quote_ident(webuser);
     END IF;
 END;
 $upg$ LANGUAGE plpgsql;

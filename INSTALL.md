@@ -47,6 +47,10 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
 |------|---------|
 | `fetchconfig-web.cgi` | The application: one self-contained Perl CGI script. |
 | `fetchconfig-web-dbsetup.pl` | Creates the PostgreSQL role, database and tables; bootstraps the `admin` account; can write the config file. |
+| `fetchconfig-web-audit.sql` | Standalone idempotent SQL to add the 1.51 audit-log tables to an existing database (PostgreSQL 8.2+). |
+| `fetchconfig-web-clean-audit.pl` | Standalone script to prune old audit-log rows (needs a privileged DB role; `-h` for help, `-s` to print the role SQL). |
+| `LICENSE-ADDITIONS.md`, `LICENSE-ADDITIONS.html` | Additional terms under GPLv3 Section 7 (EU/German liability adaptation). |
+| `PRIVACY.md`, `PRIVACY.html` | GDPR data-privacy notes for the operator (data controller). |
 | `fetchconfig-web-dbupdate.sql` | Idempotent SQL that upgrades an existing database to the 1.50 schema (per-site access). |
 | `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`, that installs an edited template file. |
 | `imageconvert.pl`, `README.imageconvert` | Optional helper for preparing the login backdrop image. |
@@ -80,7 +84,7 @@ Most of what the two scripts need ships with Perl itself. The table lists
 **every** module used, so you can check an unfamiliar system in one pass.
 
 **Core modules** (present on a standard Perl install on Linux and AIX):
-`CGI::Cookie`, `Digest::MD5`, `Time::HiRes`, `Fcntl`, `File::Path`,
+`CGI::Cookie`, `Digest::MD5`, `Time::HiRes`, `MIME::Base64`, `Fcntl`, `File::Path`,
 `File::Temp`, `File::Copy`, `IPC::Open3`, `IO::Select`, `Symbol`, `Errno`,
 `Text::ParseWords`.
 
@@ -92,6 +96,7 @@ Most of what the two scripts need ships with Perl itself. The table lists
 | `DBI` | 1.641 | Database access layer. | `libdbi-perl` | `perl-DBI` | `perl-DBI` | `cpan DBI` |
 | `DBD::Pg` | 3.15.0 | PostgreSQL driver for DBI (loaded at runtime via the `dbi:Pg:` DSN). | `libdbd-pg-perl` | `perl-DBD-Pg` | `perl-DBD-Pg` | `cpan DBD::Pg` |
 | `Algorithm::Diff` | 1.19 | Side-by-side and unified config diffs. | `libalgorithm-diff-perl` | `perl-Algorithm-Diff` | `perl-Algorithm-Diff` | `cpan Algorithm::Diff` |
+| `Filesys::Df` | 0.92 | **Optional** -- only for the *Tools -> Disk space* page (free-space figures). Loaded lazily; without it the app runs normally and that one tool shows an install hint. | `libfilesys-df-perl` | `perl-Filesys-Df` | (CPAN) | `cpan Filesys::Df` |
 
 **`Digest::SHA` is not required.** This is deliberate, and worth knowing if
 you audit dependencies: password hashes are pure-Perl Apache MD5 (`$apr1$`)
@@ -215,6 +220,7 @@ DBpass                  = <the role password from Step 2>
 # --- sessions and scratch ---
 SESSION_DIR             = /var/lib/fetchconfig-web/sessions
 SESSION_TTL             = 28800
+SESSION_MAX_LIFETIME    = 86400
 BACKUP_TMP_DIR          = /var/lib/fetchconfig-web/sessions
 
 # --- Backup Now via sudo (see Step 6) ---
@@ -323,11 +329,39 @@ because that would require creating files in the `fetchconfig` directory. It
 therefore takes a timestamped `.bak` copy into `BACKUP_DEVICE_TABLE` **before**
 every write, so a failed write is always recoverable from the backup.
 
-Writes are serialised: every save, bulk edit and site-code rename takes an
-exclusive lock on `device_table.lock` in `BACKUP_TMP_DIR` and re-checks that
-the table has not changed (sub-second modification time, size and a content
-digest) before writing. Two users saving at once can therefore not overwrite
-each other; the second is told the table changed and nothing is written.
+Writes are serialised: every save, bulk edit, restore and site-code rename
+takes an exclusive lock on `device_table.lock` in `BACKUP_TMP_DIR` and
+re-checks that the table has not changed (sub-second modification time, size
+and a content digest) before writing. Two users saving at once can therefore
+not overwrite each other; the second is told the table changed and nothing is
+written.
+
+> **A single empty `device_table.lock` file** appears in `BACKUP_TMP_DIR` (or
+> `SESSION_DIR` if that is unset). This is expected: it is a 0-byte `flock`
+> target, created once and reused, mode `0600`. **Do not delete it while the
+> application is running** -- unlinking a lock file in use breaks the mutual
+> exclusion. It is harmless to leave in place.
+
+> **Device-table backups are not pruned automatically.** Every save, bulk edit,
+> restore and site-code rename writes one timestamped `.bak` into
+> `BACKUP_DEVICE_TABLE`, so that directory grows over time. Prune it
+> periodically -- either from the web UI (*Tools -> Restore device table* has a
+> "delete old backups" control) or on the server with a cron job, e.g.
+> `find /usr/local/fetchconfig/backup -name '*.bak' -mtime +90 -delete`.
+> (These are the editor's own table backups, separate from fetchconfig's
+> per-device config repository.)
+
+> **The report directory must be web-writable for logo upload.** *Tools ->
+> Upload report logo* writes image files into the `report_dir` configured on the
+> `email:` line. Reports are already written there, so it is normally writable
+> by the web-server user; if it is not, uploads/deletes fail with a clear
+> message (no sudo is added for this).
+
+> **Session files are cleaned up automatically.** Files in `SESSION_DIR` are
+> expired on access, and a login runs a throttled sweep (at most once per
+> `SESSION_TTL`) that removes any session past its idle timeout
+> (`SESSION_TTL`) or its absolute cap (`SESSION_MAX_LIFETIME` after login), so
+> they do not accumulate. No cron is needed for these.
 
 ### Step 6 -- Backup Now and sudo
 
@@ -417,6 +451,21 @@ cp help.html /www/pub/fetchconfig-web/
 Then hard-reload the browser (Ctrl-F5) so cached JavaScript and CSS are
 refreshed -- several 1.50 changes are client-side, and a stale cache is the
 usual reason a fix "does not appear".
+
+### Upgrading the database to 1.51 (audit log)
+
+Version 1.51 adds an append-only `audit_log` table (plus a small
+`app_state` table). Run the idempotent, PostgreSQL 8.2-compatible
+script once:
+
+```sh
+psql -U fetchconfig -d fetchconfig -f fetchconfig-web-audit.sql
+```
+
+It is safe to re-run, and the same changes are also included in
+`fetchconfig-web-dbupdate.sql`. The web user is granted INSERT + SELECT
+on `audit_log` only (it can never alter or erase the log); a DBA
+handles any retention/pruning.
 
 ### Upgrading the database to 1.50
 

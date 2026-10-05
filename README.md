@@ -95,6 +95,9 @@ PostgreSQL database; no `htpasswd` binary or password file is used.
 
 ## Part 1 -- Overview
 
+Clicking the **program icon** in the title bar opens an **About** dialog showing the internal (shipped) version `APP_VERSION_INTERNAL`, the configured/effective version (`APP_VERSION`, overridable in the config), the copyright (the config `COPYRIGHT`, or the built-in default `Copyright (c) 2026, Rainer Tammer`), the installed `fetchconfig.pl` version, and the GPLv3 notice.
+
+
 ### What fetchconfig-web is
 
 fetchconfig-web is a web front-end for
@@ -138,6 +141,15 @@ each of these in turn.
 - `INSTALL.md` + `INSTALL.html` -- the step-by-step
   installation and upgrade guide (Markdown, and the same rendered to HTML).
   Start there for a new deployment; this README is the full reference.
+- `fetchconfig-web-audit.sql` -- standalone, idempotent SQL to add the audit
+  log tables to an existing database (PostgreSQL 8.2+). Not needed at runtime.
+- `fetchconfig-web-clean-audit.pl` -- standalone maintenance script that prunes
+  old audit-log rows (run by a privileged DB role; see its `-h`/`-s`). Not
+  needed at runtime.
+- `LICENSE-ADDITIONS.md` + `.html` -- additional terms under GPLv3 Section 7
+  (liability/warranty adaptation for EU/German law, severability, governing law).
+- `PRIVACY.md` + `.html` -- GDPR data-privacy notes (the software runs on the
+  operator's own system; the operator is the data controller).
 - `CHANGES` -- the changelog.
 - `LICENSE` -- the GNU General Public License, version 3 (see "License"
   below).
@@ -170,7 +182,7 @@ Each step is detailed below.
 ### Requirements
 
 - Perl 5 (5.10 or newer) with these core modules: `CGI`, `CGI::Cookie`,
-  `Digest::MD5`, `Time::HiRes`, `Fcntl`, `File::Path`, `File::Temp`,
+  `Digest::MD5`, `Time::HiRes`, `MIME::Base64`, `Fcntl`, `File::Path`, `File::Temp`,
   `File::Copy`, `IPC::Open3`, `IO::Select`, `Symbol`, `Errno`,
   `Text::ParseWords`. `CGI.pm` was removed from Perl core in 5.22+, so on
   newer systems install it separately, e.g. `apt install libcgi-pm-perl`
@@ -206,6 +218,7 @@ deploying:
 | `DBD::Pg`         | **3.15.0**      | `fetchconfig-web.cgi`, setup script | PostgreSQL driver for `DBI` (used via the `dbi:Pg:` DSN -- no explicit `use`, but required at runtime) | `libdbd-pg-perl` | `perl-DBD-Pg` | `perl-DBD-Pg` | `cpan DBD::Pg` |
 | `Algorithm::Diff` | any (1.201 ok)  | `fetchconfig-web.cgi`            | Side-by-side and Tools config diffs (`sdiff`); 1.201 is known-good | `libalgorithm-diff-perl` | `perl-Algorithm-Diff` | `perl-Algorithm-Diff` | `cpan Algorithm::Diff` |
 | `CGI` (`CGI.pm`)  | **4.53**        | `fetchconfig-web.cgi`            | CGI request/response handling. Core until Perl 5.22, then removed -- treat as non-core on modern Perl | `libcgi-pm-perl` | `perl-CGI` | `perl-CGI` | `cpan CGI` |
+| `Filesys::Df`     | 0.92 (optional) | `fetchconfig-web.cgi`            | **Optional** -- only the *Tools -> Disk space* page (free-space figures). Loaded lazily; without it the app runs and that tool shows an install hint | `libfilesys-df-perl` | `perl-Filesys-Df` | (CPAN) | `cpan Filesys::Df` |
 
 `perl Makefile.PL` checks these versions and refuses to continue (with a clear
 message) if a module is missing or older than the minimum above.
@@ -297,6 +310,7 @@ SUDO_BIN                = /usr/bin/sudo
 SESSION_DIR             = /www/fetchconfig-web/sessions
 BACKUP_TMP_DIR          = /www/fetchconfig-web/sessions
 SESSION_TTL             = 28800
+SESSION_MAX_LIFETIME    = 86400
 DEVICE_ID_FIELD         = 1
 DBinst                  = fetchconfig
 DBuser                  = fcweb
@@ -894,6 +908,9 @@ on the table as three tabs -- **Devices**, **Defaults (per model)**, and
   SMTP transport security: `off` (default, plain SMTP), `starttls` (upgrade an
   initially-clear connection, typically port 25/587) or `ssl` (TLS from the
   start, typically port 465).
+- A device whose fields you have changed (not merely expanded) shows a small
+  **red dot** after its Device-ID, so unsaved edits are easy to spot in the
+  list. The marker survives a Preview -> Back to editor round-trip.
 - The **Devices** tab lists devices as lightweight **collapsed rows**
   (Device-ID / Model / Site / Comment + an **Edit** button). Clicking **Edit**
   expands that one device: its full editable card is fetched on demand
@@ -1150,8 +1167,11 @@ aliases), `write_report` (on/off), `email_max_diff` (device-count threshold for
 including diffs in the e-mail; 0 = none), `web_report_url` (the URL of the
 fetchconfig-web Report page, e.g. `http(s)://host/.../fetchconfig-web.cgi?action=report`),
 `report_logo` (a logo file name inside the report directory, embedded at
-250x50 px), and `report_days` (prune reports older than N days; 0/unset = no
-prune). `report_dir` stores its `$ALIAS` and is enforced against the allow-list
+250x50 px -- in the editor this is a **drop-down** of the image files
+(`.png`/`.jpg`/`.gif`, up to 25, case-sensitive names) found in the report
+directory; upload and delete logos via **Tools -> Upload report logo**; the
+stored value is the bare filename), and `report_days` (prune reports older than
+N days; 0/unset = no prune). `report_dir` stores its `$ALIAS` and is enforced against the allow-list
 exactly like `repository`/`template_dir`. A further option, `report_hide`, is a
 regex applied to mask matching text in the report; it may be given more than
 once (one per `email:` line), is edited as repeatable ~40-character fields, and
@@ -1288,10 +1308,14 @@ action and, like the orphaned-configuration delete, runs through `sudo` when
 #### Restore device table
 
 Lists the timestamped device-table backups kept in `$BACKUP_DEVICE_TABLE`
-(the `.bak` files written before every editor/bulk-edit save), newest first.
-A synthetic **current** row (the live `$DEVICE_TABLE`) appears at the top --
-selectable for comparison, but with no View/Restore/Delete actions. Each
-backup row has a checkbox and **View / Restore / Delete**:
+(the `.bak` files written before every editor/bulk-edit/restore/site-rename
+write), newest first. A synthetic **current** row (the live `$DEVICE_TABLE`)
+appears at the top -- selectable for comparison, but with no View/Restore/Delete
+actions. Each backup row has a checkbox and **View / Restore / Delete**. These
+backups are **not pruned automatically** and accumulate over time; use the
+**delete old backups** control here, or a server-side cron (e.g.
+`find $BACKUP_DEVICE_TABLE -name '*.bak' -mtime +90 -delete`), to keep the
+directory in check:
 
 - **View** (read-only GET) shows the backup's contents in a `pre.config`
   block with a copy button. Passwords are **masked by default**; unticking
@@ -1421,6 +1445,76 @@ start **expanded**; successful ones start collapsed. **Expand all** /
 time** line is shown below the output. At most `LOG_MAX_DEVICES` sections are
 rendered (default **1000**); if the log has more, a warning is shown above the
 output and only the first `LOG_MAX_DEVICES` are displayed.
+
+#### Audit log
+
+The Tools menu has an **Audit log** tool (`?action=tool_audit`, admin only). It
+records state-changing actions in an append-only `audit_log` table: device-table
+saves (one row per changed option, old -> new), restores, backup runs, delete
+and cleanup operations, user add/change/delete, password changes/resets (never
+the password), site add/edit/delete, logo upload/delete, template save/revert,
+and authentication events (login, failed login, logout) and denied attempts
+(CSRF rejections, out-of-site access). Secret option values (`pass`, `enable`,
+SNMP community) are stored as `***`, never in clear.
+
+**Immutability (Level B):** the application's database user is granted only
+`INSERT` and `SELECT` on `audit_log` -- no `UPDATE`/`DELETE` -- so the app (or a
+compromised web process) can append and read the log but cannot alter or erase
+it. Only a database superuser/DBA can; retention/pruning is therefore a DBA
+task by design. If an audit write ever fails, the action still completes
+(fail-open) and a yellow warning is shown in the page footer.
+
+**External-change tripwire:** the app records the device table's content token
+after each of its own writes; on login and when the editor opens it compares the
+file and logs an `external_change` entry if the table was modified outside the
+application (a hand edit on the server, a script, a restore done outside the UI).
+
+The viewer shows 100 rows per page, newest first, fetched by AJAX (the table can
+grow large, so it is never sent whole), with First/Prev/Next/Last navigation,
+filters (user, action, object, free text, date range) and a CSV export of the
+current filter.
+
+The tables are created by `fetchconfig-web-dbsetup.pl` on a fresh install, or
+added to an existing database with the idempotent, PostgreSQL 8.2-compatible
+`fetchconfig-web-audit.sql` (also folded into `fetchconfig-web-dbupdate.sql`).
+
+#### Disk space
+
+The Tools menu has a **Disk space** tool (`?action=tool_diskspace`, admin only,
+read-only) showing free space for the repository directories (the global `REPOSITORY`
+plus every distinct per-device/default `repository=`, resolved through the
+allow-list) and the `report_dir`, **grouped by filesystem** -- one table per
+filesystem, titled "Filesystem 1", "Filesystem 2", and so on. Because every
+directory in a table is on the same filesystem, the free/total/use% figures are
+read once and shown on the first directory (in black) and repeated in gray on the
+rest; "unknown" is shown if a filesystem's figures cannot be read, and
+directories that do not exist are listed under an "Unavailable" table.
+A **Source** column marks each directory as `configured` (in use: the global
+`REPOSITORY`, a device/default `repository=`, or the `report_dir`), `allowed`
+(in the `directory:` allow-list -- repository and report kinds -- but not in
+use), or `allowed and configured` (both). All `$aliases` are expanded to their
+real path, so an aliased value and its allow-list entry are the same directory.
+Grouping is by device id (`st_dev`); no device/LV name is shown, since it is not
+portable or useful across AIX/Linux. Free space comes from the optional
+`Filesys::Df` module, loaded lazily; if it is not installed the tool shows an
+install hint instead (the rest of the application is unaffected).
+
+#### Upload report logo
+
+The Tools menu has an **Upload report logo** tool (`?action=tool_logo`, admin
+only) for managing the logo images used by `report_logo`. It lists the images
+already in the report directory (the `email:` line's `report_dir`) with a
+**Delete** button, and an upload form. Because the report directory is not
+web-served, each preview is embedded inline (base64 data: URI), so it renders
+without the web server accessing that directory. An upload is accepted only if it is
+<=100 KB and its content is really a PNG, JPEG or GIF (the magic bytes are
+checked, independent of the extension); the file is saved into the report
+directory under its given name (kept verbatim -- filenames are case-sensitive
+on Unix/Linux). The suggested logo size is 250x50 px; dimensions are not
+enforced. The report directory must be writable by the web-server user (it is
+where reports are written, so normally it already is). In the device-table
+editor the `report_logo` option then offers these files as a drop-down (the
+first 25, with a warning if there are more).
 
 #### Template viewer
 
@@ -1770,6 +1864,27 @@ below are grouped by concern.
 - `SESSION_TTL` (default 28800 s) is an **idle timeout**: the stored expiry is
   slid forward on every authenticated request, so a session ends `SESSION_TTL`
   after the last activity, not a fixed time after login.
+- `SESSION_MAX_LIFETIME` (default 86400 s; `0` disables) is an **absolute cap**:
+  a session is force-expired this long after **login** regardless of activity,
+  so a captured cookie cannot be kept alive indefinitely by use. The idle slide
+  never resets it (login time is stored separately in the session file and left
+  unchanged on each request).
+- Expired session files are cleaned up **automatically**: expiry is enforced
+  lazily on access, but a login also runs a throttled sweep (at most once per
+  `SESSION_TTL`) that removes any session file past its idle expiry or its
+  absolute cap -- so files left by abandoned cookies (browser closed, machine
+  changed) no longer accumulate in `SESSION_DIR`.
+- Changing a password **rotates the session**: a user who changes their own
+  password gets a fresh session id (and keeps working seamlessly), and **all
+  their other sessions are invalidated** -- a captured cookie or a login left
+  open elsewhere stops working at once. When an admin **resets another user's**
+  password, that user is **signed out everywhere** and must log in with the new
+  password (the admin's own session is unaffected; an admin resetting their own
+  non-protected account is rotated like a self-change).
+- A request whose session has ended (idle timeout, absolute cap, or a password
+  change/reset) but still carries a session cookie lands on the login page with
+  a clear **"Your session has ended. Please log in again."** notice, rather than
+  a blank form.
 - A failed login sleeps **2 seconds** before responding, applied identically
   to an unknown user and a wrong password, to slow online brute forcing. The
   form returns a single generic "Invalid username or password" message for

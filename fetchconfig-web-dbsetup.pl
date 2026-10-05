@@ -374,6 +374,72 @@ if ($usites_exists) {
     print "Granted \"$app_user2\" access to the site tables.\n";
 }
 
+# --- Step 2c: audit log (v1.51) ------------------------------------------
+# "audit_log" is an append-only record of state-changing actions. The app DB
+# user is granted INSERT + SELECT only (no UPDATE/DELETE), so it can write and
+# read the log but never alter or erase it -- only a DBA can. "app_state" is a
+# small mutable key/value table used e.g. for the device-table change tripwire.
+my ($audit_exists) = $dbh->selectrow_array(
+    q{SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'audit_log'});
+if ($audit_exists) {
+    print "Table \"audit_log\" already exists -- leaving it as-is.\n";
+} else {
+    # 8.2-compatible DDL (explicit sequence; no bigserial shorthand/DO blocks).
+    $dbh->do(q{CREATE SEQUENCE audit_log_id_seq START WITH 1 MINVALUE 1})
+        or die_clean("CREATE SEQUENCE audit_log_id_seq failed: " . $dbh->errstr);
+    $dbh->do(q{
+        CREATE TABLE audit_log (
+            id           BIGINT      NOT NULL PRIMARY KEY
+                                     DEFAULT nextval('audit_log_id_seq'),
+            ts           TIMESTAMPTZ NOT NULL DEFAULT now(),
+            username     TEXT,
+            ip           TEXT,
+            action       TEXT        NOT NULL,
+            object_type  TEXT,
+            object_id    TEXT,
+            field        TEXT,
+            old_value    TEXT,
+            new_value    TEXT,
+            detail       TEXT
+        )
+    }) or die_clean("CREATE TABLE audit_log failed: " . $dbh->errstr);
+    $dbh->do(q{CREATE INDEX audit_log_ts_idx     ON audit_log (ts)});
+    $dbh->do(q{CREATE INDEX audit_log_user_idx   ON audit_log (username)});
+    $dbh->do(q{CREATE INDEX audit_log_action_idx ON audit_log (action)});
+    $dbh->do(q{CREATE INDEX audit_log_object_idx ON audit_log (object_id)});
+    print "Created table \"audit_log\" (append-only).\n";
+}
+my ($appstate_exists) = $dbh->selectrow_array(
+    q{SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'app_state'});
+if ($appstate_exists) {
+    print "Table \"app_state\" already exists -- leaving it as-is.\n";
+} else {
+    $dbh->do(q{
+        CREATE TABLE app_state (
+            key       TEXT        PRIMARY KEY,
+            value     TEXT,
+            username  TEXT,
+            ts        TIMESTAMPTZ
+        )
+    }) or die_clean("CREATE TABLE app_state failed: " . $dbh->errstr);
+    print "Created table \"app_state\".\n";
+}
+{
+    my $q_user = $dbh->quote_identifier($app_user2);
+    for my $stmt (
+        # Level B immutability: INSERT + SELECT only on audit_log (no UPDATE/DELETE).
+        "GRANT SELECT, INSERT ON audit_log TO $q_user",
+        "GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO $q_user",
+        # app_state is mutable (token updates).
+        "GRANT SELECT, INSERT, UPDATE ON app_state TO $q_user",
+    ) {
+        $dbh->do($stmt);   # best effort; ignore if already granted / owner
+    }
+    print "Granted \"$app_user2\" audit-log access (INSERT + SELECT only).\n";
+}
+
 # --- Step 3: import from htpasswd (optional) -----------------------------
 
 my $imported = 0;
@@ -482,6 +548,10 @@ SUDO_BIN                = /usr/bin/sudo
 SESSION_DIR             = /www/fetchconfig-web/sessions
 BACKUP_TMP_DIR          = /www/fetchconfig-web/sessions
 SESSION_TTL             = 28800
+# Absolute session lifetime in seconds: a session is force-expired this long
+# after login regardless of activity (the idle SESSION_TTL slides, this does
+# not). 0 disables it (idle timeout only). Default 86400 (24h).
+SESSION_MAX_LIFETIME    = 86400
 
 # --- device table parsing ---
 DEVICE_ID_FIELD         = 1

@@ -94,11 +94,14 @@
     <li><strong>Tools</strong> (administrators only) &mdash; each tool on its
         own page: Check devices for consistent backup suffixes, Check devices
         for empty backups, Check site assignment, Devices without backups,
-        Empty Directory Cleanup, Orphaned Backup Cleanup, Restore device table,
-        Template viewer, View fetchconfig log.</li>
+        Audit log, Disk space, Empty Directory Cleanup, Orphaned Backup Cleanup, Restore device table,
+        Template viewer, Upload report logo, View fetchconfig log.</li>
     <li><strong>User</strong> &mdash; Change your password (everyone); Users
         list, Add user and Sites (administrators only).</li>
     <li><strong>Help</strong> &mdash; this page.</li>
+    <li><strong>Program icon</strong> (far left) &mdash; click it to open an
+        <strong>About</strong> dialog showing the program version(s), copyright,
+        the installed <code>fetchconfig.pl</code> version and the licence.</li>
   </ul>
 </section>
 
@@ -484,6 +487,30 @@
   directory, shown as separate rows with their directory), sorted by name. Click
   <strong>View</strong> to open a template read-only, with syntax highlighting,
   in the same kind of window as a configuration view.</p>
+  <p><strong>Audit log</strong> &mdash; an append-only record of changes:
+  device-table edits (per option, old &rarr; new), backup runs, deletes and
+  cleanups, user and site changes, password changes (never the password),
+  logo and template changes, and logins / failed logins / denied attempts.
+  Secret values are stored as <code>***</code>. The log cannot be altered or
+  deleted from the web UI. The viewer shows 100 entries per page (newest
+  first), with filters, First/Prev/Next/Last navigation and a CSV export.</p>
+  <p><strong>Disk space</strong> &mdash; shows the free space in the repository
+  directories and the report directory, <strong>grouped by filesystem</strong>
+  (one table per filesystem: "Filesystem 1", "Filesystem 2", &hellip;). Because
+  the directories in a table share a filesystem, the size figures are shown once
+  (black on the first directory, repeated in gray on the rest). Needs the
+  optional <code>Filesys::Df</code> Perl module; if it is missing the tool shows
+  how to install it.</p>
+  <p><strong>Upload report logo</strong> &mdash; upload a logo image into the
+  report directory (the <code>report_dir</code> on the <code>email:</code> line)
+  and manage the logos already there. Accepted: <code>.png</code>/<code>.jpg</code>/<code>.gif</code>,
+  100&nbsp;KB maximum; the suggested size is 250&times;50&nbsp;pixel. The
+  uploaded file's content is checked (it must really be a PNG, JPEG or GIF), and
+  the filename is kept exactly as given (filenames are case-sensitive on
+  Unix/Linux). Existing logos are listed with a <strong>Delete</strong> button.
+  In the device-table editor, the <code>report_logo</code> option is then a
+  drop-down of the images found in that directory (the stored value is the bare
+  filename, which <code>fetchconfig.pl</code> resolves when it writes a report).</p>
   <p><strong>Template editor</strong> &mdash; click <strong>Edit</strong> next to
   a template to open it in a split editor: the left pane is editable, the right
   <strong>Checked version</strong> shows it highlighted. <strong>Check
