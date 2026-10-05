@@ -46,9 +46,10 @@ title bar's nav row:
    or revoke the edit-table and admin rights (see "User management" below).
 9. **Setup** menu (admins and users with the edit right) -> view and edit the
    fetchconfig device table through a form-based editor, or view it raw.
-10. **Tools** menu (admins) -> orphaned-backup cleanup, device-table backup
-    restore/delete, the "devices without backups", "empty backups", and
-    "consistent backup suffixes" scans, and the fetchconfig log viewer.
+10. **Tools** menu (admins) -> orphaned-backup cleanup, empty-directory and
+    empty-backup cleanup, device-table backup restore/delete, the "devices
+    without backups" and "consistent backup suffixes" scans, the audit log,
+    disk space, and the fetchconfig log viewer.
 11. **Help** menu -> a description of the application, editable without
     touching the script (see "Help page" below).
 
@@ -148,12 +149,14 @@ each of these in turn.
   needed at runtime.
 - `LICENSE-ADDITIONS.md` + `.html` -- additional terms under GPLv3 Section 7
   (liability/warranty adaptation for EU/German law, severability, governing law).
+- `LICENSE.md` + `.html` -- the GNU GPL v3 rendered from the `LICENSE` file by
+  render-doc.py (verbatim).
 - `PRIVACY.md` + `.html` -- GDPR data-privacy notes (the software runs on the
   operator's own system; the operator is the data controller).
-- `cpanfile` -- Perl dependency manifest (mirrors `Makefile.PL`) for GitHub
-  dependency tracking and `cpanm --installdeps .`.
-- `.github/dependabot.yml` -- enables Dependabot version-update PRs for the
-  `cpanfile` (CPAN) modules and GitHub Actions.
+- `cpanfile` -- Perl dependency manifest (mirrors `Makefile.PL`); install the
+  dependencies with `cpanm --installdeps .`. (Note: GitHub's dependency graph
+  and Dependabot do not support CPAN, so this file is for humans/cpanm, not for
+  automated GitHub tracking.)
 - `CHANGES` -- the changelog.
 - `LICENSE` -- the GNU General Public License, version 3 (see "License"
   below).
@@ -366,8 +369,9 @@ Format and loading:
   old config files to the two-key form; the old single-key form is no longer
   accepted.)
 - **`MAX_PARALLEL_SCAN`** (default `1`) sets how many device checks the Tools
-  scan tools ("devices without backups", "empty backups", "consistent backup
-  suffixes") run concurrently in the browser. `1` is fully serial (the
+  scan tools ("devices without backups" and "consistent backup suffixes") run
+  concurrently in the browser. (The empty-backup tool is no longer a per-device
+  scan -- it uses the all-device `fetchconfig.pl -Z` instead.) `1` is fully serial (the
   original behaviour). It must be an integer **1..5**; a value outside that
   range is a configuration error and the app refuses to start. Each concurrent
   check spawns its own `fetchconfig.pl`, so raise this only as far as the
@@ -1393,19 +1397,23 @@ config files found"), or `error`. The device IDs to scan are emitted into
 the page from `read_device_ids()`, and the endpoint validates `dev` against
 `^[\w.\-]+$`.
 
-#### Check devices for empty backups
+#### Empty Backup Cleanup
 
-Works the same way, but flags devices that have one or more **empty**
-(zero-byte) backup files -- a fetch that connected but saved nothing. Each
-device is checked with `fetchconfig.pl -z <dev>` via the
-`?action=check_empty_one&dev=<id>` endpoint. `-z` exits **1** when at least
-one 0-byte backup is found (0 when all are non-empty), printing a
-tab-separated size-0 line; the endpoint maps that to `empty`, an exit of 0
-(or the "no backed up config files found" case) to `clean`, and any other
-non-zero exit to `error`. Same Start/Cancel button and progress bar. Both
-scan tools share one implementation (`render_scan_tool`), with each box's
-element IDs namespaced so they can share markup, and both list any
-devices that could not be checked by name.
+Finds and removes **empty** (zero-byte) backup files -- a fetch that connected
+but saved nothing -- for devices still in the device table. Modelled on the
+Empty Directory Cleanup tool, it has two actions that scan every device at once:
+
+- **Check for empty backups** (`?action=empty_bk_check`, read-only) runs
+  `fetchconfig.pl -Z` and lists the zero-byte backups.
+- **Delete empty backups** (POST + CSRF, confirm) runs `fetchconfig.pl -Z -D`
+  and removes them; it is audited (`empty_bk_delete`).
+
+`fetchconfig.pl` exits **1** when zero-byte backups are found and **0** when
+none -- that is not an error, so the count is taken from the summary line
+(`... found N zero-byte backup(s)`), not the exit status. A spinner is shown
+while the scan runs, and (like Backup Now) the run is bounded by
+`BACKUP_TIMEOUT`. The older per-device `-z` check remains available from a
+device's own backup page.
 
 #### Check devices for consistent backup suffixes
 

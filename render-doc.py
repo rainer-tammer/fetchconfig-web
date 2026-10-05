@@ -556,6 +556,64 @@ STYLE = r"""<style>
 readme = _open_utf8(README_IN).read()
 style  = STYLE
 
+# --- verbatim license mode -------------------------------------------------
+# The GPLv3 LICENSE is a fixed legal document: it must be reproduced EXACTLY,
+# not reflowed or reformatted as Markdown prose. When the input is a LICENSE
+# file (basename "LICENSE", or any file with no .md/.markdown/.html suffix),
+# render it verbatim inside a <pre> block, and also emit a LICENSE.md that wraps
+# the same text in a fenced code block. This keeps the legal text byte-exact.
+def _looks_like_license(path):
+    base = os.path.basename(path)
+    if base.upper().startswith('LICENSE') and '.' not in base:
+        return True
+    low = path.lower()
+    return not low.endswith(('.md', '.markdown', '.html', '.htm'))
+
+if _looks_like_license(README_IN):
+    _title = 'GNU General Public License, Version 3'
+    # LICENSE.md: verbatim text in a fenced block (so Markdown viewers show it
+    # unaltered). Derive the .md path from the HTML output path.
+    _md_out = re.sub(r'\.html?$', '', HTML_OUT, flags=re.I) + '.md'
+    if _md_out == HTML_OUT:
+        _md_out = HTML_OUT + '.md'
+    with _open_utf8(_md_out, 'w') as _f:
+        _f.write('# ' + _title + '\n\n```\n' + readme.rstrip('\n') + '\n```\n')
+    # LICENSE.html: the text inside a <pre> in the standard page shell.
+    _pre = _html_escape(readme.rstrip('\n'))
+    _lic_page = (u"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fetchconfig-web &mdash; {title}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+{style}
+<style>
+  .license-wrap{{max-width:900px;margin:0 auto;padding:40px 22px 64px;}}
+  .license-wrap .hero-eyebrow{{text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;color:var(--accent);font-weight:600;}}
+  .license-wrap h1{{font-size:2rem;margin:.2em 0 1rem;}}
+  pre.license-text{{white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
+    font-family:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;font-size:.82rem;
+    line-height:1.5;background:var(--card,#fff);border:1px solid var(--border,#e2e5ea);
+    border-radius:8px;padding:1.2em 1.4em;color:var(--ink,#1a2129);}}
+</style>
+</head>
+<body>
+<div class="license-wrap">
+  <div class="hero-eyebrow">License</div>
+  <h1>{title}</h1>
+  <pre class="license-text">{body}</pre>
+</div>
+</body>
+</html>
+""").format(title=html.escape(_title), style=style, body=_pre)
+    with _open_utf8(HTML_OUT, 'w') as _f:
+        _f.write(_lic_page)
+    sys.stderr.write("wrote %s and %s (verbatim GPLv3)\n" % (HTML_OUT, _md_out))
+    sys.exit(0)
+
 # ---- split README into top-level (##) sections; keep the H1 intro separately
 lines = readme.split('\n')
 # find first '## '

@@ -531,6 +531,9 @@ FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
 LOG_MAX_DEVICES         = 1000
 FONT_BASE_URL           = /fetchconfig-web/fonts
 IMAGE_BASE_URL          = /fetchconfig-web/images
+# URL base under which the help directory is served by the web server; used
+# for the Help-menu links (HELP_BASE_URL + filename). Distinct from the
+# filesystem path HELP_DIR, which is used only for the existence check.
 HELP_BASE_URL           = /fetchconfig-web
 
 # --- fetchconfig binary paths ---
@@ -548,6 +551,10 @@ SUDO_BIN                = /usr/bin/sudo
 SESSION_DIR             = /www/fetchconfig-web/sessions
 BACKUP_TMP_DIR          = /www/fetchconfig-web/sessions
 SESSION_TTL             = 28800
+# Wall-clock limit (seconds) for a single "Backup Now" run; if a device does not
+# respond the run is terminated and the partial output is still shown. 0 = no
+# limit. Default 120.
+BACKUP_TIMEOUT          = 120
 # Absolute session lifetime in seconds: a session is force-expired this long
 # after login regardless of activity (the idle SESSION_TTL slides, this does
 # not). 0 disables it (idle timeout only). Default 86400 (24h).
@@ -580,7 +587,14 @@ HTTPS_ENABLED           = 0
 # log and template-list "load time" lines, plus the device-table editor render
 # time). Default 0.
 SHOW_RENDER_TIME        = 0
-HELP_FILE               = /www/pub/fetchconfig-web/help.html
+# Help documents: HELP_DIR is the filesystem directory that holds help.html and
+# the sibling docs (fetchconfig-web-documentation.html, fetchconfig-
+# documentation.html, LICENSE.html, LICENSE-ADDITIONS.html, PRIVACY.html); it is
+# served at the URL base HELP_BASE_URL. HELP_FILE is the help page's filename.
+# (For backward compatibility HELP_FILE may also be a full path, in which case
+# its directory is used as HELP_DIR.)
+HELP_DIR                = /www/pub/fetchconfig-web
+HELP_FILE               = help.html
 # Privileged helper for the Tools template editor's Save/Revert (run via sudo).
 # Leave empty to disable sudo saving (then the template directories must be
 # writable by the web-server user). See "Template editor" in README.md.

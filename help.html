@@ -76,7 +76,6 @@
     <li><a href="#help-navigation">Getting around long pages</a></li>
     <li><a href="#help-browser">Browser requirements</a></li>
     <li><a href="#help-support">Getting help</a></li>
-    <li><a href="#help-manual">Fetchconfig manual</a></li>
   </ul>
 </nav>
 
@@ -92,9 +91,9 @@
         &mdash; Show device table, Edit device table, Bulk edit. A site-limited
         user sees only Edit device table.</li>
     <li><strong>Tools</strong> (administrators only) &mdash; each tool on its
-        own page: Check devices for consistent backup suffixes, Check devices
-        for empty backups, Check site assignment, Devices without backups,
-        Audit log, Disk space, Empty Directory Cleanup, Orphaned Backup Cleanup, Restore device table,
+        own page: Audit log, Check devices for consistent backup suffixes,
+        Check site assignment, Devices without backups, Disk space,
+        Empty Backup Cleanup, Empty Directory Cleanup, Orphaned Backup Cleanup, Restore device table,
         Template viewer, Upload report logo, View fetchconfig log.</li>
     <li><strong>User</strong> &mdash; Change your password (everyone); Users
         list, Add user and Sites (administrators only).</li>
@@ -465,10 +464,12 @@
   finishes the devices that have <em>no</em> backups yet (never backed up)
   are listed &mdash; a quick way to spot devices that still need an initial
   <strong>Backup now</strong>.</p>
-  <p><strong>Check devices for empty backups</strong> &mdash; works the same
-  way, but lists the devices that have one or more <em>empty</em> (zero-byte)
-  backup files &mdash; a fetch that connected but saved nothing. Also has a
-  progress bar and a Cancel button.</p>
+  <p><strong>Empty Backup Cleanup</strong> &mdash; scans every device at once
+  (<code>fetchconfig.pl -Z</code>) for <em>empty</em> (zero-byte) backup files
+  &mdash; a fetch that connected but saved nothing. <strong>Check for empty
+  backups</strong> lists them without changing anything; <strong>Delete empty
+  backups</strong> (<code>-Z -D</code>) permanently removes them. A spinner is
+  shown while the scan runs.</p>
   <p><strong>Check devices for consistent backup suffixes</strong> &mdash;
   works the same way, listing devices whose backups don't all share the same
   filename suffix, or whose suffix doesn't match the configured one. It lists
@@ -559,16 +560,6 @@
   <p>For anything not covered here &mdash; a device that won't back up, a login
   problem, an empty or missing backup, or a feature request &mdash; contact
   your fetchconfig-web administrator.</p>
-</section>
-
-<section class="card" id="help-manual">
-  <h2>Fetchconfig manual</h2>
-  <p>The documentation to <strong>fetchconfig</strong> itself can be found
-  here:
-  <a class="manual-link" href="/fetchconfig-web/fetchconfig-documentation.html" target="_blank" rel="noopener">Fetchconfig Manual &#8599;</a></p>
-  <p>The documentation to <strong>fetchconfig-web</strong> (this web
-  interface) can be found here:
-  <a class="manual-link" href="/fetchconfig-web/fetchconfig-web-documentation.html" target="_blank" rel="noopener">Fetchconfig-web Manual &#8599;</a></p>
 </section>
 
 </div>

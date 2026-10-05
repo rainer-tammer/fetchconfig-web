@@ -1,5 +1,29 @@
 1.51
 ====
+* Fixed: user add/change/delete, permission changes (edit/admin rights, site
+  assignment, report-download right) and site add/edit/delete were not recorded
+  in the audit log -- the database handle was disconnected before the audit
+  call, so the write was silently lost. audit() now detects a dead handle (via
+  ping) and opens its own connection, and those callers no longer pass the
+  closed handle. The set_user_sites entry now records which site codes were
+  added/removed (and old->new), and the add_user entry spells out the rights. The report-download right change
+  now logs grant vs revoke (like the edit/admin right changes) instead of a flat
+  "updated" message.
+* The device-table external-change tripwire no longer fails silently: if its
+  app_state record cannot be read/written (e.g. the table is missing or not
+  granted to the web user), a footer warning is shown instead of the check
+  quietly doing nothing. A real content change is logged as external_change on
+  login and editor open; an mtime-only touch is intentionally ignored. The detection now also shows
+  the user a visible amber banner (on editor open, and once on the first page
+  after login via a one-shot app_state notice), not just an audit-log row. The banner links to the audit log only for admins
+  (a user with just the edit-device-table right sees the notice without the
+  link, since they cannot open the audit log). On the device-table editor the banner
+  also notes that the editor has loaded the changed table, so the user is
+  editing the current on-disk content (not a stale copy). The bulk editor does
+  the same: it now runs the tripwire on a fresh open and carries the same
+  "editing the current content" note. (Fixed a regression where a
+  stale DBI errstr on the shared handle made app_state reads look like failures,
+  silently disabling the tripwire even though the token was stored.)
 * Audit log. New append-only audit_log table (and a small app_state table)
   recording state-changing actions: device-table saves (one row per changed
   option, old -> new), restores, backup runs, deletes/cleanups, user add/
@@ -43,10 +67,53 @@
   role was granted INSERT on audit_log but not USAGE on audit_log_id_seq) is now
   reported instead of being silent: the delete still succeeds and a warning names
   the missing grant. Version/copyright follow the config overrides.
-* Added cpanfile (mirrors Makefile.PL prerequisites) so GitHub's dependency
-  graph / Dependabot can track the Perl module dependencies, plus
-  .github/dependabot.yml enabling weekly Dependabot version-update PRs for the
-  CPAN modules and GitHub Actions.
+* Added cpanfile (mirrors Makefile.PL prerequisites) to document the Perl module
+  dependencies and support `cpanm --installdeps .`. (GitHub's dependency graph
+  and Dependabot do not support CPAN, so no dependabot.yml is shipped.)
+* Audit log viewer: the Old -> New column wraps long values -- after the arrow
+  when present (>60 chars), otherwise at the nearest whitespace near 50 chars
+  (40-60), or a hard break at 60 if there is no whitespace there.
+* render-doc.py now also renders the GPLv3 LICENSE verbatim to LICENSE.md and
+  LICENSE.html (preformatted, not reflowed).
+* The Help menu is now a dropdown: Help (help.html or internal), Documentation
+  fetchconfig-web, Documentation fetchconfig, GNU GPL v3, Additional terms, and
+  Privacy policy -- each static doc shown only if present in the help directory and opened in a
+  new browser tab (the Help page itself opens in the same tab).
+  Help config split: HELP_DIR (filesystem dir, for the existence check) +
+  HELP_FILE (filename) + HELP_BASE_URL (URL base, for the menu links), with the
+  old full-path HELP_FILE still accepted. Removed the obsolete "Fetchconfig
+  manual" topic from help.html. The internal help fallback is now a short
+  notice that help.html is missing from the web help directory and should be
+  copied from the source package, rather than a duplicate feature description.
+* Audit log viewer: added a second First/Prev/Next/Last pager at the bottom
+  (left-aligned, like the other pages); both pagers stay in sync. Added the
+  floating Top / Bottom scroll buttons that the other pages have.
+* Email config: a gray hint after the "to" field notes that multiple recipients
+  may be separated by ";".
+* Backup Now now has a wall-clock timeout (BACKUP_TIMEOUT, default 120s, 0
+  disables): a device that never responds no longer blocks the request. On a
+  timeout the run is terminated and the partial tool output is still shown.
+  The Backup Now page now shows the tool output whenever there is any -- even
+  on an error/timeout (previously output was hidden on any error). Success is
+  judged from the output (fetchconfig always exits 0): an "error:" line, or a
+  "backup_state=failed" line in the stats block, means FAILED. The audit log records OK/FAILED accordingly; the meaningless exit
+  status is no longer logged.
+* Replaced the per-device "Check devices for empty backups" tool with an
+  "Empty Backup Cleanup" tool (modelled on Empty Directory Cleanup): a Check
+  (fetchconfig.pl -Z) and a Delete (-Z -D) that scan all devices at once for
+  zero-byte backups, with a spinner and the tools output layout. The spinner now stays on the
+  result page until the (slow) -Z scan finishes: the page renders the spinner
+  immediately and fetches the result fragment by AJAX (with a no-JS fallback). The delete does
+  the same -- its AJAX POST carries the CSRF token (and the action in the body, so the
+  multipart POST reaches the right handler instead of falling through to the
+  Devices page), and its no-JS fallback is a POST form. Success is
+  taken from the summary line (rc 1 = "found some", not an error). The delete
+  is audited. The per-device -z check remains on each device's backup page. (The old
+  all-device scan code -- check_empty_one / device_empty_status -- was removed.)
+  Help and README updated accordingly (empty backups is a cleanup, not a scan;
+  dropped from the MAX_PARALLEL_SCAN tool list). The Tools menu entry is now
+  "Empty Backup Cleanup" (the old "Check devices for empty backups" label was
+  removed).
 * Version bumped to 1.51.
 
 #

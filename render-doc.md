@@ -68,3 +68,9 @@ files.
   Markdown constructs listed above). If you add unusual Markdown, check the
   generated HTML.
 - Output is 7-bit ASCII; any typography is emitted as HTML entities.
+
+## LICENSE (verbatim)
+
+`render-doc.py LICENSE LICENSE.html` renders the GPLv3 `LICENSE` file verbatim
+(preformatted) and also writes `LICENSE.md`. The legal text is reproduced
+exactly and is not reflowed.

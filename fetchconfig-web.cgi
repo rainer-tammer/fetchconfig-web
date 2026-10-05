@@ -89,8 +89,8 @@ my ($DEVICE_TABLE, $REPOSITORY, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFI
     $BACKUP_DEVICE_TABLE,
     $DBinst, $DBuser, $DBpass, $DBhost,
     $PROTECTED_USER, $MIN_PASSWORD_LENGTH, $DEFAULT_PASSWORD,
-    $HELP_FILE, $APP_VERSION, $COPYRIGHT,
-    $FETCHCONFIG_LOG, $LOG_MAX_DEVICES, $MAX_PARALLEL_SCAN,
+    $HELP_FILE, $HELP_DIR, $APP_VERSION, $COPYRIGHT,
+    $FETCHCONFIG_LOG, $LOG_MAX_DEVICES, $MAX_PARALLEL_SCAN, $BACKUP_TIMEOUT,
     $FONT_BASE_URL, $IMAGE_BASE_URL, $TEMPLATE_HELPER, $HELP_BASE_URL,
     $HTTPS_ENABLED, $SHOW_RENDER_TIME);
 
@@ -186,6 +186,8 @@ sub read_config {
     };
 
     $SESSION_TTL         = $cfg_int->('SESSION_TTL', 8 * 3600, 1, undef);
+    # Wall-clock limit for a single Backup Now run; 0 disables. Default 120s.
+    $BACKUP_TIMEOUT      = $cfg_int->('BACKUP_TIMEOUT', 120, 0, undef);
     # Absolute session lifetime: a session is force-expired this many seconds
     # after LOGIN regardless of activity (the idle TTL slides, this does not).
     # 0 disables the cap (idle timeout only). Min 0; default 24h.
@@ -194,7 +196,25 @@ sub read_config {
     $PROTECTED_USER      = defined $kv->{PROTECTED_USER}     ? $kv->{PROTECTED_USER}     : 'admin';
     $MIN_PASSWORD_LENGTH = $cfg_int->('MIN_PASSWORD_LENGTH', 8, 1, undef);
     $DEFAULT_PASSWORD    = defined $kv->{DEFAULT_PASSWORD}   ? $kv->{DEFAULT_PASSWORD}   : 'fetchconfig';
-    $HELP_FILE           = defined $kv->{HELP_FILE}          ? $kv->{HELP_FILE}          : '/www/pub/fetchconfig-web/help.html';
+    # Help docs live in one filesystem directory (HELP_DIR), served at the URL
+    # base HELP_BASE_URL; HELP_FILE is the help page's filename (help.html). For
+    # backward compatibility HELP_FILE may still be a full path (old style): if
+    # it contains a "/" its dirname becomes HELP_DIR and its basename the
+    # filename, unless HELP_DIR is set explicitly.
+    my $help_file_cfg = defined $kv->{HELP_FILE} && $kv->{HELP_FILE} ne ''
+                      ? $kv->{HELP_FILE} : '/www/pub/fetchconfig-web/help.html';
+    if (defined $kv->{HELP_DIR} && $kv->{HELP_DIR} ne '') {
+        $HELP_DIR  = $kv->{HELP_DIR};
+        $HELP_DIR  =~ s{/+$}{};
+        ($HELP_FILE = $help_file_cfg) =~ s{^.*/}{};      # basename only
+        $HELP_FILE  = 'help.html' if $HELP_FILE eq '';
+    } elsif ($help_file_cfg =~ m{/}) {                   # old full-path style
+        ($HELP_DIR  = $help_file_cfg) =~ s{/[^/]*$}{};
+        ($HELP_FILE = $help_file_cfg) =~ s{^.*/}{};
+    } else {                                             # bare filename, no dir
+        $HELP_DIR  = '/www/pub/fetchconfig-web';
+        $HELP_FILE = $help_file_cfg;
+    }
     # The config file may override the version this file ships as (the
     # APP_VERSION constant); a missing/empty key means "use the built-in".
     $APP_VERSION         = (defined $kv->{APP_VERSION} && $kv->{APP_VERSION} ne '')
@@ -750,7 +770,7 @@ if (!-d $SESSION_DIR) {
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
 my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report upload_logo delete_logo);
+    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report upload_logo delete_logo);
 
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
@@ -810,7 +830,7 @@ sub main {
                     my %dev_scoped = map { $_ => 1 } qw(
                         compare sidebyside checkempty backup_now view_backup
                         download_config download_latest
-                        check_backups_one check_empty_one check_suffix_one);
+                        check_backups_one check_suffix_one);
                     my $dev = $cgi->param('dev');
                     $dev_scoped{$action} && defined $dev && $dev ne ''
                         && !device_accessible($user, scalar $dev); }) {
@@ -938,12 +958,18 @@ sub main {
             show_empty_check($user);
         } elsif ($action eq 'empty_delete') {
             do_empty_delete($user);
+        } elsif ($action eq 'empty_bk_check') {
+            show_empty_bk_check($user);
+        } elsif ($action eq 'empty_bk_delete') {
+            do_empty_bk_delete($user);
+        } elsif ($action eq 'empty_bk_check_data') {
+            show_empty_bk_check_data($user);
+        } elsif ($action eq 'empty_bk_delete_data') {
+            do_empty_bk_delete_data($user);
         } elsif ($action eq 'view_backup') {
             show_view_backup($user);
         } elsif ($action eq 'check_backups_one') {
             do_check_backups_one($user);
-        } elsif ($action eq 'check_empty_one') {
-            do_check_empty_one($user);
         } elsif ($action eq 'check_suffix_one') {
             do_check_suffix_one($user);
         } elsif ($action eq 'compare_backups') {
@@ -1006,6 +1032,12 @@ sub db_connect {
 # non-fatal warning (fail-open: the action still completes).
 our $AUDIT_WARNING;
 
+# Set by the device-table change tripwire when it detects (and logs) an
+# out-of-application edit, so page_head() can show the user a visible banner --
+# the audit-log row alone is not seen by the person at the screen. Holds the
+# detail string of the change.
+our $EXTERNAL_CHANGE_NOTICE;
+
 # Device-table option keys whose values are secret and must NEVER be stored in
 # the audit log (logged as "***" instead). Password changes for USERS never
 # reach audit() at all.
@@ -1026,8 +1058,15 @@ sub audit_redact {
 sub audit {
     my (%f) = @_;
     return unless defined $f{action} && $f{action} ne '';
+    # Use the caller's handle only if it is still live; several callers
+    # legitimately disconnect $dbh before the (best-effort) audit call, so a
+    # passed-but-dead handle must not cause the write to be lost silently.
     my $dbh = $f{dbh};
     my $own = 0;
+    if ($dbh) {
+        my $live = eval { $dbh->ping };
+        $dbh = undef unless $live;
+    }
     if (!$dbh) { $dbh = db_connect(); $own = 1; }
     unless ($dbh) { $AUDIT_WARNING ||= 'audit log unavailable (database connection failed)'; return; }
 
@@ -1119,23 +1158,50 @@ sub audit_device_table_changes {
 
 # app_state key/value helpers (mutable; used for the device-table change
 # tripwire token). Best-effort; return undef on any error.
+# app_state read/write. On a database error these return a failure indicator
+# and record the reason in $AUDIT_WARNING, rather than swallowing it silently --
+# otherwise the device-table change tripwire would degrade to "always first run"
+# with no clue (e.g. if app_state is missing or not granted to the web user).
+# app_state_get returns (undef, 1) on success with no row, ($value, 1) with a
+# row, or (undef, 0) on error. app_state_set returns 1/0 for ok/error.
 sub app_state_get {
     my ($dbh, $key) = @_;
-    return undef unless $dbh;
-    my $v = eval { ($dbh->selectrow_array('SELECT value FROM app_state WHERE key = ?', undef, $key))[0] };
-    return $v;
+    return (undef, 0) unless $dbh;
+    # Judge success by the statement's own outcome, NOT $dbh->errstr: errstr is
+    # not reliably cleared after a later successful statement on a shared handle,
+    # so testing it here gave false "read failed" results. prepare+execute return
+    # a false value on error; a successful execute with no matching row is a
+    # legitimate "no token yet", distinct from an error.
+    my $sth = $dbh->prepare('SELECT value FROM app_state WHERE key = ?');
+    unless ($sth && $sth->execute($key)) {
+        my $e = $dbh->errstr // 'unknown error'; $e =~ s/\s+/ /g;
+        $AUDIT_WARNING ||= "app_state read failed (device-table change tripwire disabled): $e";
+        return (undef, 0);
+    }
+    my @r = $sth->fetchrow_array;      # () if no row -> (undef, 1) = success, no token
+    $sth->finish;
+    return ($r[0], 1);
 }
 sub app_state_set {
     my ($dbh, $key, $value, $username) = @_;
-    return unless $dbh;
-    eval {
+    return 0 unless $dbh;
+    my $ok = eval {
         my $n = $dbh->do('UPDATE app_state SET value = ?, username = ?, ts = now() WHERE key = ?',
                          undef, $value, $username, $key);
-        if (!$n || $n == 0) {
-            $dbh->do('INSERT INTO app_state (key, value, username, ts) VALUES (?,?,?,now())',
-                     undef, $key, $value, $username);
+        return 0 unless defined $n;
+        if ($n == 0) {
+            my $i = $dbh->do('INSERT INTO app_state (key, value, username, ts) VALUES (?,?,?,now())',
+                             undef, $key, $value, $username);
+            return 0 unless defined $i;
         }
+        1;
     };
+    unless ($ok) {
+        my $e = $dbh->errstr // $@ // 'unknown error'; $e =~ s/\s+/ /g;
+        $AUDIT_WARNING ||= "app_state write failed: $e";
+        return 0;
+    }
+    return 1;
 }
 
 # Device-table external-change tripwire. Compares the table's current staleness
@@ -1163,7 +1229,12 @@ sub audit_check_device_table_change {
     my $dbh = db_connect();
     return unless $dbh;
     my $cur  = device_table_mtime();
-    my $prev = app_state_get($dbh, 'device_table_token');
+    my ($prev, $read_ok) = app_state_get($dbh, 'device_table_token');
+    if (!$read_ok) {
+        # Could not read the stored token (e.g. app_state missing/not granted).
+        # app_state_get already set $AUDIT_WARNING; do nothing else.
+        $dbh->disconnect; return;
+    }
     if (!defined $prev || $prev eq '') {
         # First run / unknown: record silently, don't log a spurious change.
         app_state_set($dbh, 'device_table_token', $cur, $username) if defined $cur && $cur ne '';
@@ -1181,6 +1252,16 @@ sub audit_check_device_table_change {
               detail => 'device table changed outside the application'
                       . ($owner ne '' ? " (file owner: $owner)" : ''));
         app_state_set($dbh, 'device_table_token', $cur, $username);
+        # Surface it to the user. Two ways, because detection can happen either
+        # in the current request (editor open -> banner shows immediately) or in
+        # do_login, which 302-redirects (the in-request global would be lost):
+        #  1) set the in-request global for the editor-open case;
+        #  2) persist a one-shot per-user notice in app_state, which page_head
+        #     reads and clears on the next page (covers the post-login redirect).
+        my $msg = 'The device table was changed outside this application since it '
+                . 'last wrote it' . ($owner ne '' ? " (file owner: $owner)" : '') . '.';
+        $EXTERNAL_CHANGE_NOTICE = $msg;
+        app_state_set($dbh, "external_notice:$username", $msg, $username);
     }
     $dbh->disconnect;
 }
@@ -4397,20 +4478,36 @@ sub show_backup_now {
 
     my ($output, $status, $err) = run_backup_now($dev);
     my $return_link = script_url() . '?dev=' . CGI::escape($dev);
-    audit(action => 'backup_now', object_type => 'device', object_id => $dev,
-          detail => $err ? "backup failed: $err"
-                  : (defined $status && $status == 0 ? 'backup run finished (exit 0)'
-                     : "backup run exited with status " . (defined $status ? $status : '?')));
 
+    # fetchconfig.pl ALWAYS exits 0, so the exit status is meaningless and is
+    # not used (nor logged). A run has failed if:
+    #   - we hit a hard error ($err -- e.g. a timeout or fork failure), or
+    #   - the output contains an "error:" line (fetchconfig's failure marker), or
+    #   - the output's stats block reports backup_state=failed.
+    # (backup_state may take other values -- e.g. success/unchanged -- but
+    # "failed" is unambiguous and is treated as a failed run.)
+    my $failed = $err ? 1
+               : (defined $output
+                  && ($output =~ /(?:^|\n)[^\n]*\berror:/i
+                      || $output =~ /(?:^|\n)\s*backup_state\s*=\s*failed\b/i)) ? 1 : 0;
+
+    audit(action => 'backup_now', object_type => 'device', object_id => $dev,
+          detail => $failed ? 'FAILED: backup run finished failed'
+                            : 'OK: backup run finished successfully');
+
+    # Status line.
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
+    } elsif ($failed) {
+        print qq{<p class="error">Backup run FAILED -- the output below contains }
+            . qq{an error. Check the device's settings (e.g. the enable password).</p>\n};
     } else {
-        if (defined $status && $status == 0) {
-            print qq{<p class="success">Backup run finished (exit 0).</p>\n};
-        } else {
-            print qq{<p class="error">Backup run exited with status }
-                . esc($status) . qq{ -- see output below.</p>\n};
-        }
+        print qq{<p class="success">Backup run finished successfully.</p>\n};
+    }
+    # Show the tool output whenever there is any -- including on an error such
+    # as a timeout, where the partial transcript is exactly what the operator
+    # needs to see (previously the output was hidden on any error).
+    if (defined $output && $output ne '') {
         print qq{<div class="config-wrap">\n};
         print copy_button_html();
         print qq{<pre class="config" id="config-content">} . esc($output) . qq{</pre>\n};
@@ -4506,7 +4603,7 @@ my %TOOL_TITLE = (
     empty_dir  => 'Empty Directory Cleanup',
     restore    => 'Restore device table',
     nobackup   => 'Devices without backups',
-    empty_bk   => 'Check devices for empty backups',
+    empty_bk   => 'Empty Backup Cleanup',
     suffix     => 'Check devices for consistent backup suffixes',
     logo       => 'Upload report logo',
     diskspace  => 'Disk space',
@@ -4758,22 +4855,60 @@ JS
     );
     }
 
-    # --- Check devices for empty backups --------------------------------
+    # --- Empty Backup Cleanup -------------------------------------------
     if (!$only || $only eq 'empty_bk') {
-    render_scan_tool(
-        prefix   => 'empty',
-        title    => 'Check devices for empty backups',
-        descr    => 'Scans every Device-ID in the device table and lists the '
-                  . 'devices that have one or more <strong>empty</strong> '
-                  . '(zero-byte) backup files &mdash; a fetch that connected '
-                  . 'but saved nothing. Each device is checked with '
-                  . '<code>fetchconfig.pl -z</code> (read-only).',
-        action   => 'check_empty_one',
-        flag     => 'empty',
-        dev_list => $dev_list, dev_err => $dev_err,
-        none_msg => 'device%s with empty backups',
-        all_ok   => 'No devices have empty backups (checked %d device%s).',
-    );
+    print qq{<div class="tool-section" id="empty-backup-cleanup">\n};
+    print qq{<h2 class="tool-section-title">Empty Backup Cleanup</h2>\n};
+    print qq{<p class="muted">Empty backups are <strong>zero-byte</strong> }
+        . qq{configuration files in the repository for devices still in the }
+        . qq{device table &mdash; a fetch that connected but saved nothing. These }
+        . qq{tools scan every device at once with <code>fetchconfig.pl -Z</code>.</p>\n};
+
+    print qq{<h3>Check for empty backups</h3>\n};
+    print qq{<p class="muted">Lists the zero-byte backup files without changing }
+        . qq{anything.</p>\n};
+    print qq{<p><a class="btn js-ebk-run" href="} . esc(script_url() . '?action=empty_bk_check')
+        . qq{">Check for empty backups</a></p>\n};
+
+    print qq{<h3>Delete empty backups</h3>\n};
+    print qq{<p class="muted">Permanently removes the zero-byte backup files found }
+        . qq{above (<code>fetchconfig.pl -Z -D</code>). This cannot be undone.</p>\n};
+    print $cgi->start_form(-method => 'POST', -action => script_url(),
+        -id => 'ebk-delete-form',
+        -data_confirm => 'Permanently DELETE all empty (zero-byte) backups? This cannot be undone.',
+        -data_confirm_danger => 'y');
+    print qq{<input type="hidden" name="action" value="empty_bk_delete">\n};
+    print csrf_field();
+    print qq{<p><button type="submit" class="btn btn-danger">Delete empty backups</button></p>\n};
+    print $cgi->end_form;
+
+    # Lightweight feedback overlay: the -Z scan over all devices still takes a
+    # moment, so reveal a spinner on click (the Check link and, after its
+    # confirm, the Delete submit) until the synchronous result page loads.
+    print <<'EBKJS';
+<div id="ebk-overlay" class="backup-overlay" style="display:none;">
+  <div class="backup-overlay-box">
+    <div class="backup-spinner" aria-hidden="true"></div>
+    <div class="backup-patience">Scanning all devices for empty backups &mdash; please wait.</div>
+  </div>
+</div>
+<script>
+(function () {
+  var ov = document.getElementById('ebk-overlay');
+  if (!ov) return;
+  function show(){ ov.style.display = 'flex'; }
+  var link = document.querySelector('.js-ebk-run');
+  if (link) link.addEventListener('click', function(){ show(); });  // navigates; overlay covers the wait
+  // The Delete form uses the custom confirm dialog, which intercepts the first
+  // submit and, on OK, calls form.submit() (which does NOT re-fire 'submit').
+  // So don't hook 'submit' (it would show even on Cancel); instead reveal the
+  // overlay on the real page navigation that only happens after OK.
+  var form = document.getElementById('ebk-delete-form');
+  if (form) window.addEventListener('pagehide', function(){ show(); });
+})();
+</script>
+EBKJS
+    print qq{</div>\n};   # .tool-section (Empty Backup Cleanup)
     }
 
     # --- Check devices for consistent backup suffixes -------------------
@@ -5233,11 +5368,11 @@ sub show_tool_audit {
   <a class="btn btn-small" id="af-csv" href="#">Export CSV</a>
 </div>
 <div class="audit-pager">
-  <button type="button" class="btn btn-small" id="ap-first">&laquo; First</button>
-  <button type="button" class="btn btn-small" id="ap-prev">&larr; Prev</button>
-  <span id="ap-info" class="pageinfo"></span>
-  <button type="button" class="btn btn-small" id="ap-next">Next &rarr;</button>
-  <button type="button" class="btn btn-small" id="ap-last">Last &raquo;</button>
+  <button type="button" class="btn btn-small ap-first">&laquo; First</button>
+  <button type="button" class="btn btn-small ap-prev">&larr; Prev</button>
+  <span class="ap-info pageinfo"></span>
+  <button type="button" class="btn btn-small ap-next">Next &rarr;</button>
+  <button type="button" class="btn btn-small ap-last">Last &raquo;</button>
 </div>
 <div class="audit-scroll">
 <table class="list audit-list" id="audit-table">
@@ -5247,6 +5382,13 @@ sub show_tool_audit {
 </table>
 </div>
 <p id="audit-empty" class="muted" style="display:none;">No matching entries.</p>
+<div class="audit-pager audit-pager-bottom">
+  <button type="button" class="btn btn-small ap-first">&laquo; First</button>
+  <button type="button" class="btn btn-small ap-prev">&larr; Prev</button>
+  <span class="ap-info pageinfo"></span>
+  <button type="button" class="btn btn-small ap-next">Next &rarr;</button>
+  <button type="button" class="btn btn-small ap-last">Last &raquo;</button>
+</div>
 <script>
 (function () {
   var url = "$su";
@@ -5260,7 +5402,33 @@ sub show_tool_audit {
     add('af-text','f_text'); add('af-from','f_from'); add('af-to','f_to');
     return p.join('&');
   }
-  function arrow(o,n){ if(o==='' && n==='') return ''; return esc(o)+' \\u2192 '+esc(n); }
+  var ARROW = '\\u2192';
+  // Insert a line break into a long Old->New cell:
+  //  - if the text is >60 chars and contains the arrow, break right AFTER the
+  //    arrow (old on one line, new on the next);
+  //  - otherwise (no arrow) break after ~50 chars at the nearest whitespace
+  //    within +/-10 (i.e. 40..60); if none, hard-break at 60.
+  // The text is HTML-escaped first, then <br> is inserted, so the break tag is
+  // real markup and the content stays escaped.
+  function wrapCell(txt){
+    if(txt.length <= 60) return esc(txt);
+    var i = txt.indexOf(ARROW);
+    if(i !== -1){
+      var head = txt.slice(0, i+ARROW.length);   // up to and including the arrow
+      var tail = txt.slice(i+ARROW.length).replace(/^\\s+/,'');
+      return esc(head)+'<br>'+esc(tail);
+    }
+    // No arrow: find a whitespace near position 50 (search 40..60).
+    var lo=40, hi=60, pos=-1;
+    for(var p=50; p<=hi; p++){ if(/\\s/.test(txt.charAt(p))){ pos=p; break; } }
+    if(pos===-1){ for(var q=50; q>=lo; q--){ if(/\\s/.test(txt.charAt(q))){ pos=q; break; } } }
+    if(pos===-1) pos=60;   // no whitespace in range: hard break at 60
+    return esc(txt.slice(0,pos))+'<br>'+esc(txt.slice(pos).replace(/^\\s+/,''));
+  }
+  function arrow(o,n){
+    if(o==='' && n==='') return '';
+    return wrapCell(o+' '+ARROW+' '+n);
+  }
   function render(d) {
     total = d.total; offset = d.offset;
     var b = document.getElementById('audit-body'); b.innerHTML='';
@@ -5273,33 +5441,39 @@ sub show_tool_audit {
     }
     document.getElementById('audit-empty').style.display = (total===0?'':'none');
     var from = total? offset+1 : 0, to = Math.min(offset+PAGE,total);
-    document.getElementById('ap-info').textContent = total? (from+'\\u2013'+to+' of '+total) : '0 of 0';
-    document.getElementById('ap-first').disabled = offset<=0;
-    document.getElementById('ap-prev').disabled  = offset<=0;
-    document.getElementById('ap-next').disabled  = offset+PAGE>=total;
-    document.getElementById('ap-last').disabled  = offset+PAGE>=total;
+    var info = total? (from+'\\u2013'+to+' of '+total) : '0 of 0';
+    function setAll(sel, fn){ var els=document.querySelectorAll(sel); for(var i=0;i<els.length;i++) fn(els[i]); }
+    setAll('.ap-info',  function(e){ e.textContent = info; });
+    setAll('.ap-first', function(e){ e.disabled = offset<=0; });
+    setAll('.ap-prev',  function(e){ e.disabled = offset<=0; });
+    setAll('.ap-next',  function(e){ e.disabled = offset+PAGE>=total; });
+    setAll('.ap-last',  function(e){ e.disabled = offset+PAGE>=total; });
     document.getElementById('af-csv').href = url+'?action=audit_csv'+(qs()?'&'+qs():'');
   }
   function load() {
     var u = url+'?action=audit_data&offset='+offset+(qs()?'&'+qs():'');
     fetch(u,{credentials:'same-origin'}).then(function(r){return r.json();})
-      .then(render).catch(function(){ document.getElementById('ap-info').textContent='(load failed)'; });
+      .then(render).catch(function(){
+        var els=document.querySelectorAll('.ap-info'); for(var i=0;i<els.length;i++) els[i].textContent='(load failed)';
+      });
   }
+  function bindAll(sel, handler){ var els=document.querySelectorAll(sel); for(var i=0;i<els.length;i++) els[i].addEventListener('click',handler); }
   document.getElementById('af-apply').addEventListener('click',function(){ offset=0; load(); });
   document.getElementById('af-reload').addEventListener('click',function(){ load(); });
   document.getElementById('af-clear').addEventListener('click',function(){
     ['af-user','af-action','af-object','af-text','af-from','af-to'].forEach(function(id){document.getElementById(id).value='';});
     offset=0; load();
   });
-  document.getElementById('ap-first').addEventListener('click',function(){ offset=0; load(); });
-  document.getElementById('ap-prev').addEventListener('click',function(){ offset=Math.max(0,offset-PAGE); load(); });
-  document.getElementById('ap-next').addEventListener('click',function(){ if(offset+PAGE<total){offset+=PAGE; load();} });
-  document.getElementById('ap-last').addEventListener('click',function(){ offset=Math.max(0,Math.floor((total-1)/PAGE)*PAGE); load(); });
+  bindAll('.ap-first',function(){ offset=0; load(); });
+  bindAll('.ap-prev', function(){ offset=Math.max(0,offset-PAGE); load(); });
+  bindAll('.ap-next', function(){ if(offset+PAGE<total){offset+=PAGE; load();} });
+  bindAll('.ap-last', function(){ offset=Math.max(0,Math.floor((total-1)/PAGE)*PAGE); load(); });
   load();
 })();
 </script>
 HTML
     print qq{</div>\n};
+    print top_bottom_nav();   # floating Top / Bottom scroll buttons
     print page_foot();
 }
 
@@ -6825,33 +6999,6 @@ sub show_compare_backups {
     print page_foot();
 }
 
-# JSON endpoint for the "Check devices for empty backups" scan: checks ONE
-# device for zero-byte backups. Admin-only, read-only GET (no CSRF).
-sub do_check_empty_one {
-    my ($user) = @_;
-    unless (user_may_use_tools($user)) {
-        print $cgi->header(-type => 'application/json', -status => '403 Forbidden');
-        print '{"error":"forbidden"}';
-        return;
-    }
-    my $dev = $cgi->param('dev') // '';
-    unless (valid_id($dev)) {
-        print $cgi->header(-type => 'application/json', -status => '400 Bad Request');
-        print '{"error":"bad device id"}';
-        return;
-    }
-    my ($status, $detail) = device_empty_status($dev);
-    # Return the failure detail too, so the scan UI can show WHY a device
-    # could not be checked (a truncated read, a real non-zero exit, or a
-    # spawn failure) instead of a bare "could not be checked".
-    print $cgi->header(-type => 'application/json', -charset => 'UTF-8');
-    if ($status eq 'error' && defined $detail && $detail ne '') {
-        print qq({"dev":"$dev","status":"$status","detail":) . json_string($detail) . qq(});
-    } else {
-        print qq({"dev":"$dev","status":"$status"});
-    }
-}
-
 # Per-device JSON endpoint for the "consistent backup extensions" scan.
 sub do_check_suffix_one {
     my ($user) = @_;
@@ -7293,6 +7440,197 @@ sub do_empty_delete {
 
     print page_foot();
 }
+
+# "Empty Backup Cleanup" CHECK: fetchconfig.pl -Z over all devices (read-only).
+# fetchconfig exits 1 when zero-byte backups ARE found and 0 when none, so the
+# count is taken from the summary line, not the exit status.
+sub show_empty_bk_check {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to use Tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Check for empty backups', $user, 'checkout');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty Backup Cleanup</a></p>\n};
+    print qq{<h1>Check for empty backups</h1>\n};
+    print qq{<p class="muted">Result of <code>fetchconfig.pl -Z</code>. Nothing is deleted.</p>\n};
+    # Render a spinner immediately, then fetch the (slow) scan result so the
+    # spinner stays visible on THIS page until the output is ready. If the
+    # browser has no fetch, fall back to running the scan inline.
+    print empty_bk_result_shell('empty_bk_check_data');
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# "Empty Backup Cleanup" DELETE: fetchconfig.pl -Z -D (POST + CSRF). Audited.
+sub do_empty_bk_delete {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to use Tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Delete empty backups', $user, 'checkout');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty Backup Cleanup</a></p>\n};
+    print qq{<h1>Delete empty backups</h1>\n};
+    print qq{<p class="muted">Result of <code>fetchconfig.pl -Z -D</code>.</p>\n};
+    print empty_bk_result_shell('empty_bk_delete_data');
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# The spinner shell for an empty-backup result page: shows a spinner, then
+# fetches the result fragment from $data_action (GET for check, POST+CSRF for
+# delete) and swaps it in -- so the spinner stays on THIS page until the scan
+# finishes. Without fetch, a <noscript> link lets the user get the result page
+# the old (blocking) way via the same action with &inline=1.
+sub empty_bk_result_shell {
+    my ($data_action) = @_;
+    my $url  = esc(script_url());
+    my $csrf = esc(csrf_token());
+    my $is_delete = ($data_action eq 'empty_bk_delete_data') ? 1 : 0;
+    my $method = $is_delete ? 'POST' : 'GET';
+    # No-JS fallback: a GET link for the (read-only) check; a POST form carrying
+    # the CSRF token for the (state-changing) delete, since that action requires
+    # CSRF and must not be a GET.
+    my $noscript = $is_delete
+        ? qq{<noscript><form method="POST" action="$url">}
+          . qq{<input type="hidden" name="action" value="$data_action">}
+          . qq{<input type="hidden" name="inline" value="1">}
+          . qq{<input type="hidden" name="csrf" value="$csrf">}
+          . qq{<p><button type="submit" class="btn">Show result</button></p></form></noscript>}
+        : qq{<noscript><p><a class="btn" href="$url?action=$data_action&inline=1">Show result</a></p></noscript>};
+    my $h = <<"HTML";
+<div id="ebk-result">
+  <div class="backup-overlay-box" id="ebk-spin" style="margin:1.5em auto;max-width:30em;">
+    <div class="backup-spinner" aria-hidden="true"></div>
+    <div class="backup-patience">Scanning all devices &mdash; please wait.</div>
+  </div>
+</div>
+$noscript
+<script>
+(function () {
+  var box = document.getElementById('ebk-result');
+  if (!box || typeof window.fetch !== 'function') return;
+  var opt = { credentials: 'same-origin' };
+  // For a multipart POST, CGI.pm does not reliably merge URL query params, so
+  // send 'action' in the body (not only the query string). GET keeps it in URL.
+  var url = "$url" + ("$method" === 'POST' ? '' : "?action=$data_action");
+  if ("$method" === 'POST') {
+    opt.method = 'POST';
+    var fd = new FormData();
+    fd.append('action', "$data_action");
+    fd.append('csrf', "$csrf");
+    opt.body = fd;
+  }
+  fetch(url, opt).then(function (r) { return r.text(); })
+    .then(function (html) {
+      box.innerHTML = html;
+      // Scripts inserted via innerHTML do NOT run; re-create them so the
+      // copy-button wiring in the fragment executes.
+      var scripts = box.querySelectorAll('script');
+      for (var i = 0; i < scripts.length; i++) {
+        var s = document.createElement('script');
+        s.textContent = scripts[i].textContent;
+        document.body.appendChild(s);
+      }
+    })
+    .catch(function () {
+      box.innerHTML = '<p class="error">The scan could not be completed (network error). Please try again.</p>';
+    });
+})();
+</script>
+HTML
+    return $h;
+}
+
+# Build the result fragment (status line + output block) for an empty-backup
+# run. $mode is 'check' (-Z) or 'delete' (-Z -D). The delete run is audited
+# here, where the command actually runs.
+sub empty_bk_result_fragment {
+    my ($mode) = @_;
+    my ($output, $status, $err) = $mode eq 'delete'
+        ? run_empty_bk_delete() : run_empty_bk_check();
+    $output = '' unless defined $output;
+    my $found = ($output =~ /found\s+(\d+)\s+zero-byte\s+backup/i) ? $1 : undef;
+
+    if ($mode eq 'delete') {
+        audit(action=>'empty_bk_delete', object_type=>'backup',
+              detail=>(defined $found ? "deleted $found empty (zero-byte) backup(s)"
+                                       : 'empty-backup cleanup run'));
+    }
+
+    my $h = '';
+    if ($err) {
+        $h .= qq{<p class="error">} . esc($err) . qq{</p>\n};
+    } elsif (defined $found && $found == 0) {
+        $h .= $mode eq 'delete'
+            ? qq{<p class="success">No empty (zero-byte) backups to delete.</p>\n}
+            : qq{<p class="success">No empty (zero-byte) backups found.</p>\n};
+    } elsif (defined $found) {
+        $h .= $mode eq 'delete'
+            ? qq{<p class="success">Deleted $found empty (zero-byte) backup}
+              . ($found == 1 ? '' : 's') . qq{.</p>\n}
+            : qq{<p class="success">Found $found empty (zero-byte) backup}
+              . ($found == 1 ? '' : 's') . qq{ -- listed below. Nothing was deleted.</p>\n};
+    } else {
+        $h .= $mode eq 'delete'
+            ? qq{<p class="success">Empty-backup cleanup completed.</p>\n}
+            : qq{<p class="success">Scan complete.</p>\n};
+    }
+    my $flag = $mode eq 'delete' ? '-Z -D' : '-Z';
+    my $shown = ($output ne '') ? $output
+              : "(fetchconfig.pl $flag produced no output -- nothing empty.)";
+    $h .= qq{<div class="config-wrap">\n} . copy_button_html()
+        . qq{<pre class="config" id="config-content">} . esc($shown) . qq{</pre>\n}
+        . qq{</div>\n} . copy_button_script();
+    return $h;
+}
+
+# Data endpoints: run the scan and return just the result fragment. check is a
+# read-only GET; delete is POST + CSRF (enforced by the dispatcher's
+# state-changing set). With &inline=1 (the <noscript> fallback) the fragment is
+# wrapped in a minimal page instead.
+sub show_empty_bk_check_data {
+    my ($user) = @_;
+    unless (user_may_use_tools($user)) {
+        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n"; return;
+    }
+    my $frag = empty_bk_result_fragment('check');
+    if ($cgi->param('inline')) {
+        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+        print page_head('Check for empty backups', $user, 'checkout');
+        print $frag; print top_bottom_nav(); print page_foot();
+    } else {
+        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+        print $frag;
+    }
+}
+sub do_empty_bk_delete_data {
+    my ($user) = @_;
+    unless (user_may_use_tools($user)) {
+        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n"; return;
+    }
+    my $frag = empty_bk_result_fragment('delete');
+    if ($cgi->param('inline')) {
+        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+        print page_head('Delete empty backups', $user, 'checkout');
+        print $frag; print top_bottom_nav(); print page_foot();
+    } else {
+        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+        print $frag;
+    }
+}
+
 sub redirect_to_user_page {
     my (%opts) = @_;
     my $act = $opts{action} || 'user';   # which User sub-page to return to
@@ -7616,11 +7954,30 @@ sub do_set_user_sites {
     # "All sites" (id 0) is mutually exclusive with specific sites: if it is
     # ticked, store only site 0 (unrestricted), ignoring any specific picks.
     @ids = (0) if grep { $_ == 0 } @ids;
-    db_set_user_sites($dbh, $target, \@ids);
+    # Capture the BEFORE set (for the audit old->new), map ids to readable codes.
+    my @old_ids = @{ db_user_site_ids($dbh, $target) || [] };
+    my %code; for my $sdef (@{ db_all_sites($dbh) || [] }) { $code{$sdef->{id}} = $sdef->{code}; }
+    my $as_codes = sub {
+        my @c = map { defined $code{$_} ? $code{$_} : "id$_" } sort { $a <=> $b } @_;
+        return @c ? join(', ', @c) : '(none)';
+    };
     my $dfr = $cgi->param('download_full_report') ? 1 : 0;
+    db_set_user_sites($dbh, $target, \@ids);
     $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $dfr, $target);
     $dbh->disconnect;
-    audit(dbh=>$dbh, action=>'set_user_sites', object_type=>'user', object_id=>$target, detail=>'updated site assignment');
+    # What actually changed, by code.
+    my %o = map { $_ => 1 } @old_ids;
+    my %n = map { $_ => 1 } @ids;
+    my @added   = grep { !$o{$_} } @ids;
+    my @removed = grep { !$n{$_} } @old_ids;
+    my @chg;
+    push @chg, 'added '   . $as_codes->(@added)   if @added;
+    push @chg, 'removed ' . $as_codes->(@removed) if @removed;
+    my $detail = @chg ? ('site assignment: ' . join('; ', @chg))
+                      : 'site assignment unchanged';
+    audit(action=>'set_user_sites', object_type=>'user', object_id=>$target,
+          old_value=>$as_codes->(@old_ids), new_value=>$as_codes->(@ids),
+          detail=>$detail);
     redirect_to_user_page(action=>"user_list", msg=>"Updated sites for $target.");
 }
 
@@ -7634,7 +7991,9 @@ sub do_set_download_full_report {
     $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $val, $target)
         if $target ne '';
     $dbh->disconnect;
-    audit(dbh=>$dbh, action=>'set_download_full_report', object_type=>'user', object_id=>$target, detail=>'updated report-download right');
+    audit(action=>'set_download_full_report', object_type=>'user', object_id=>$target,
+          field=>'download_full_report', new_value=>($val?'yes':'no'),
+          detail=>($val ? 'granted report-download right' : 'revoked report-download right'));
     redirect_to_user_page(action=>"user_list", msg=>"Updated report-download right for $target.");
 }
 
@@ -8121,8 +8480,10 @@ sub do_add_user {
         redirect_to_user_page(action=>"user_add", err => "Could not add user: " . ($err // 'unknown error'));
         return;
     }
-    audit(dbh=>$dbh, action=>'add_user', object_type=>'user', object_id=>$new_user,
-          detail=>"added user (edit=$edit, admin=$admin)");
+    audit(action=>'add_user', object_type=>'user', object_id=>$new_user,
+          detail=>"added user (edit device table: " . ($edit ? 'yes' : 'no')
+                . ", admin function: " . ($admin ? 'yes' : 'no')
+                . "; site assignment set separately)");
     redirect_to_user_page(action=>"user_list", msg => "User '$new_user' added.");
 }
 
@@ -8206,7 +8567,7 @@ sub do_set_edit_right {
         redirect_to_user_page(action=>"user_list", err => "Could not update edit right: " . ($err // 'unknown error'));
         return;
     }
-    audit(dbh=>$dbh, action=>'set_edit_right', object_type=>'user', object_id=>$target,
+    audit(action=>'set_edit_right', object_type=>'user', object_id=>$target,
           field=>'edit_device_table', new_value=>($edit?'yes':'no'),
           detail=>($edit?'granted edit right':'revoked edit right'));
     redirect_to_user_page(action=>"user_list", msg => $edit
@@ -8254,7 +8615,7 @@ sub do_set_admin_right {
         redirect_to_user_page(action=>"user_list", err => "Could not update admin functions: " . ($err // 'unknown error'));
         return;
     }
-    audit(dbh=>$dbh, action=>'set_admin_right', object_type=>'user', object_id=>$target,
+    audit(action=>'set_admin_right', object_type=>'user', object_id=>$target,
           field=>'admin_function', new_value=>($admin?'yes':'no'),
           detail=>($admin?'granted admin functions':'revoked admin functions'));
     redirect_to_user_page(action=>"user_list", msg => $admin
@@ -9310,6 +9671,11 @@ sub render_option_field {
         my $extra = ($key eq 'template_dir')
                   ? qq{ data-tpl-role="template_dir" data-tpl-section="} . esc($section) . qq{"} : '';
         $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="30"$extra>};
+        # Email recipients: note that several addresses may be given, ';'-separated.
+        if ($is_email && $key eq 'to') {
+            $control .= qq{ <span class="opt-hint muted">multiple recipients may be }
+                      . qq{separated by ";"</span>};
+        }
     }
 
     # "site" is mandatory and auto-managed -> no remove button.
@@ -10648,6 +11014,10 @@ sub show_bulk_edit {
     if (defined $prefill) {
         $text = $prefill;   # redraw after a validation failure
     } else {
+        # Fresh open: detect/flag an out-of-application change (banner + log),
+        # same as the device-table editor. Skipped on a validation-failure
+        # redraw, where $prefill holds the user's unsaved text.
+        audit_check_device_table_change($user);
         my ($content, $err) = slurp_device_table();
         if ($err) {
             print page_head('Error', $user);
@@ -11075,8 +11445,13 @@ sub render_record_card {
 # it verbatim inside this page's own chrome -- operator-authored content,
 # not user input, so it deliberately does NOT go through esc(). Falls back
 # to a built-in description if the file is missing.
+# Full on-disk path of the help page (HELP_DIR + HELP_FILE), and the directory
+# the sibling docs (LICENSE.html, PRIVACY.html, ...) live in.
+sub help_file_path { return (defined $HELP_DIR && $HELP_DIR ne '' ? "$HELP_DIR/" : '') . $HELP_FILE; }
+sub help_doc_dir   { return defined $HELP_DIR ? $HELP_DIR : ''; }
+
 sub read_help_file {
-    if (open(my $fh, '<:encoding(UTF-8)', $HELP_FILE)) {
+    if (open(my $fh, '<:encoding(UTF-8)', help_file_path())) {
         local $/;
         my $content = <$fh>;
         close($fh);
@@ -12021,32 +12396,13 @@ JS
 }
 
 sub default_help_html {
-    my $path = CGI::escapeHTML($HELP_FILE);
+    my $path = CGI::escapeHTML(help_file_path());
     return <<"HTML";
-<p><strong>$APP_TITLE</strong> is a web front-end for <code>fetchconfig</code>,
-the network device configuration backup tool. It does not re-implement
-repository scanning -- every page shells out to the already-extended
-<code>fetchconfig.pl</code> so results always match the CLI tool exactly.</p>
-<ul>
-  <li><strong>Devices</strong> &mdash; lists every Device-ID known to
-      fetchconfig (parsed from the device table), with a live filter box.</li>
-  <li>Click a device to see its backup history; click a backup to view its
-      content, with a one-click copy-to-clipboard button.</li>
-  <li>Tick two backups and press <strong>Compare selected</strong> to see a
-      unified diff between them.</li>
-  <li>Press <strong>Backup now</strong> on a device's backup list to trigger
-      a live backup immediately and see the run transcript.</li>
-  <li><strong>User</strong> &mdash; change your own login password. The
-      <code>$PROTECTED_USER</code> account can also add or delete users and
-      grant the device-table edit right; <code>$PROTECTED_USER</code> itself
-      can never be deleted.</li>
-  <li><strong>Setup</strong> (the <code>$PROTECTED_USER</code> account and
-      any user granted the edit right) &mdash; shows the raw fetchconfig
-      device table.</li>
-</ul>
-<p class="muted">This built-in text is shown because no custom help page
-was found at $path. Deploy an HTML fragment there (just the content, no
-&lt;html&gt;/&lt;body&gt; tags) to replace it.</p>
+<p class="error">The help page <code>$HELP_FILE</code> is not present in the
+web server help directory.</p>
+<p>Expected at <code>$path</code>. Copy <code>$HELP_FILE</code> (and the other
+documentation files) from the <strong>$APP_TITLE</strong> source package into the
+help directory, then reload this page.</p>
 HTML
 }
 
@@ -12650,52 +13006,6 @@ sub list_backups {
     return (\@backups, undef);
 }
 
-# Lightweight per-device "does this device have any EMPTY (zero-byte) backup
-# files?" check for the "Check devices for empty backups" tool. Runs
-# `fetchconfig.pl -z <dev>`, which prints a tab-separated line
-# "dev\t<num>\t0\t<path>" for each 0-byte backup and nothing (exit 0) when
-# there are none (a device with no backups at all also prints nothing).
-# Classifies as:
-#   'empty' -> at least one 0-byte backup line on stdout
-#   'clean' -> no empty backups (nothing printed)
-#   'error' -> fetchconfig failed unexpectedly (with $detail)
-# Returns ($status_word, $detail).
-sub device_empty_status {
-    my ($dev) = @_;
-    my ($out, $err, $status, $fork_err) =
-        run_fetchconfig('-devices=' . $DEVICE_TABLE, '-z', $dev);
-    return ('error', $fork_err) if $fork_err;
-
-    my $combined = ($err ne '' ? $err : '') . ($out ne '' ? $out : '');
-
-    # A size-0 result line. For a single device ("-z dev"), fetchconfig
-    # prints "<number>\t<size>\t<path>" (3 fields, no dev-id -- same as
-    # "-l" for one device); the "-Z" all-devices form prints
-    # "<dev>\t<number>\t<size>\t<path>" (4 fields). Match a 0-byte line in
-    # either shape.
-    my $has_zero_line = 0;
-    for my $line (split /\n/, ($out // '')) {
-        if ($line =~ /^\d+\t0\t/ || $line =~ /^\S+\t\d+\t0\t/) { $has_zero_line = 1; last; }
-    }
-
-    # Exit status: fetchconfig.pl -z exits 1 when at least one 0-byte backup
-    # was found, 0 when all backups are non-empty. So exit 1 is the normal
-    # "found empties" result, NOT an error.
-    if (defined $status && $status == 0) {
-        return ('clean', undef);
-    }
-    # Non-zero exit:
-    return ('clean', undef) if $combined =~ /no backed up config files found/i;
-    return ('empty', undef) if $has_zero_line;
-    # fetchconfig may report only in the log line. Match both the older
-    # "found N zero-byte" phrasing and the newer "wrote listing of N
-    # zero-byte backup(s) ... to check.out" (now an info: line).
-    return ('empty', undef) if $combined =~ /\b[1-9]\d*\s+zero-byte\s+backup/i;
-    return ('empty', undef) if $combined =~ /found\s+[1-9]\d*\s+zero-byte/i;
-    # Anything else non-zero is a genuine error.
-    return ('error', "exit $status: " . ($err ne '' ? $err : $out));
-}
-
 # Lightweight per-device "does this device have any backups?" check for the
 # "Devices without backups" tool. Runs `fetchconfig.pl -l <dev>` and
 # classifies the result without parsing every line:
@@ -13171,6 +13481,24 @@ sub run_empty_delete {
     return run_command_capture(@cmd);
 }
 
+# Empty-BACKUP (0-byte file) check: `fetchconfig.pl -devices=<table> -Z`. The
+# fast all-device scan for zero-byte backup files. Read-only. Note: fetchconfig
+# exits 1 when it FINDS zero-byte backups and 0 when none -- not an error, so
+# callers judge from the output summary, not the exit status.
+sub run_empty_bk_check {
+    return run_command_capture($FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-Z');
+}
+
+# Empty-BACKUP DELETE: `fetchconfig.pl -devices=<table> -Z -D`. Removes the
+# zero-byte backup files; writes into the repository, so it uses sudo when
+# USE_SUDO_FOR_BACKUP_NOW is set.
+sub run_empty_bk_delete {
+    my @cmd = $USE_SUDO_FOR_BACKUP_NOW
+        ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-Z', '-D')
+        : ($FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-Z', '-D');
+    return run_command_capture(@cmd);
+}
+
 # fetchconfig names each saved config in the repository as
 # "<dev_id>.<tag>.YYYYMMDD.HHMMSS<TZ>" -- e.g.
 #   .../202608/20260825/V1-SW1/V1-SW1.run.20260825.143556CEST
@@ -13329,16 +13657,48 @@ sub run_command_capture {
         open(STDERR, '>&STDOUT');
         exec(@cmd) or exit(127);
     }
-    local $/;
-    my $out = <$fh>;
-    # close() on a '-|' pipe reaps the child and sets $? to its wait status:
-    #   $? >= 0  -> valid (0 = ok, >0 = the child's real non-zero exit)
-    #   $? == -1 -> the child was already reaped elsewhere, so $? is
-    #               unreliable; don't fabricate a failure from it.
+    # Read with a wall-clock timeout so a hung backup (e.g. a device that never
+    # responds) cannot block the request forever. On timeout the child is
+    # killed but the OUTPUT COLLECTED SO FAR is preserved and returned together
+    # with the error, so the caller can still show the partial transcript.
+    my $out     = '';
+    my $timeout = (defined $BACKUP_TIMEOUT && $BACKUP_TIMEOUT > 0) ? $BACKUP_TIMEOUT : 0;
+    my $timed_out = 0;
+    my $err;
+    eval {
+        my $rin = ''; vec($rin, fileno($fh), 1) = 1;
+        my $deadline = $timeout ? (time() + $timeout) : undef;
+        while (1) {
+            my $wait = $timeout ? ($deadline - time()) : undef;
+            if ($timeout && $wait <= 0) { $timed_out = 1; last; }
+            my $n = select(my $rout = $rin, undef, undef, $timeout ? $wait : undef);
+            if ($n && $n > 0) {
+                my $buf;
+                my $got = sysread($fh, $buf, 65536);
+                last unless defined $got;   # error
+                last if $got == 0;          # EOF -- child finished
+                $out .= $buf;
+            } elsif (!defined $n || $n < 0) {
+                next if $!{EINTR};
+                last;
+            }
+            # $n == 0 means select timed out -> loop re-checks the deadline.
+        }
+        1;
+    };
+    if ($timed_out) {
+        kill('TERM', $pid);
+        # give it a moment, then force-kill, so the pipe can close
+        select(undef, undef, undef, 0.3);
+        kill('KILL', $pid);
+        $err = "Backup timed out after ${timeout}s and was terminated"
+             . " (showing the output captured so far).";
+    }
     close($fh);
     my $raw    = $?;
     my $status = ($raw >= 0) ? ($raw >> 8) : 0;
-    return (collapse_model_registration($out // ''), $status, undef);
+    $status = undef if $timed_out;   # exit status is meaningless after a kill
+    return (collapse_model_registration($out), $status, $err);
 }
 
 # =============================================================================
@@ -13465,7 +13825,6 @@ sub page_head {
         my $u         = esc($user);
         my $home      = esc(script_url());
         my $user_page = esc(script_url() . '?action=change_password_form');
-        my $help_page = esc(script_url() . '?action=help');
         my $action    = esc(script_url());
         my $csrf      = esc(csrf_token());
 
@@ -13528,10 +13887,10 @@ sub page_head {
             $tools_menu = $group->('Tools',
                 $su->('Audit log',                                    '?action=tool_audit'),
                 $su->('Check devices for consistent backup suffixes', '?action=tool_suffix'),
-                $su->('Check devices for empty backups',              '?action=tool_empty_bk'),
                 $su->('Check site assignment',                        '?action=check_site_assignment'),
                 $su->('Devices without backups',                      '?action=tool_nobackup'),
                 $su->('Disk space',                                   '?action=tool_diskspace'),
+                $su->('Empty Backup Cleanup',                         '?action=tool_empty_bk'),
                 $su->('Empty Directory Cleanup',                      '?action=tool_empty_dir'),
                 $su->('Orphaned Backup Cleanup',               '?action=tool_orphan'),
                 $su->('Restore device table',                         '?action=tool_restore'),
@@ -13548,6 +13907,28 @@ sub page_head {
         push @user_items, $su->('Sites', '?action=sites') if $is_admin;
         my $user_menu = $group->('User', @user_items);
 
+        # Help dropdown: the Help page (help.html or the internal fallback),
+        # then the static documents served from HELP_BASE_URL. Each static doc
+        # is listed only if its file exists in the help directory (HELP_DIR),
+        # so e.g. the manually-placed fetchconfig manual appears only when
+        # present. The link itself uses the URL base, the check uses the dir.
+        my $hdir = help_doc_dir();
+        my $doc_item = sub {
+            my ($label, $file) = @_;
+            return () unless $hdir ne '' && -r "$hdir/$file";
+            # Static documents open in a NEW tab (the Help page itself does not).
+            my $href = esc("$HELP_BASE_URL/$file");
+            return qq{<a role="menuitem" href="$href" target="_blank" rel="noopener">}
+                 . esc($label) . qq{</a>};
+        };
+        my @help_items = ($su->('Help', '?action=help'));   # always present
+        push @help_items, $doc_item->('Documentation fetchconfig-web', 'fetchconfig-web-documentation.html');
+        push @help_items, $doc_item->('Documentation fetchconfig',     'fetchconfig-documentation.html');
+        push @help_items, $doc_item->('GNU GPL v3',                    'LICENSE.html');
+        push @help_items, $doc_item->('Additional terms fetchconfig-web', 'LICENSE-ADDITIONS.html');
+        push @help_items, $doc_item->('Privacy policy fetchconfig-web',   'PRIVACY.html');
+        my $help_menu = $group->('Help', @help_items);
+
         # Log out is a state-changing action, so it's a POST form with a
         # CSRF token (styled as a plain link), not a GET <a>.
         $menu = qq{<nav class="menu">}
@@ -13555,7 +13936,7 @@ sub page_head {
               . $setup_menu
               . $tools_menu
               . $user_menu
-              . qq{<a class="menu-flat" href="$help_page">Help</a>}
+              . $help_menu
               . qq{</nav>}
               . qq{<div class="user-info">$u &nbsp;|&nbsp; }
               . qq{<form method="POST" action="$action" class="logout-form">}
@@ -13577,6 +13958,43 @@ sub page_head {
         # while the installed version is below MIN_FETCHCONFIG_VERSION, or
         # can't be determined).
         $warn_banner .= fetchconfig_version_warning();
+
+        # Device table changed outside the application (tripwire). Detection in
+        # the current request sets the global (editor-open case). Detection in
+        # do_login redirects, so it also left a one-shot per-user notice in
+        # app_state; read and clear it here for the first page after login.
+        my $ext = $EXTERNAL_CHANGE_NOTICE;
+        if (!defined $ext || $ext eq '') {
+            my $sdbh = db_connect();
+            if ($sdbh) {
+                my ($pending, $ok) = app_state_get($sdbh, "external_notice:$user");
+                if ($ok && defined $pending && $pending ne '') {
+                    $ext = $pending;
+                    # one-shot: blank it so it shows only once (the web user has
+                    # UPDATE but not DELETE on app_state, so clear by emptying).
+                    app_state_set($sdbh, "external_notice:$user", '', $user);
+                }
+                $sdbh->disconnect;
+            }
+        }
+        if (defined $ext && $ext ne '') {
+            # Only admins may open the audit log, so only they get the link; a
+            # user with just the edit-device-table right sees the notice alone.
+            my $review = $is_admin
+                ? qq{ Review it in <a href="} . esc(script_url() . '?action=tool_audit')
+                  . qq{">the audit log</a>.}
+                : '';
+            # On the device-table editor and the bulk editor, make clear that
+            # what is loaded below already reflects that external change -- so
+            # the user is editing the current on-disk table, not a stale copy,
+            # and saving will build on it.
+            my $here = ($title eq 'Edit device table' || $title eq 'Bulk edit devices')
+                ? ' The editor below has loaded this changed table, so you are'
+                  . ' editing the current content.'
+                : '';
+            $warn_banner .= qq{<div class="ext-change-warning">&#9888; } . esc($ext)
+                . esc($here) . $review . qq{</div>};
+        }
     }
 
     # The login / config-error page (no $user) gets a full-page backdrop image
@@ -13808,7 +14226,7 @@ $backdrop_css
   .btn:hover { background: #164a8f; }
   .action-row { display: flex; align-items: center; gap: 0.6em; margin: 0.8em 0; }
   /* Backup Now spinner overlay */
-  #backup-overlay { position: fixed; inset: 0; z-index: 200;
+  #backup-overlay, .backup-overlay { position: fixed; inset: 0; z-index: 200;
                     background: rgba(20,30,40,0.6);
                     display: flex; align-items: center; justify-content: center; }
   /* Custom confirmation dialog -- same look as the spinner box. */
@@ -13894,6 +14312,10 @@ $backdrop_css
   .pw-warning { background: #ffe9a8; border-bottom: 1px solid #e6c34d; color: #6b5200;
                 padding: 0.6em 1em; font-size: 0.9em; }
   .pw-warning a { color: #1a5fb4; }
+  /* Device table changed outside the application: prominent amber bar. */
+  .ext-change-warning { background: #fff3cd; border-bottom: 2px solid #e0a800; color: #7a5c00;
+                        padding: 0.6em 1em; font-size: 0.9em; }
+  .ext-change-warning a { color: #1a5fb4; }
   /* fetchconfig too-old / undetermined: a prominent red bar. */
   .version-warning { background: #ffddd6; border-bottom: 2px solid #c0362c; color: #7a1c14;
                      padding: 0.8em 1em; font-size: 1.02em; text-align: center; }
