@@ -11,6 +11,18 @@ title bar's nav row:
 > cannot be determined. The minimum is set by the `MIN_FETCHCONFIG_VERSION`
 > constant in `fetchconfig-web.cgi`.
 
+> [!CAUTION]
+> **Long backups and web server timeouts.** While *Backup Now* or the *Empty
+> Backup Cleanup* scan runs, fetchconfig-web sends a keepalive (an HTML
+> comment) every 10 s, so the web server's inactivity timeout (Apache
+> `Timeout`, default 300 s) only needs to be longer than 10 s, and
+> `BACKUP_TIMEOUT` may exceed it. `BACKUP_TIMEOUT` (default 120 s) must be
+> higher than the longest backup run of any device in the device table
+> (bounded by its `timeout`, `fetch_timeout` and `banner_timeout` options).
+> A reverse proxy or load balancer in front of the web server must not buffer
+> the response, otherwise its own timeout applies. Closing the browser tab
+> during a run terminates it (audited as `ABORTED`).
+
 1. Login against the PostgreSQL user database (see "Configuration" and the
    `fetchconfig-web-dbsetup.pl` setup script below).
 2. List all Device-IDs (parsed from the fetchconfig device table) with their
@@ -302,7 +314,6 @@ defaults). You can also create it by hand:
 ```
 # /etc/fetchconfig-web.cfg -- fetchconfig-web configuration (key = value)
 DEVICE_TABLE            = /usr/local/fetchconfig/device_table
-REPOSITORY              = /usr/local/fetchconfig/config
 FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
 LOG_MAX_DEVICES         = 1000
 MAX_PARALLEL_SCAN       = 1
@@ -314,6 +325,7 @@ FETCHCONFIG_BIN         = fetchconfig.pl
 BACKUP_DEVICE_TABLE     = /usr/local/fetchconfig/backup
 USE_SUDO_FOR_BACKUP_NOW = 1
 SUDO_BIN                = /usr/bin/sudo
+BACKUP_TIMEOUT          = 120
 SESSION_DIR             = /www/fetchconfig-web/sessions
 BACKUP_TMP_DIR          = /www/fetchconfig-web/sessions
 SESSION_TTL             = 28800
@@ -341,7 +353,7 @@ Format and loading:
   stripped, so `COPYRIGHT = "2026 (c) ..."` and the bare form are equivalent.
 - Whole-line `#` comments and blank lines are ignored. A `#` *inside* a value
   is kept (e.g. `COPYRIGHT = 2026 #1 vendor` works).
-- `DEVICE_TABLE`, `REPOSITORY`, `FETCHCONFIG_PATH`, `FETCHCONFIG_BIN`, `SESSION_DIR`, `DBinst`,
+- `DEVICE_TABLE`, `FETCHCONFIG_PATH`, `FETCHCONFIG_BIN`, `SESSION_DIR`, `DBinst`,
   `DBuser`, and `DBhost` are **required**; the rest fall back to built-in
   defaults if absent (`BACKUP_TMP_DIR` defaults to `SESSION_DIR`;
   `BACKUP_DEVICE_TABLE`, where the device-table editor writes its
@@ -368,6 +380,12 @@ Format and loading:
   releases used a single `FETCHCONFIG_BIN` holding the full path -- update
   old config files to the two-key form; the old single-key form is no longer
   accepted.)
+- **`BACKUP_TIMEOUT`** (seconds, default `120`, `0` = no limit) is the
+  wall-clock limit for one *Backup Now* run and for the *Empty Backup Cleanup*
+  scan. On expiry the `fetchconfig.pl` child is terminated and the output
+  captured so far is shown. It must be higher than the longest backup run of
+  any device; thanks to the 10 s keepalive it may exceed the web server
+  timeout (Apache `Timeout`) -- see the warning at the top of this document.
 - **`MAX_PARALLEL_SCAN`** (default `1`) sets how many device checks the Tools
   scan tools ("devices without backups" and "consistent backup suffixes") run
   concurrently in the browser. (The empty-backup tool is no longer a per-device
@@ -378,6 +396,24 @@ Format and loading:
   server hosting fetchconfig can comfortably handle -- and note that browsers
   also cap connections per host (about 6), which bounds the effective
   parallelism.
+
+**Repository.** There is no `REPOSITORY` setting (removed in 1.53). The
+repository of a device is taken from the device table exactly as
+`fetchconfig.pl` resolves it: the device's own `repository=` option, else its
+model's `default:` line(s) (all `default:` lines of a model merge; the last
+one wins). `repository` is mandatory for every fetchconfig model and fetchconfig
+has no global fallback, so a device without one fails in cron runs and in
+*Backup Now* alike. An old config file that still contains `REPOSITORY` keeps
+working; the key is ignored and shown as `invalid` (obsolete) in *Tools ->
+Show fetchconfig-web.cfg*.
+
+**FATAL ERROR banner.** A solid red banner directly below the title bar, on
+every page after login, reports a device table that cannot be used at all:
+
+- `FATAL ERROR: Device table not found: <path> (<reason>)` -- `DEVICE_TABLE`
+  cannot be read;
+- `FATAL ERROR: No repository found in <path> ...` -- no device line and no
+  `default:` line sets `repository=`.
 
 **Permissions:** the file holds the database password in clear text, so it
 must be readable by the web-server user but no one else. With the web server
@@ -458,9 +494,13 @@ it to display something else. `COPYRIGHT` is read from the config file.
   temp table contains, in this order: every **global directive line** from
   `$DEVICE_TABLE` (`find_directive_lines()` -- any line whose first token
   ends in a colon: the model `default:` lines, the `email:` notification
-  line, and any other such directive), then a `default: <model>
-  repository=$REPOSITORY` line, then the **verbatim** target device line
-  (`find_device_table_line()`). Two things matter here, both learned the
+  line, the `directory:` allow-list, and any other such directive), then
+  the **verbatim** target device line (`find_device_table_line()`). No
+  repository is added: the device's repository comes from its own line or
+  its model's `default:` line(s), resolved by `fetchconfig.pl` exactly as for
+  a cron run. (Before 1.53 a `default: <model> repository=$REPOSITORY` line
+  was appended after the real directives; it overrode the model's own
+  `repository=` and sent the backup to the wrong directory.) Two things matter here, both learned the
   hard way against fetchconfig 9.28-ACME:
     - The device line is written **verbatim** -- `repository=` is *not*
       appended to it. fetchconfig treats everything after the host column
@@ -482,7 +522,10 @@ it to display something else. `COPYRIGHT` is read from the config file.
   device is backed up. The temp file holds cleartext credentials, so it is
   created mode 0600 in `$BACKUP_TMP_DIR` (a web-writable, non-web-served
   directory, defaulting to `$SESSION_DIR`) and unlinked the moment the run
-  finishes, success or failure. Unlike every other call in this app, stdout
+  finishes, success or failure. Leftovers from a run that was killed before
+  it could unlink its file (SIGKILL) are removed by the next Backup Now once
+  they are older than `BACKUP_TIMEOUT` + 300 s (24 h with
+  `BACKUP_TIMEOUT = 0`). Unlike every other call in this app, stdout
   and stderr are **merged** here on purpose -- for a live run,
   `fetchconfig.pl`'s `info:`/`debug:` transcript (connecting, retrieving,
   saved-to, or any error) is exactly what you want to see. The button is a
@@ -490,6 +533,18 @@ it to display something else. `COPYRIGHT` is read from the config file.
   connection to the device and writes a new file), and the follow-up
   "Return to backups" link is a plain GET back to the device's backup list,
   which shows the new backup once `fetchconfig.pl` has written it.
+- **Keepalive and abort.** While `fetchconfig.pl` runs, the page start is
+  flushed and an HTML comment (`<!-- keepalive -->`) is written every 10 s
+  (`$KEEPALIVE_INTERVAL`), so the web server's inactivity timeout cannot end
+  a long run; only `BACKUP_TIMEOUT` limits it. The same applies to the *Empty
+  Backup Cleanup* data requests, which now send their header before the scan.
+  If the request ends during the run -- the browser tab is closed (the
+  keepalive write fails) or the web server sends SIGTERM (httpd 2.2 mod_cgi
+  does so on client disconnect or its own timeout, followed by SIGKILL ~3 s
+  later) -- the `fetchconfig.pl` child is terminated, the temp table removed
+  and the run audited as `ABORTED`. SIGPIPE is ignored during the run and
+  reset to default in the child, so `fetchconfig.pl` and its ssh/telnet
+  children see normal signal behaviour.
 - On the backup list page, "Backup Now", "Compare Selected", and "Side by
   Side Selected" sit together at the top, above the table. Backup Now is
   its own POST form; the two compare buttons drive a single GET form
@@ -1490,19 +1545,47 @@ The tables are created by `fetchconfig-web-dbsetup.pl` on a fresh install, or
 added to an existing database with the idempotent, PostgreSQL 8.2-compatible
 `fetchconfig-web-audit.sql` (also folded into `fetchconfig-web-dbupdate.sql`).
 
+#### Show fetchconfig-web.cfg
+
+Read-only view of `/etc/fetchconfig-web.cfg` (`?action=tool_show_cfg`, admin
+only) as a table with the columns **Status | Option | Value | Default |
+Range**. The keys are listed in file order, grouped by the file's
+`# --- <title> ---` comment lines (a lighter header-coloured row per group;
+other comments and blank lines are skipped). The file is parsed exactly like
+the application reads it: the first `=` splits key and value, both are
+trimmed, one pair of surrounding quotes is stripped, and the last occurrence
+of a key wins. After the file's keys, a final group *Not in config file*
+lists every known key that is absent, in gray, with its default.
+
+Status:
+
+- `valid` -- a known key whose value matches the range shown;
+- `invalid` (red) -- an unknown key (ignored by the application), an obsolete
+  key (`REPOSITORY`), a value outside the range (e.g. `HTTPS_ENABLED = yes`,
+  where the application silently uses the default), or an earlier duplicate
+  ("overridden by line N"); the reason is shown under the status;
+- `nonexistent` (gray) -- not in the file; the default applies.
+
+The Default column is always gray. `DBpass`, and any unknown key that looks
+like a password (e.g. a mistyped `DBpasswd`), is shown as `****`; a malformed
+line containing "pass" is not shown at all. A config file with an invalid
+integer, an invalid URL path or a missing required key never gets this far --
+the application then shows the configuration error on the login page instead.
+The key list, defaults and ranges come from one registry in the script
+(`@CFG_KEYS`); a test keeps it in sync with what `read_config()` reads.
+
 #### Disk space
 
 The Tools menu has a **Disk space** tool (`?action=tool_diskspace`, admin only,
-read-only) showing free space for the repository directories (the global `REPOSITORY`
-plus every distinct per-device/default `repository=`, resolved through the
-allow-list) and the `report_dir`, **grouped by filesystem** -- one table per
+read-only) showing free space for the repository directories (every distinct
+per-device/default `repository=`, resolved through the allow-list) and the `report_dir`, **grouped by filesystem** -- one table per
 filesystem, titled "Filesystem 1", "Filesystem 2", and so on. Because every
 directory in a table is on the same filesystem, the free/total/use% figures are
 read once and shown on the first directory (in black) and repeated in gray on the
 rest; "unknown" is shown if a filesystem's figures cannot be read, and
 directories that do not exist are listed under an "Unavailable" table.
-A **Source** column marks each directory as `configured` (in use: the global
-`REPOSITORY`, a device/default `repository=`, or the `report_dir`), `allowed`
+A **Source** column marks each directory as `configured` (in use: a
+device/default `repository=`, or the `report_dir`), `allowed`
 (in the `directory:` allow-list -- repository and report kinds -- but not in
 use), or `allowed and configured` (both). All `$aliases` are expanded to their
 real path, so an aliased value and its allow-list entry are the same directory.
@@ -1819,8 +1902,8 @@ Notes on specific paths:
   found-empties (`-z` = 1) or inconsistent-suffix (`-s` = 1/2) result is
   reported as a normal outcome, while any other non-zero exit becomes an error.
 - **Backup now does not use `-devices=T`.** It writes a temporary,
-  single-device table (mode 0600) containing that device's own line verbatim
-  plus a `default: <model> repository=$REPOSITORY` line, and runs
+  single-device table (mode 0600) containing all directive lines and that
+  device's own line verbatim (no repository is injected), and runs
   `-devices=<tmp>`. The device line is copied verbatim -- `repository=` is
   never appended to it -- because appending onto a line whose last field is
   `pass=...` folded the repository path into the password. The temp table is

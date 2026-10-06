@@ -54,6 +54,15 @@ the same visual style as the upstream `fetchconfig-documentation.html`:
   code / bold / italic / links are all rendered.
 - The output has a sticky sidebar with scroll-spy navigation, a hero with
   stat tiles, section "kickers", callouts and styled tables.
+- A blockquote whose first line is a GitHub alert marker (`> [!CAUTION]`,
+  `> [!WARNING]`) renders as a red warning callout; `[!NOTE]`, `[!TIP]` and
+  `[!IMPORTANT]`, or no marker, render as the normal note callout. The marker
+  line itself is not output. GitHub renders the same blocks as alerts.
+- The version in the sidebar pill and hero tile, and the minimum fetchconfig
+  version in the hero warning, are read from the `APP_VERSION_INTERNAL` and
+  `MIN_FETCHCONFIG_VERSION` constants in `fetchconfig-web.cgi` (same directory
+  as `render-doc.py`). If the file or a constant is missing, `?` is shown and a
+  warning is printed to stderr.
 
 The stylesheet is embedded in the script, so the generated HTML has no
 external assets other than Google Fonts, and the script needs no companion

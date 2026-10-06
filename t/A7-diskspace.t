@@ -7,13 +7,14 @@ use File::Temp qw(tempdir);
 my $dir = tempdir(CLEANUP => 1);
 my $repoB = "$dir/repoB"; mkdir $repoB;
 my $rep   = "$dir/rep";   mkdir $rep;
-my ($cfg) = make_config(REPOSITORY => "$dir/repoA");
+my ($cfg) = make_config();
 mkdir "$dir/repoA";
 load_cgi($cfg); main::read_config();
 my %kv; { open(my $r,'<',$cfg); while(<$r>){chomp; my($a,$b)=split/\s*=\s*/,$_,2; $kv{$a}=$b if defined $b;} close($r); }
 my $tbl = $kv{DEVICE_TABLE};
 open(my $w,'>',$tbl) or die $!;
 print $w "email: to=a\@b,report_dir=$rep\n";
+print $w "default: cisco-ios repository=$dir/repoA\n";
 print $w "cisco-ios sw1 10.0.0.1 user=x,pass=p,repository=$repoB\n";
 print $w "cisco-ios sw2 10.0.0.2 user=x,pass=p\n";
 close($w);
@@ -23,7 +24,7 @@ local *main::read_allowed_dirs = sub { +{ present => 0, rc => 0 } };
 
 my $rows = main::collect_repo_dirs();
 my %byp; push @{$byp{$_->{purpose}}}, $_->{dir} for @$rows;
-ok( (grep { $_ eq "$dir/repoA" } @{$byp{Repository}}), 'global REPOSITORY included');
+ok( (grep { $_ eq "$dir/repoA" } @{$byp{Repository}}), 'model default: repository= included');
 ok( (grep { $_ eq $repoB }       @{$byp{Repository}}), 'per-device repository= included');
 is_deeply($byp{'Report dir'}, [$rep], 'report_dir included once');
 

@@ -496,8 +496,8 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v1.50</span>
-      <span class="pill">GPL&#8209;2.0+</span>
+      <span class="pill">v1.53</span>
+      <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
     <nav>
@@ -519,13 +519,22 @@
       <h1>fetchconfig-web</h1>
       <p class="lede">This document describes how <strong>fetchconfig-web</strong> processes personal data, for the purpose of the EU General Data Protection Regulation (GDPR). It is written for the <strong>operator</strong> -- the organisation that installs and runs the software -- who is the party responsible under the GDPR.</p>
       <div class="callout warn" style="margin-top:1rem">
-        <p><strong>Requires fetchconfig 9.65 or newer.</strong> The installed
+        <p><strong>Requires fetchconfig 9.67 or newer.</strong> The installed
         version is read from <code>&lt;FETCHCONFIG_PATH&gt;/fetchconfig/Constants.pm</code>;
         a warning banner is shown on every page (after login) if it is older
-        than 9.65 or cannot be determined.</p>
+        than 9.67 or cannot be determined.</p>
+      </div>
+      <div class="callout warn" style="margin-top:1rem">
+        <p><strong>Long backups and web server timeouts.</strong> While Backup
+        Now or the Empty Backup Cleanup scan runs, a keepalive is sent every
+        10 s, so the web server's inactivity timeout (Apache <code>Timeout</code>)
+        only needs to be longer than 10 s and <code>BACKUP_TIMEOUT</code> may exceed
+        it. <code>BACKUP_TIMEOUT</code> must be higher than the longest backup
+        run of any device in the device table. A reverse proxy or load balancer
+        in front must not buffer the response.</p>
       </div>
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">1.50</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">1.53</span><span class="label">version</span></div>
         <div class="hero-stat"><span class="num">Perl CGI</span><span class="label">single file</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>

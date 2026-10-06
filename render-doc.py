@@ -15,9 +15,11 @@
 # pipe tables, fenced code blocks, ordered/unordered lists with wrapped
 # continuation lines, blockquote callouts, inline code/bold/italic/links) and
 # emits a sticky-sidebar layout with scroll-spy navigation, a hero with stat
-# tiles, numbered section kickers, callouts and styled tables. Bump the
-# version shown in the sidebar pill / hero by editing the two v1.NN / 1.NN
-# literals in the page template below.
+# tiles, numbered section kickers, callouts and styled tables. The version
+# shown in the sidebar pill / hero and the minimum fetchconfig version in the
+# hero warning are read from the APP_VERSION / MIN_FETCHCONFIG_VERSION
+# constants in fetchconfig-web.cgi (same directory as this script), so they
+# cannot drift from the code.
 #
 # fetchconfig-web - Web interface for the fetchconfig network configuration tool
 # Copyright (C) 2026  Rainer Tammer
@@ -727,11 +729,19 @@ def render_body(body):
         # inner content as blocks (so nested fenced code, lists and multiple
         # paragraphs inside a blockquote render correctly instead of being
         # flattened into one line).
+        # A GitHub alert marker on the first line ("> [!CAUTION]" etc.) picks
+        # the callout style: CAUTION/WARNING -> red "warn", anything else ->
+        # "note". The marker line itself is not rendered.
         if re.match(r'^> ?', ln):
             inner = []
             while i < n and re.match(r'^> ?', body[i]):
                 inner.append(re.sub(r'^> ?', '', body[i])); i += 1
-            out.append('<div class="callout note">%s</div>' % render_body(inner))
+            cls = 'note'
+            am = re.match(r'^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$', inner[0]) if inner else None
+            if am:
+                cls = 'warn' if am.group(1) in ('WARNING', 'CAUTION') else 'note'
+                inner = inner[1:]
+            out.append('<div class="callout %s">%s</div>' % (cls, render_body(inner)))
             continue
         # unordered list (absorb indented continuation lines into the item)
         if re.match(r'^\s*[-*] ', ln):
@@ -829,6 +839,26 @@ page_title = 'fetchconfig-web &mdash; ' + html.escape(eyebrow)
 lede = inline(' '.join(_lede_lines)) if _lede_lines else \
     "A single-file Perl CGI front-end for fetchconfig: a browser UI for browsing device backups, viewing and comparing configurations, checking run status, and editing the device table &mdash; backed by a PostgreSQL user database."
 
+# Version strings for the sidebar pill, hero tile and hero warning, read from
+# fetchconfig-web.cgi next to this script. Falls back to '?' with a warning on
+# stderr if the file or a constant is missing.
+def cgi_constant(name):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fetchconfig-web.cgi')
+    try:
+        with io.open(path, encoding='utf-8', errors='replace') as f:
+            txt = f.read()
+    except (IOError, OSError) as e:
+        sys.stderr.write("render-doc.py: cannot read %s: %s\n" % (path, e))
+        return '?'
+    m = re.search(r"^use constant %s\s*=>\s*'([^']+)'" % re.escape(name), txt, re.M)
+    if not m:
+        sys.stderr.write("render-doc.py: constant %s not found in %s\n" % (name, path))
+        return '?'
+    return m.group(1)
+
+app_version = html.escape(cgi_constant('APP_VERSION_INTERNAL'))
+min_fc_version = html.escape(cgi_constant('MIN_FETCHCONFIG_VERSION'))
+
 # Precompute the dynamic pieces so the template below uses only simple named
 # placeholders -- str.format() (used for Python 2.7 compatibility) cannot call
 # functions or run expressions inside the template.
@@ -866,8 +896,8 @@ page = (u"""<!DOCTYPE html>
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v1.50</span>
-      <span class="pill">GPL&#8209;2.0+</span>
+      <span class="pill">v{app_version}</span>
+      <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
     <nav>
@@ -882,13 +912,22 @@ page = (u"""<!DOCTYPE html>
       <h1>fetchconfig-web</h1>
       <p class="lede">{lede}</p>
       <div class="callout warn" style="margin-top:1rem">
-        <p><strong>Requires fetchconfig 9.65 or newer.</strong> The installed
+        <p><strong>Requires fetchconfig {min_fc_version} or newer.</strong> The installed
         version is read from <code>&lt;FETCHCONFIG_PATH&gt;/fetchconfig/Constants.pm</code>;
         a warning banner is shown on every page (after login) if it is older
-        than 9.65 or cannot be determined.</p>
+        than {min_fc_version} or cannot be determined.</p>
+      </div>
+      <div class="callout warn" style="margin-top:1rem">
+        <p><strong>Long backups and web server timeouts.</strong> While Backup
+        Now or the Empty Backup Cleanup scan runs, a keepalive is sent every
+        10 s, so the web server's inactivity timeout (Apache <code>Timeout</code>)
+        only needs to be longer than 10 s and <code>BACKUP_TIMEOUT</code> may exceed
+        it. <code>BACKUP_TIMEOUT</code> must be higher than the longest backup
+        run of any device in the device table. A reverse proxy or load balancer
+        in front must not buffer the response.</p>
       </div>
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">1.50</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">{app_version}</span><span class="label">version</span></div>
         <div class="hero-stat"><span class="num">Perl CGI</span><span class="label">single file</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
@@ -937,6 +976,7 @@ page = (u"""<!DOCTYPE html>
 </body>
 </html>
 """).format(style=style, lede=lede, nav=nav, sections=sections,
-            page_title=page_title, eyebrow=html.escape(eyebrow))
+            page_title=page_title, eyebrow=html.escape(eyebrow),
+            app_version=app_version, min_fc_version=min_fc_version)
 _open_utf8(HTML_OUT, 'w').write(to_text(page))
 print("wrote %s: %d bytes, %d sections" % (HTML_OUT, len(page), len(sec_html)))

@@ -104,7 +104,6 @@ sub make_config {
     mkdir File::Spec->catdir($fcp, 'fetchconfig');
     my %cfg = (
         DEVICE_TABLE     => $dt,
-        REPOSITORY       => File::Spec->catdir($dir, 'repo'),
         FETCHCONFIG_PATH => $fcp,
         FETCHCONFIG_BIN  => 'fetchconfig.pl',
         SESSION_DIR      => $sess,

@@ -1,3 +1,59 @@
+1.53
+====
+* Backup Now and Empty Backup Cleanup: keepalive. While fetchconfig.pl runs,
+  the page start is flushed and an HTML comment is written every 10 s
+  ($KEEPALIVE_INTERVAL), so the web server's inactivity timeout (Apache
+  Timeout) no longer ends long runs ("(70007)The timeout specified has
+  expired: ap_content_length_filter: apr_bucket_read() failed");
+  BACKUP_TIMEOUT may now exceed it. The Empty Backup Cleanup data requests
+  print their header before the scan.
+* Abort handling in run_command_capture(): SIGTERM/SIGINT/SIGHUP (the web
+  server ending the request) and a failed keepalive write (client gone) now
+  terminate the fetchconfig.pl child, remove the Backup Now temp device table
+  (cleartext credentials) and audit the run as ABORTED. Previously the CGI
+  died on SIGTERM, leaving the temp table and an orphaned fetchconfig.pl, and
+  the run was not audited. SIGPIPE is ignored during the run and reset in the
+  child. A failed exec() in the child now uses POSIX::_exit (no END/DESTROY
+  of the parent's DB handles or temp files).
+* Backup Now sweeps stale fcweb-dev-*.tbl temp tables in BACKUP_TMP_DIR older
+  than BACKUP_TIMEOUT + 300 s (24 h with BACKUP_TIMEOUT = 0).
+* Docs: red warning box (README.md, INSTALL.md, all rendered HTML heroes) on
+  long backups and web server timeouts; BACKUP_TIMEOUT added to the
+  configuration reference and samples; INSTALL.md troubleshooting entry for
+  the 70007 error.
+* New test t/B2-keepalive-abort.t.
+* REPOSITORY removed from fetchconfig-web.cfg. fetchconfig has no global
+  repository (repository is mandatory per device/model), so the setting was
+  only a fallback fetchconfig itself does not have. The repository is now
+  always resolved from the device table like fetchconfig.pl does (device
+  repository=, else the model's default: lines, last one wins).
+* Fixed: Backup Now appended "default: <model> repository=$REPOSITORY" AFTER
+  the real directives, overriding the model's own default: repository=. For a
+  device whose repository comes from its model default and differs from
+  REPOSITORY, the backup and its .status went to REPOSITORY, where the backup
+  list (-l), view, compare and status never look. The temp table now holds
+  only the directive lines and the device line. Verified against fetchconfig
+  9.67.
+* New FATAL ERROR banner (red, directly below the title bar, every page after
+  login): "Device table not found: <path> (<reason>)" when DEVICE_TABLE cannot
+  be read, and "No repository found in <path>" when no device or default: line
+  sets repository=.
+* New tool Tools -> Show fetchconfig-web.cfg (admin, read-only): all settings
+  as Status | Option | Value | Default | Range, grouped by the file's
+  "# --- <title> ---" headings, followed by the known keys not in the file.
+  Status valid / invalid (red: unknown or obsolete key, bad value, earlier
+  duplicate) / nonexistent (gray). DBpass is shown as ****. Keys, defaults and
+  ranges come from one registry (@CFG_KEYS), kept in sync with read_config()
+  by t/B3-cfg-view.t.
+* fetchconfig-web-dbsetup.pl no longer writes REPOSITORY.
+* Version bumped to 1.53.
+* render-doc.py: version pill/tile and minimum fetchconfig version are read
+  from fetchconfig-web.cgi (they were stale literals: v1.50 and 9.65); licence
+  pill corrected to GPL-3.0+; GitHub alert blockquotes ([!CAUTION]/[!WARNING])
+  render as red warning callouts.
+* INSTALL.md: removed stale version/test-count literals (1.50, 267 tests);
+  licence corrected to GPL-3.0-or-later.
+
 1.52
 ====
 * Requires fetchconfig 9.67 or newer (MIN_FETCHCONFIG_VERSION bumped from 9.65);

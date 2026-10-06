@@ -48,6 +48,7 @@ use IPC::Open3;
 use IO::Select;
 use Symbol qw(gensym);
 use Errno ();
+use POSIX ();
 use Algorithm::Diff qw(sdiff);
 
 # --------------------------------------------------------------------------
@@ -61,12 +62,12 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.52';
+use constant APP_VERSION => '1.53';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '1.52';
+use constant APP_VERSION_INTERNAL => '1.53';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -76,6 +77,18 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
 use constant MIN_FETCHCONFIG_VERSION => '9.67';
 
+# Seconds between keepalive writes to the client while a long external command
+# runs (Backup Now, Empty Backup Cleanup; see run_command_capture). Keeps the
+# web server's inactivity timeout (Apache Timeout, FcgidIOTimeout) from firing,
+# so BACKUP_TIMEOUT may exceed it. Must stay well below those timeouts.
+# A package variable (not a constant) only so the tests can shorten it.
+our $KEEPALIVE_INTERVAL = 10;
+
+# Coderef called by run_command_capture() immediately and then every
+# $KEEPALIVE_INTERVAL seconds while the command runs. Set it (with local) only
+# AFTER the HTTP header has been printed; see html_keepalive().
+our $RUN_KEEPALIVE;
+
 my $CONFIG_FILE = '/etc/fetchconfig-web.cfg';
 my $APP_TITLE   = 'fetchconfig-web';
 my $COOKIE_NAME = 'fcweb_sid';
@@ -83,7 +96,7 @@ my $COOKIE_NAME = 'fcweb_sid';
 # Everything below is populated from $CONFIG_FILE by read_config(), called
 # at startup (further down, once $cgi exists so a config error can be shown
 # as a proper page). Declared here, before any sub that closes over them.
-my ($DEVICE_TABLE, $REPOSITORY, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFIG_BIN_FULL,
+my ($DEVICE_TABLE, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFIG_BIN_FULL,
     $USE_SUDO_FOR_BACKUP_NOW, $SUDO_BIN,
     $SESSION_DIR, $BACKUP_TMP_DIR, $SESSION_TTL, $SESSION_MAX_LIFETIME, $DEVICE_ID_FIELD,
     $BACKUP_DEVICE_TABLE,
@@ -117,6 +130,184 @@ sub parse_config_file {
     return (\%kv, undef);
 }
 
+# Registry of every /etc/fetchconfig-web.cfg key, for the "Show
+# fetchconfig-web.cfg" tool (show_tool_show_cfg): validation type, default and
+# allowed range as display text. The validation mirrors read_config(); the
+# view is stricter only where the range text says so (e.g. absolute paths).
+# t/B3-cfg-view.t checks that this list and the keys read_config() reads stay
+# in sync. Order = the order of the "Not in config file" group.
+#   type: path (absolute), path_opt (empty or absolute), file (bare file
+#         name), help_file (file name or absolute path), str_req (non-empty),
+#         str (anything), int (with min/max), bool (0|1), url (absolute URL path)
+my @CFG_KEYS = (
+    # key                       type         default                                   range / format                 min  max
+    [ 'DEVICE_TABLE',           'path',      '(required)',                             'absolute path' ],
+    [ 'FETCHCONFIG_PATH',       'path',      '(required)',                             'absolute path' ],
+    [ 'FETCHCONFIG_BIN',        'file',      '(required)',                             'file name in FETCHCONFIG_PATH' ],
+    [ 'FETCHCONFIG_LOG',        'path_opt',  '(empty: log viewer not configured)',     'absolute path' ],
+    [ 'LOG_MAX_DEVICES',        'int',       '1000',                                   'integer >= 0',                 0, undef ],
+    [ 'MAX_PARALLEL_SCAN',      'int',       '1',                                      'integer 1..5',                 1, 5 ],
+    [ 'BACKUP_DEVICE_TABLE',    'path',      '/usr/local/fetchconfig/backup',          'absolute path' ],
+    [ 'USE_SUDO_FOR_BACKUP_NOW','bool',      '1',                                      '0 | 1' ],
+    [ 'SUDO_BIN',               'path',      '/usr/bin/sudo',                          'absolute path' ],
+    [ 'BACKUP_TIMEOUT',         'int',       '120',                                    'integer >= 0 seconds (0 = no limit)', 0, undef ],
+    [ 'TEMPLATE_HELPER',        'path_opt',  '(empty: template editor writes directly)', 'absolute path' ],
+    [ 'SESSION_DIR',            'path',      '(required)',                             'absolute path' ],
+    [ 'BACKUP_TMP_DIR',         'path',      '= SESSION_DIR',                          'absolute path' ],
+    [ 'SESSION_TTL',            'int',       '28800',                                  'integer >= 1 seconds',         1, undef ],
+    [ 'SESSION_MAX_LIFETIME',   'int',       '86400',                                  'integer >= 0 seconds (0 = no cap)', 0, undef ],
+    [ 'DEVICE_ID_FIELD',        'int',       '1',                                      'integer >= 0',                 0, undef ],
+    [ 'DBinst',                 'str_req',   '(required)',                             'database name' ],
+    [ 'DBuser',                 'str_req',   '(required)',                             'database role' ],
+    [ 'DBpass',                 'str',       '(empty)',                                'string' ],
+    [ 'DBhost',                 'str_req',   '(required)',                             'host name or address' ],
+    [ 'PROTECTED_USER',         'str_req',   'admin',                                  'user name' ],
+    [ 'MIN_PASSWORD_LENGTH',    'int',       '8',                                      'integer >= 1',                 1, undef ],
+    [ 'DEFAULT_PASSWORD',       'str',       'fetchconfig',                            'string' ],
+    [ 'HTTPS_ENABLED',          'bool',      '0',                                      '0 | 1' ],
+    [ 'SHOW_RENDER_TIME',       'bool',      '0',                                      '0 | 1' ],
+    [ 'FONT_BASE_URL',          'url',       '/fetchconfig-web/fonts',                 'absolute URL path' ],
+    [ 'IMAGE_BASE_URL',         'url',       '/fetchconfig-web/images',                'absolute URL path' ],
+    [ 'HELP_BASE_URL',          'url',       '/fetchconfig-web',                       'absolute URL path' ],
+    [ 'HELP_DIR',               'path_opt',  '(directory of HELP_FILE)',               'absolute path' ],
+    [ 'HELP_FILE',              'help_file', '/www/pub/fetchconfig-web/help.html',     'file name, or absolute path (old style)' ],
+    [ 'APP_VERSION',            'str',       APP_VERSION,                              'string (overrides the shown version)' ],
+    [ 'COPYRIGHT',              'str',       DEFAULT_COPYRIGHT,                        'string' ],
+);
+
+# Keys that were valid in an earlier release and are now ignored.
+my %CFG_OBSOLETE = (
+    REPOSITORY => 'obsolete since 1.53 -- remove it (the repository comes from the device table)',
+);
+
+# Validate one value against its registry entry. Returns undef if valid, else
+# the reason (short text). An empty value means "use the default" for every
+# key that has one, as in read_config().
+sub cfg_value_problem {
+    my ($ent, $v) = @_;
+    my ($key, $type, undef, $range, $min, $max) = @$ent;
+    $v = '' unless defined $v;
+    if ($v eq '') {
+        return ($ent->[2] eq '(required)' || $type eq 'str_req') ? 'must not be empty' : undef;
+    }
+    if    ($type eq 'path' || $type eq 'path_opt') { return "must be an $range" unless $v =~ m{^/}; }
+    elsif ($type eq 'file')      { return 'must be a file name (no "/")' if $v =~ m{/}; }
+    elsif ($type eq 'help_file') { return "must be a $range" if $v =~ m{/} && $v !~ m{^/}; }
+    elsif ($type eq 'int') {
+        return "must be an $range"
+            unless $v =~ /^\d+$/ && (!defined $min || $v >= $min) && (!defined $max || $v <= $max);
+    }
+    elsif ($type eq 'bool') { return 'must be 0 or 1 (default used instead)' unless $v =~ /^[01]$/; }
+    elsif ($type eq 'url')  {
+        return "must be an $range of letters, digits, '.', '_', '~', '-', '/'"
+            unless $v =~ m{^/[A-Za-z0-9._~/-]*$};
+    }
+    return undef;
+}
+
+# Should this key's value be hidden in the view? DBpass, and any unknown key
+# that looks like a password (e.g. a mistyped DBpass).
+sub cfg_key_is_secret {
+    my ($key, $known) = @_;
+    return 1 if $key eq 'DBpass';
+    return (!$known && $key =~ /pass|secret/i) ? 1 : 0;
+}
+
+# Build the rows of the config view from the config file at $path, in file
+# order. Returns (\@rows, $error). Rows:
+#   { type => 'group', title }
+#   { type => 'key', status => valid|invalid|nonexistent, key, value, default,
+#     range, note, line, secret }
+# Group rows come from "# --- <title> ---" comment lines (emitted only when a
+# key follows); other comments and blank lines are skipped. Parsing matches
+# parse_config_file(): first "=" splits, both sides trimmed, one pair of
+# surrounding quotes stripped; the LAST occurrence of a key wins. After the
+# file's keys, every registry key absent from the file is listed (status
+# nonexistent) under the group "Not in config file".
+sub cfg_view_rows {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or return (undef, "cannot open $path: $!");
+    my @lines = <$fh>;
+    close($fh);
+    my %ent = map { $_->[0] => $_ } @CFG_KEYS;
+
+    # Pass 1: last line number per key (the effective occurrence).
+    my (%last, @parsed);
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        $line =~ s/\r?\n\z//;
+        my $num = $i + 1;
+        if ($line =~ /^\s*#/) {
+            if ($line =~ /^\s*#\s*-{2,}\s*(.*?)\s*-*\s*$/ && $1 ne '') {
+                push @parsed, { kind => 'heading', title => $1 };
+            }
+            next;
+        }
+        next if $line =~ /^\s*$/;
+        my ($k, $v) = split(/=/, $line, 2);
+        if (!defined $v || !defined $k || $k =~ /^\s*$/) {
+            push @parsed, { kind => 'bad', raw => $line, num => $num };
+            next;
+        }
+        $k =~ s/^\s+|\s+$//g;
+        $v =~ s/^\s+|\s+$//g;
+        $v =~ s/^(['"])(.*)\1$/$2/;
+        push @parsed, { kind => 'kv', key => $k, value => $v, num => $num };
+        $last{$k} = $num;
+    }
+
+    # Pass 2: rows in file order.
+    my (@rows, $pending_group);
+    my $emit = sub {
+        my ($row) = @_;
+        if (defined $pending_group) {
+            push @rows, { type => 'group', title => $pending_group };
+            undef $pending_group;
+        }
+        push @rows, $row;
+    };
+    for my $p (@parsed) {
+        if ($p->{kind} eq 'heading') { $pending_group = $p->{title}; next; }
+        if ($p->{kind} eq 'bad') {
+            my $raw = $p->{raw};
+            $raw = '(line hidden: it may contain a password)' if $raw =~ /pass|secret/i;
+            $emit->({ type => 'key', status => 'invalid', key => $raw, value => '',
+                      default => '', range => '', line => $p->{num}, secret => 0,
+                      note => 'not "KEY = value" -- ignored' });
+            next;
+        }
+        my ($k, $v, $num) = @{$p}{qw(key value num)};
+        my $e = $ent{$k};
+        my %row = (type => 'key', key => $k, value => $v, line => $num,
+                   default => ($e ? $e->[2] : ''), range => ($e ? $e->[3] : ''),
+                   secret => cfg_key_is_secret($k, $e ? 1 : 0));
+        if ($last{$k} != $num) {
+            @row{qw(status note)} = ('invalid', "overridden by line $last{$k}");
+        } elsif ($CFG_OBSOLETE{$k}) {
+            @row{qw(status note)} = ('invalid', $CFG_OBSOLETE{$k});
+        } elsif (!$e) {
+            @row{qw(status note)} = ('invalid', 'unknown key -- ignored');
+        } else {
+            my $why = cfg_value_problem($e, $v);
+            @row{qw(status note)} = defined $why ? ('invalid', $why) : ('valid', '');
+        }
+        $emit->(\%row);
+    }
+
+    # Registry keys that are not in the file.
+    my @missing = grep { !exists $last{ $_->[0] } } @CFG_KEYS;
+    if (@missing) {
+        $pending_group = 'Not in config file';
+        for my $e (@missing) {
+            $emit->({ type => 'key', status => 'nonexistent', key => $e->[0], value => '',
+                      default => $e->[2], range => $e->[3], line => undef,
+                      secret => 0,
+                      note => ($e->[2] eq '(required)' ? 'required -- missing' : '') });
+        }
+    }
+    return (\@rows, undef);
+}
+
 # Load $CONFIG_FILE into the config lexicals above. Returns undef on
 # success or an error string on failure (missing file, or a missing
 # required key). Non-critical settings fall back to sensible defaults so an
@@ -126,14 +317,13 @@ sub read_config {
     my ($kv, $err) = parse_config_file($CONFIG_FILE);
     return $err if $err;
 
-    for my $req (qw(DEVICE_TABLE REPOSITORY FETCHCONFIG_PATH FETCHCONFIG_BIN SESSION_DIR
+    for my $req (qw(DEVICE_TABLE FETCHCONFIG_PATH FETCHCONFIG_BIN SESSION_DIR
                     DBinst DBuser DBhost)) {
         return "$CONFIG_FILE: required setting '$req' is missing"
             unless defined $kv->{$req} && $kv->{$req} ne '';
     }
 
     $DEVICE_TABLE    = $kv->{DEVICE_TABLE};
-    $REPOSITORY      = $kv->{REPOSITORY};
     # fetchconfig install directory and executable name are separate settings;
     # the executable is run as "<FETCHCONFIG_PATH>/<FETCHCONFIG_BIN>", and the
     # version-check module is looked for under $FETCHCONFIG_PATH/fetchconfig/.
@@ -922,6 +1112,8 @@ sub main {
                            scalar($cgi->param('msg')));
         } elsif ($action eq 'tool_diskspace') {
             show_tool_diskspace($user);
+        } elsif ($action eq 'tool_show_cfg') {
+            show_tool_show_cfg($user);
         } elsif ($action eq 'tool_audit') {
             show_tool_audit($user);
         } elsif ($action eq 'audit_data') {
@@ -3708,9 +3900,11 @@ sub device_model {
 }
 
 # Resolve the repository directory that applies to a device, from the device
-# table: the device's own repository= option first, else the "default:"
-# repository= for that device's model, else the global $REPOSITORY. Returns
-# undef if the device isn't found.
+# table, exactly as fetchconfig.pl does: the device's own repository= option
+# first, else the "default:" repository= for that device's model (all
+# default: lines of a model merge; the last one wins). There is no further
+# fallback -- fetchconfig has none either (repository is mandatory). Returns
+# undef if the device isn't found or has no repository.
 sub device_repository {
     my ($dev) = @_;
     my ($content, $err) = slurp_device_table();
@@ -3734,7 +3928,8 @@ sub device_repository {
     return undef unless defined $model;                 # device not in table
     my $repo = (defined $dev_repo && $dev_repo ne '') ? $dev_repo
              : (defined $default_repo{$model} && $default_repo{$model} ne '') ? $default_repo{$model}
-             : $REPOSITORY;                             # last-resort fallback
+             : undef;                                   # none: fetchconfig fails too
+    return undef unless defined $repo;
     # The stored value may be a $alias from the directory: allow-list; the web
     # code accesses the repository directly on the filesystem (e.g. the .status
     # file), so expand the alias to its real path here.
@@ -3795,7 +3990,7 @@ sub read_status_file {
 
 # Read the status file for every device in the device table, resolving each
 # device's repository (its own repository= option, else its model's default:
-# repository=, else the global $REPOSITORY). Returns an arrayref of hashrefs:
+# repository=; no further fallback). Returns an arrayref of hashrefs:
 #   { id, info => {status fields} | undef }   (info undef = no status file)
 # in device-table order. Parses the device table once for efficiency.
 sub read_all_status {
@@ -3827,7 +4022,6 @@ sub read_all_status {
         my $repo;
         for my $p (@{ $r->{opts} }) { $repo = $p->[1] if $p->[0] eq 'repository'; }
         $repo = $default_repo{ $r->{model} } if (!defined $repo || $repo eq '');
-        $repo = $REPOSITORY                    if (!defined $repo || $repo eq '');
         $repo = resolve_dir_alias('repository', $repo);   # $alias -> real path
         my $info;
         if (defined $repo && $repo ne '' && valid_id($dev)) {
@@ -4476,8 +4670,23 @@ sub show_backup_now {
         . esc($dev) . qq{</a></p>\n};
     print qq{<h1>Backup Now: } . esc($dev) . qq{</h1>\n};
 
-    my ($output, $status, $err) = run_backup_now($dev);
+    # Keepalive while fetchconfig.pl runs, so the web server's inactivity
+    # timeout cannot end a long run (see run_command_capture).
+    my ($output, $status, $err, $aborted);
+    {
+        local $RUN_KEEPALIVE = html_keepalive();
+        ($output, $status, $err, $aborted) = run_backup_now($dev);
+    }
     my $return_link = script_url() . '?dev=' . CGI::escape($dev);
+
+    # The request was terminated mid-run: nobody receives the page any more,
+    # so only audit it (the child is already killed, the temp table removed).
+    if ($aborted) {
+        audit(action => 'backup_now', object_type => 'device', object_id => $dev,
+              detail => 'ABORTED: web request ended during the run (client disconnected'
+                      . ' or terminated by the web server); run terminated');
+        return;
+    }
 
     # fetchconfig.pl ALWAYS exits 0, so the exit status is meaningless and is
     # not used (nor logged). A run has failed if:
@@ -5033,8 +5242,8 @@ sub show_tool_logo {
 
 # Collect the distinct directories fetchconfig-web writes into, for the Disk
 # space tool. Returns an arrayref of { purpose, dir } in display order:
-#   - every repository: the global $REPOSITORY plus each distinct repository=
-#     actually used by a device/default (resolved through the allow-list),
+#   - every repository: each distinct repository= actually used by a
+#     device/default line (resolved through the allow-list),
 #   - the report_dir.
 # Deduped by real path (a repo that equals the report_dir still appears once per
 # purpose, but identical repository paths collapse to one row).
@@ -5063,9 +5272,6 @@ sub collect_repo_dirs {
     };
 
     # --- CONFIGURED: directories actually in use ---
-    # Global repository.
-    $add->('Repository', $real->('repository', $REPOSITORY), 'configured')
-        if defined $REPOSITORY && $REPOSITORY ne '';
     # Per-device / per-default repository= values.
     my ($content, $err) = slurp_device_table();
     if (!$err && defined $content) {
@@ -5104,6 +5310,77 @@ sub collect_repo_dirs {
         push @rows, { purpose => $o->{purpose}, dir => $o->{dir}, source => $src };
     }
     return \@rows;
+}
+
+# "Show fetchconfig-web.cfg" tool (?action=tool_show_cfg, admin only,
+# read-only): every setting of $CONFIG_FILE in a table -- Status | Option |
+# Value | Default | Range -- grouped by the file's "# --- <title> ---"
+# headings, followed by the known keys that are not in the file. Status:
+# valid; invalid (unknown/obsolete key, bad value, or an earlier duplicate)
+# in red; nonexistent (not in the file, default applies) in gray. DBpass
+# (and any unknown password-like key) is shown as "****".
+sub show_tool_show_cfg {
+    my ($user) = @_;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to use Tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Show fetchconfig-web.cfg', $user, 'full');
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Show fetchconfig-web.cfg</h2>\n};
+    print qq{<p class="muted">Read-only view of <code>} . esc($CONFIG_FILE) . qq{</code>, }
+        . qq{in file order and grouped by its <code># --- &lt;title&gt; ---</code> headings.<br>}
+        . qq{Settings not in the file use their default. Changes take effect with }
+        . qq{the next request.</p>\n};
+
+    my ($rows, $err) = cfg_view_rows($CONFIG_FILE);
+    if ($err) {
+        print qq{<p class="error">} . esc($err) . qq{</p>\n</div>\n};
+        print page_foot();
+        return;
+    }
+    my %n = (valid => 0, invalid => 0, nonexistent => 0);
+    $n{ $_->{status} }++ for grep { $_->{type} eq 'key' } @$rows;
+    print qq{<p>$n{valid} valid, }
+        . ($n{invalid} ? qq{<span class="cfg-count-invalid">$n{invalid} invalid</span>} : '0 invalid')
+        . qq{, $n{nonexistent} nonexistent.</p>\n};
+
+    print qq{<div class="sbs-scroll"><table class="list cfg-view">\n};
+    print qq{<thead><tr><th>Status</th><th>Option</th><th>Value</th>}
+        . qq{<th>Default</th><th>Range</th></tr></thead>\n<tbody>\n};
+    for my $r (@$rows) {
+        if ($r->{type} eq 'group') {
+            print qq{<tr class="cfg-group"><td colspan="5">} . esc($r->{title}) . qq{</td></tr>\n};
+            next;
+        }
+        my $st = $r->{status};
+        my $val;
+        if ($st eq 'nonexistent') {
+            $val = '';
+        } elsif ($r->{value} eq '') {
+            $val = qq{<span class="cfg-empty">(empty)</span>};
+        } elsif ($r->{secret}) {
+            $val = '****';
+        } else {
+            $val = esc($r->{value});
+        }
+        my $note = (defined $r->{note} && $r->{note} ne '')
+            ? qq{<div class="cfg-note">} . esc($r->{note}) . qq{</div>} : '';
+        my $line = defined $r->{line} ? qq{ title="line $r->{line}"} : '';
+        print qq{<tr class="cfg-$st">}
+            . qq{<td class="cfg-st">} . esc($st) . $note . qq{</td>}
+            . qq{<td class="cfg-key"$line>} . esc($r->{key}) . qq{</td>}
+            . qq{<td class="cfg-val">$val</td>}
+            . qq{<td class="cfg-def">} . esc($r->{default}) . qq{</td>}
+            . qq{<td class="cfg-range">} . esc($r->{range}) . qq{</td>}
+            . qq{</tr>\n};
+    }
+    print qq{</tbody></table></div>\n};
+    print qq{</div>\n};
+    print page_foot();
 }
 
 # Disk space tool (?action=tool_diskspace, admin only, read-only). Shows free
@@ -7556,15 +7833,16 @@ HTML
 # here, where the command actually runs.
 sub empty_bk_result_fragment {
     my ($mode) = @_;
-    my ($output, $status, $err) = $mode eq 'delete'
+    my ($output, $status, $err, $aborted) = $mode eq 'delete'
         ? run_empty_bk_delete() : run_empty_bk_check();
     $output = '' unless defined $output;
     my $found = ($output =~ /found\s+(\d+)\s+zero-byte\s+backup/i) ? $1 : undef;
 
     if ($mode eq 'delete') {
         audit(action=>'empty_bk_delete', object_type=>'backup',
-              detail=>(defined $found ? "deleted $found empty (zero-byte) backup(s)"
-                                       : 'empty-backup cleanup run'));
+              detail=>($aborted ? 'ABORTED: web request ended during the empty-backup cleanup; run terminated'
+                       : defined $found ? "deleted $found empty (zero-byte) backup(s)"
+                       : 'empty-backup cleanup run'));
     }
 
     my $h = '';
@@ -7604,13 +7882,19 @@ sub show_empty_bk_check_data {
         print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
         print "Not allowed.\n"; return;
     }
-    my $frag = empty_bk_result_fragment('check');
-    if ($cgi->param('inline')) {
-        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
-        print page_head('Check for empty backups', $user, 'checkout');
+    # Header (and page start) first, so the keepalive can flow while the scan
+    # runs (see run_command_capture).
+    my $inline = $cgi->param('inline') ? 1 : 0;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Check for empty backups', $user, 'checkout') if $inline;
+    my $frag;
+    {
+        local $RUN_KEEPALIVE = html_keepalive();
+        $frag = empty_bk_result_fragment('check');
+    }
+    if ($inline) {
         print $frag; print top_bottom_nav(); print page_foot();
     } else {
-        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
         print $frag;
     }
 }
@@ -7620,13 +7904,19 @@ sub do_empty_bk_delete_data {
         print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
         print "Not allowed.\n"; return;
     }
-    my $frag = empty_bk_result_fragment('delete');
-    if ($cgi->param('inline')) {
-        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
-        print page_head('Delete empty backups', $user, 'checkout');
+    # Header (and page start) first, so the keepalive can flow while the scan
+    # runs (see run_command_capture).
+    my $inline = $cgi->param('inline') ? 1 : 0;
+    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Delete empty backups', $user, 'checkout') if $inline;
+    my $frag;
+    {
+        local $RUN_KEEPALIVE = html_keepalive();
+        $frag = empty_bk_result_fragment('delete');
+    }
+    if ($inline) {
         print $frag; print top_bottom_nav(); print page_foot();
     } else {
-        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
         print $frag;
     }
 }
@@ -12896,6 +13186,44 @@ sub fetchconfig_version_cached {
     return $ver;
 }
 
+# FATAL device-table problems, shown as a red banner directly below the title
+# bar on every page after login. Returns the problem text, or '' if none:
+#   - the configured DEVICE_TABLE cannot be read;
+#   - no device line and no default: line sets repository=. repository is
+#     mandatory for every fetchconfig model and fetchconfig has no global
+#     fallback, so no device can be backed up, listed or shown.
+# Computed once per request ($_fatal_error_cache).
+our $_fatal_error_cache;
+sub fatal_error_text {
+    return $_fatal_error_cache if defined $_fatal_error_cache;
+    my $msg = '';
+    my ($content, $err) = slurp_device_table();
+    if (!defined $content) {
+        my $why = defined $err ? $err : '';
+        $why =~ s/^Cannot read device table \Q$DEVICE_TABLE\E:\s*//;
+        $msg = "Device table not found: $DEVICE_TABLE" . ($why ne '' ? " ($why)" : '');
+    } else {
+        my $have = 0;
+        for my $r (@{ parse_device_table($content) }) {
+            next unless $r->{kind} eq 'device' || $r->{kind} eq 'default';
+            for my $p (@{ $r->{opts} || [] }) {
+                if (defined $p->[0] && $p->[0] eq 'repository'
+                    && defined $p->[1] && $p->[1] ne '') { $have = 1; last; }
+            }
+            last if $have;
+        }
+        $msg = "No repository found in $DEVICE_TABLE (no device or default: line sets repository=)"
+            unless $have;
+    }
+    return $_fatal_error_cache = $msg;
+}
+
+sub fatal_error_banner {
+    my $t = fatal_error_text();
+    return '' if $t eq '';
+    return qq{<div class="fatal-error"><strong>FATAL ERROR:</strong> } . esc($t) . qq{</div>};
+}
+
 # Build the version-warning HTML shown in the page header (or '' if the
 # installed version is OK). Returns an HTML snippet (already escaped/safe).
 sub fetchconfig_version_warning {
@@ -13573,20 +13901,19 @@ sub compare_backups {
     return ($out, $status, undef);
 }
 
-# Run a live backup for $dev right now, via fetchconfig.pl's -line=
-# instead of -devices=: we pull that device's own line straight out of
-# $DEVICE_TABLE and pass it directly on the command line, with
-# "repository=$REPOSITORY" appended so fetchconfig.pl knows where to store
-# the result without needing -devices= at all.
+# Run a live backup for $dev right now: a minimal temporary device table
+# (all directive lines + this one device line) is passed via -devices=.
 #
 # Unlike run_fetchconfig() (used everywhere else), this intentionally
 # MERGES stdout and stderr: for a live backup run, fetchconfig.pl's
 # info:/debug: transcript is exactly what the admin wants to see (what it
 # connected to, what happened, whether it succeeded), not noise to filter
 # out the way it is for the backup listing.
-# Returns ($output, $exit_status, $error).
+# Returns ($output, $exit_status, $error, $aborted).
 sub run_backup_now {
     my ($dev) = @_;
+
+    sweep_stale_backup_tables();
 
     my ($line, $find_err) = find_device_table_line($dev);
     return (undef, undef, $find_err) if $find_err;
@@ -13594,8 +13921,6 @@ sub run_backup_now {
 
     my ($directives, $dir_err) = find_directive_lines();
     return (undef, undef, $dir_err) if $dir_err;
-
-    my ($model) = split(/\s+/, $line);   # column 0 = model name
 
     # Write the device line VERBATIM. Do NOT append "repository=..." onto
     # it: fetchconfig treats everything after the host column as the
@@ -13605,20 +13930,23 @@ sub run_backup_now {
     # That broke authentication for exactly the devices that set their own
     # user=/pass= on the device line, while default-credential devices --
     # which have no pass= on the line to corrupt -- were unaffected. This
-    # matches the observed symptom precisely. Repository is instead set the
-    # normal way, as a model `default:` line placed with the other defaults
-    # (a real table already carries one; this guarantees it and pins it to
-    # $REPOSITORY without touching the device line's own options).
+    # matches the observed symptom precisely.
+    #
+    # No repository is injected: the device's repository comes from its own
+    # line or its model's default: line(s), resolved by fetchconfig.pl exactly
+    # as for a cron run (an injected fallback default: used to override the
+    # model's own repository= and send the backup to the wrong directory). A
+    # device without any repository fails here just as it does from cron.
     #
     # Build a minimal device table -- all global directive lines from the
-    # real table (model `default:`s, the `email:` notification line, etc.),
-    # a repository default, and just this one device line -- and hand it to
+    # real table (model `default:`s, the `email:` notification line, the
+    # `directory:` allow-list, etc.) and just this one device line -- and hand it to
     # fetchconfig.pl via -devices=, the same way the working CLI run does.
     # Carrying the directives through is what makes the backup-summary
     # e-mail still get sent. The file holds cleartext credentials, so it is
     # created 0600 in a non-web-served, web-writable directory
     # ($BACKUP_TMP_DIR) and unlinked the moment the run finishes.
-    my @table = (@$directives, "default: $model repository=$REPOSITORY", $line);
+    my @table = (@$directives, $line);
     my $content = join("\n", @table) . "\n";
 
     my ($fh, $tmp) = eval {
@@ -13636,69 +13964,141 @@ sub run_backup_now {
         ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, '-devices=' . $tmp)
         : ($FETCHCONFIG_BIN_FULL, '-devices=' . $tmp);
 
-    my ($out, $status, $err) = run_command_capture(@cmd);
+    my ($out, $status, $err, $aborted) = run_command_capture(@cmd);
     unlink($tmp);   # remove the cleartext-credential file immediately
-    return ($out, $status, $err);
+    return ($out, $status, $err, $aborted);
 }
 
 # Fork/exec an arbitrary external command (list-form -- never a shell) with
-# stdout and stderr MERGED, and return ($output, $exit_status, $error).
+# stdout and stderr MERGED, and return ($output, $exit_status, $error, $aborted).
 # Used by run_backup_now(), which wants a live command's full merged
 # transcript on success or failure, unlike run_fetchconfig() (used for
 # -l/-g/-m/-z), which keeps stdout and stderr separate so fetchconfig.pl's
 # own diagnostics never contaminate parsed data.
+#
+# Keepalive: if $RUN_KEEPALIVE is set, it is called once right away (which
+# flushes the already-printed header/page start to the web server) and then
+# every $KEEPALIVE_INTERVAL seconds until the command ends. A false return means
+# the write failed (client or web server gone) and aborts the run.
+#
+# Abort: the web server ends a CGI by SIGTERM, followed by SIGKILL ~3 s later
+# (httpd 2.2 mod_cgi: client disconnect, its own Timeout, graceful stop).
+# SIGTERM/SIGINT/SIGHUP are caught so the child is killed and the caller can
+# still remove temp files and audit; $aborted is then true. SIGPIPE is ignored
+# while the command runs so a keepalive write to a vanished client fails
+# instead of killing the process. The child gets all four back at default.
 sub run_command_capture {
     my (@cmd) = @_;
+    my $keepalive = $RUN_KEEPALIVE;
+    my $parent    = $$;
+    my $aborted   = 0;
+    my $on_signal = sub { $aborted = 1 if $$ == $parent };
+    local $SIG{TERM} = $on_signal;
+    local $SIG{INT}  = $on_signal;
+    local $SIG{HUP}  = $on_signal;
+    local $SIG{PIPE} = 'IGNORE';
+
     my $pid = open(my $fh, '-|');
     if (!defined $pid) {
-        return (undef, undef, "Cannot fork: $!");
+        return (undef, undef, "Cannot fork: $!", 0);
     }
     if ($pid == 0) {
+        $SIG{$_} = 'DEFAULT' for qw(TERM INT HUP PIPE);
         open(STDERR, '>&STDOUT');
-        exec(@cmd) or exit(127);
+        # On exec failure use _exit: never run END blocks / DESTROY (DB
+        # handles, temp files) of the parent's copy in this child.
+        exec(@cmd) or POSIX::_exit(127);
     }
     # Read with a wall-clock timeout so a hung backup (e.g. a device that never
-    # responds) cannot block the request forever. On timeout the child is
-    # killed but the OUTPUT COLLECTED SO FAR is preserved and returned together
-    # with the error, so the caller can still show the partial transcript.
-    my $out     = '';
-    my $timeout = (defined $BACKUP_TIMEOUT && $BACKUP_TIMEOUT > 0) ? $BACKUP_TIMEOUT : 0;
+    # responds) cannot block the request forever. On timeout or abort the child
+    # is killed but the OUTPUT COLLECTED SO FAR is preserved and returned
+    # together with the error, so the caller can still show the partial
+    # transcript.
+    my $out       = '';
+    my $timeout   = (defined $BACKUP_TIMEOUT && $BACKUP_TIMEOUT > 0) ? $BACKUP_TIMEOUT : 0;
     my $timed_out = 0;
+    my $client_gone = 0;
     my $err;
-    eval {
-        my $rin = ''; vec($rin, fileno($fh), 1) = 1;
-        my $deadline = $timeout ? (time() + $timeout) : undef;
-        while (1) {
-            my $wait = $timeout ? ($deadline - time()) : undef;
-            if ($timeout && $wait <= 0) { $timed_out = 1; last; }
-            my $n = select(my $rout = $rin, undef, undef, $timeout ? $wait : undef);
-            if ($n && $n > 0) {
-                my $buf;
-                my $got = sysread($fh, $buf, 65536);
-                last unless defined $got;   # error
-                last if $got == 0;          # EOF -- child finished
-                $out .= $buf;
-            } elsif (!defined $n || $n < 0) {
-                next if $!{EINTR};
-                last;
-            }
-            # $n == 0 means select timed out -> loop re-checks the deadline.
+    my $rin = ''; vec($rin, fileno($fh), 1) = 1;
+    my $now      = time();
+    my $deadline = $timeout   ? $now + $timeout : undef;
+    my $next_ka  = $keepalive ? $now            : undef;
+    while (1) {
+        last if $aborted;
+        $now = time();
+        if ($deadline && $now >= $deadline) { $timed_out = 1; last; }
+        if (defined $next_ka && $now >= $next_ka) {
+            unless ($keepalive->()) { $aborted = 1; $client_gone = 1; last; }
+            $next_ka = $now + $KEEPALIVE_INTERVAL;
         }
-        1;
-    };
-    if ($timed_out) {
+        my $wait;
+        $wait = $deadline - $now if $deadline;
+        $wait = $next_ka - $now
+            if defined $next_ka && (!defined $wait || $next_ka - $now < $wait);
+        my $n = select(my $rout = $rin, undef, undef, $wait);
+        if ($n && $n > 0) {
+            my $buf;
+            my $got = sysread($fh, $buf, 65536);
+            if (!defined $got) {
+                next if $!{EINTR};
+                last;                       # read error
+            }
+            last if $got == 0;              # EOF -- child finished
+            $out .= $buf;
+        } elsif (!defined $n || $n < 0) {
+            next if $!{EINTR};              # signal; loop re-checks $aborted
+            last;
+        }
+        # $n == 0 means select timed out -> loop re-checks deadline/keepalive.
+    }
+    if ($timed_out || $aborted) {
         kill('TERM', $pid);
         # give it a moment, then force-kill, so the pipe can close
         select(undef, undef, undef, 0.3);
         kill('KILL', $pid);
-        $err = "Backup timed out after ${timeout}s and was terminated"
-             . " (showing the output captured so far).";
+        if ($timed_out) {
+            $err = "Backup timed out after ${timeout}s and was terminated"
+                 . " (showing the output captured so far).";
+        } else {
+            $err = "Run aborted and terminated: the web request ended during the run ("
+                 . ($client_gone ? 'client disconnected' : 'terminated by the web server')
+                 . "; showing the output captured so far).";
+        }
     }
     close($fh);
     my $raw    = $?;
     my $status = ($raw >= 0) ? ($raw >> 8) : 0;
-    $status = undef if $timed_out;   # exit status is meaningless after a kill
-    return (collapse_model_registration($out), $status, $err);
+    $status = undef if $timed_out || $aborted;   # exit status is meaningless after a kill
+    return (collapse_model_registration($out), $status, $err, $aborted);
+}
+
+# Keepalive writer for $RUN_KEEPALIVE: writes an HTML comment to the currently
+# selected output handle and flushes it (setting $| flushes pending output, so
+# the first call also pushes the header and page start to the web server).
+# Valid only after the HTTP header has been printed: the bytes are body
+# content. Returns print's result (false when the client is gone).
+sub html_keepalive {
+    return sub { local $| = 1; return print "<!-- keepalive -->\n"; };
+}
+
+# Remove Backup Now temp device tables (cleartext credentials) left behind by a
+# run that was killed before it could unlink its own (e.g. SIGKILL). Only our
+# own fcweb-dev-XXXXXXXX.tbl regular files, and only once they are older than
+# any run can be (BACKUP_TIMEOUT + 300 s; 24 h when BACKUP_TIMEOUT is 0).
+# fetchconfig.pl reads the table at start-up, so this never affects a live run.
+sub sweep_stale_backup_tables {
+    my $max_age = ($BACKUP_TIMEOUT && $BACKUP_TIMEOUT > 0) ? $BACKUP_TIMEOUT + 300 : 86400;
+    opendir(my $dh, $BACKUP_TMP_DIR) or return;
+    my $now = time();
+    while (defined(my $f = readdir($dh))) {
+        next unless $f =~ /\Afcweb-dev-[A-Za-z0-9_]{8}\.tbl\z/;
+        my $path = "$BACKUP_TMP_DIR/$f";
+        my @st = lstat($path) or next;
+        next unless -f _;
+        next if $now - $st[9] < $max_age;
+        unlink($path);
+    }
+    closedir($dh);
 }
 
 # =============================================================================
@@ -13894,6 +14294,7 @@ sub page_head {
                 $su->('Empty Directory Cleanup',                      '?action=tool_empty_dir'),
                 $su->('Orphaned Backup Cleanup',               '?action=tool_orphan'),
                 $su->('Restore device table',                         '?action=tool_restore'),
+                $su->('Show fetchconfig-web.cfg',                     '?action=tool_show_cfg'),
                 $su->('Template viewer',                              '?action=view_templates'),
                 $su->('Upload report logo',                           '?action=tool_logo'),
                 $su->('View fetchconfig log',                         '?action=view_log'));
@@ -13954,6 +14355,10 @@ sub page_head {
             $warn_banner = qq{<div class="pw-warning">} . esc($text)
                 . qq{ <a href="$user_page">Change password</a></div>};
         }
+        # FATAL device-table problems (table unreadable, or no repository
+        # configured anywhere): first, directly below the title bar.
+        $warn_banner = fatal_error_banner() . $warn_banner;
+
         # fetchconfig version warning (shown to logged-in users on every page
         # while the installed version is below MIN_FETCHCONFIG_VERSION, or
         # can't be determined).
@@ -14316,6 +14721,26 @@ $backdrop_css
   .ext-change-warning { background: #fff3cd; border-bottom: 2px solid #e0a800; color: #7a5c00;
                         padding: 0.6em 1em; font-size: 0.9em; }
   .ext-change-warning a { color: #1a5fb4; }
+  /* Show fetchconfig-web.cfg: header, lighter group rows, white data rows;
+     invalid in red, nonexistent in gray, defaults always gray. */
+  table.cfg-view { width: 100%; }
+  table.cfg-view th { background: #d3dae3; }
+  table.cfg-view td { vertical-align: top; }
+  table.cfg-view td.cfg-st { min-width: 7em; }
+  table.cfg-view td.cfg-def, table.cfg-view td.cfg-range { white-space: normal; min-width: 9em; }
+  table.cfg-view tr.cfg-group td, table.cfg-view tr.cfg-group:hover td
+        { background: #eef1f5; font-weight: 600; }
+  table.cfg-view tr.cfg-invalid td.cfg-st, table.cfg-view tr.cfg-invalid td.cfg-key,
+  table.cfg-view tr.cfg-invalid td.cfg-val { color: #c0362c; font-weight: 600; }
+  table.cfg-view tr.cfg-nonexistent td { color: #999; }
+  table.cfg-view td.cfg-def { color: #888; }
+  table.cfg-view .cfg-note { font-size: 0.85em; font-weight: normal; color: #777;
+        white-space: normal; max-width: 22em; }
+  table.cfg-view .cfg-empty { color: #999; font-style: italic; font-weight: normal; }
+  .cfg-count-invalid { color: #c0362c; font-weight: 600; }
+  /* FATAL device-table problem: solid red bar, first below the title bar. */
+  .fatal-error { background: #c0362c; border-bottom: 2px solid #7a1c14; color: #fff;
+                 padding: 0.8em 1em; font-size: 1.05em; text-align: center; }
   /* fetchconfig too-old / undetermined: a prominent red bar. */
   .version-warning { background: #ffddd6; border-bottom: 2px solid #c0362c; color: #7a1c14;
                      padding: 0.8em 1em; font-size: 1.02em; text-align: center; }

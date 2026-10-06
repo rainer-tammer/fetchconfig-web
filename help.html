@@ -94,7 +94,7 @@
         own page: Audit log, Check devices for consistent backup suffixes,
         Check site assignment, Devices without backups, Disk space,
         Empty Backup Cleanup, Empty Directory Cleanup, Orphaned Backup Cleanup, Restore device table,
-        Template viewer, Upload report logo, View fetchconfig log.</li>
+        Show fetchconfig-web.cfg, Template viewer, Upload report logo, View fetchconfig log.</li>
     <li><strong>User</strong> &mdash; Change your password (everyone); Users
         list, Add user and Sites (administrators only).</li>
     <li><strong>Help</strong> &mdash; this page.</li>
@@ -502,6 +502,13 @@
   (black on the first directory, repeated in gray on the rest). Needs the
   optional <code>Filesys::Df</code> Perl module; if it is missing the tool shows
   how to install it.</p>
+  <p><strong>Show fetchconfig-web.cfg</strong> &mdash; read-only table of all
+  settings in <code>/etc/fetchconfig-web.cfg</code> (Status, Option, Value,
+  Default, Range), grouped by the file's <code># --- title ---</code> headings,
+  followed by the settings that are not in the file (gray, default applies).
+  <em>invalid</em> (red) marks an unknown or obsolete key, a value outside its
+  range, or an earlier duplicate. The database password is shown as
+  <code>****</code>.</p>
   <p><strong>Upload report logo</strong> &mdash; upload a logo image into the
   report directory (the <code>report_dir</code> on the <code>email:</code> line)
   and manage the logos already there. Accepted: <code>.png</code>/<code>.jpg</code>/<code>.gif</code>,

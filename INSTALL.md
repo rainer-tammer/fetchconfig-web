@@ -1,7 +1,7 @@
 # fetchconfig-web -- Installation
 
-This guide takes you from an empty web server to a running **fetchconfig-web
-1.50** instance, and covers upgrading an existing installation. It is the
+This guide takes you from an empty web server to a running **fetchconfig-web**
+instance, and covers upgrading an existing installation. It is the
 operator's checklist; the full feature reference lives in `README.md`
 (rendered as `fetchconfig-web-documentation.html`).
 
@@ -29,6 +29,8 @@ fetchconfig's device table and repository.
   - [Step 8 -- First login](#step-8----first-login)
 - [Part 3 -- Upgrading](#part-3----upgrading)
   - [Upgrading the script](#upgrading-the-script)
+  - [Upgrading to 1.53](#upgrading-to-153)
+  - [Upgrading the database to 1.51 (audit log)](#upgrading-the-database-to-151-audit-log)
   - [Upgrading the database to 1.50](#upgrading-the-database-to-150)
   - [New configuration keys in 1.50](#new-configuration-keys-in-150)
 - [Part 4 -- Verification and troubleshooting](#part-4----verification-and-troubleshooting)
@@ -59,8 +61,8 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
 | `README.md`, `fetchconfig-web-documentation.html` | Full reference documentation (Markdown and rendered HTML). |
 | `INSTALL.md`, `INSTALL.html` | This guide (Markdown and rendered HTML). |
 | `render-doc.py`, `render-doc.md` | Renders the Markdown documents to HTML. |
-| `CHANGES`, `LICENSE`, `Makefile.PL` | Change log, GPL-2.0+ licence, and a `prove`-based test harness. |
-| `t/` | The regression test suite (267 tests). |
+| `CHANGES`, `LICENSE`, `Makefile.PL` | Change log, GPL-3.0-or-later licence, and a `prove`-based test harness. |
+| `t/` | The regression test suite. |
 
 ### Requirements
 
@@ -77,6 +79,18 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
   repository, and **execute access** to `fetchconfig.pl`.
 - Optionally **sudo**, if you want the *Backup Now* button to run live backups
   (see Step 6).
+
+> [!CAUTION]
+> **Long backups and web server timeouts.** While *Backup Now* or the *Empty
+> Backup Cleanup* scan runs, fetchconfig-web sends a keepalive (an HTML
+> comment) every 10 s, so the web server's inactivity timeout (Apache
+> `Timeout`, default 300 s) only needs to be longer than 10 s, and
+> `BACKUP_TIMEOUT` may exceed it. `BACKUP_TIMEOUT` (default 120 s) must be
+> higher than the longest backup run of any device in the device table
+> (bounded by its `timeout`, `fetch_timeout` and `banner_timeout` options).
+> A reverse proxy or load balancer in front of the web server must not buffer
+> the response, otherwise its own timeout applies. Closing the browser tab
+> during a run terminates it (audited as `ABORTED`).
 
 ### Perl modules
 
@@ -124,7 +138,6 @@ in Step 3. The defaults match a typical fetchconfig install.
 |---------|---------|------------|
 | `FETCHCONFIG_PATH` | `/usr/local/fetchconfig` | Where `fetchconfig.pl` lives. |
 | `DEVICE_TABLE` | `/usr/local/fetchconfig/device_table` | fetchconfig's device table (read, and written by the editor). |
-| `REPOSITORY` | `/usr/local/fetchconfig/config` | fetchconfig's backup repository (read). |
 | `BACKUP_DEVICE_TABLE` | `/usr/local/fetchconfig/backup` | Where the editor keeps timestamped `.bak` copies of the device table. Must be writable by the web user. |
 | `SESSION_DIR` | `/var/lib/fetchconfig-web/sessions` | Login sessions (mode 0700, files 0600). Must be writable by the web user. |
 | `BACKUP_TMP_DIR` | same as `SESSION_DIR` | Scratch space for *Backup Now* and the device-table writer lock. Must be writable by the web user. |
@@ -207,7 +220,6 @@ A complete example with the defaults:
 FETCHCONFIG_PATH        = /usr/local/fetchconfig
 FETCHCONFIG_BIN         = fetchconfig.pl
 DEVICE_TABLE            = /usr/local/fetchconfig/device_table
-REPOSITORY              = /usr/local/fetchconfig/config
 BACKUP_DEVICE_TABLE     = /usr/local/fetchconfig/backup
 FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
 
@@ -226,6 +238,8 @@ BACKUP_TMP_DIR          = /var/lib/fetchconfig-web/sessions
 # --- Backup Now via sudo (see Step 6) ---
 USE_SUDO_FOR_BACKUP_NOW = 1
 SUDO_BIN                = /usr/bin/sudo
+# BACKUP_TIMEOUT must exceed the longest backup run of any device
+BACKUP_TIMEOUT          = 120
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 
 # --- accounts ---
@@ -321,7 +335,8 @@ chown <fetchconfig_owner>:<webgroup> /usr/local/fetchconfig/device_table
 chmod 664 /usr/local/fetchconfig/device_table
 ```
 
-Read access is needed to the repository (`REPOSITORY`), the template
+Read access is needed to the repositories (every `repository=` in the device
+table), the template
 directories and `fetchconfig.pl` itself; those keep their normal ownership.
 
 Why in place: the editor cannot use the usual atomic write-temp-then-rename,
@@ -452,6 +467,21 @@ Then hard-reload the browser (Ctrl-F5) so cached JavaScript and CSS are
 refreshed -- several 1.50 changes are client-side, and a stale cache is the
 usual reason a fix "does not appear".
 
+### Upgrading to 1.53
+
+- **Remove `REPOSITORY`** from `/etc/fetchconfig-web.cfg`. The repository now
+  always comes from the device table (device `repository=` or the model's
+  `default:` line), exactly as for `fetchconfig.pl` itself. A leftover
+  `REPOSITORY` line is ignored and shown as `invalid` in *Tools -> Show
+  fetchconfig-web.cfg*.
+- If the device table sets no `repository=` at all, every page shows
+  `FATAL ERROR: No repository found ...` -- add a `default:` line with
+  `repository=` for each model.
+- Before 1.53, *Backup Now* stored backups of devices whose repository comes
+  from a model `default:` line in `REPOSITORY` instead, if the two differed.
+  Check `REPOSITORY` for such device directories and move them into the
+  device's real repository.
+
 ### Upgrading the database to 1.51 (audit log)
 
 Version 1.51 adds an append-only `audit_log` table (plus a small
@@ -548,6 +578,14 @@ editor".** Someone else saved, or a cron job rewrote the table, between your
 open and your save. Nothing was written. Reload the editor and redo the
 change -- this guard is what stops two people overwriting each other.
 
+**Backup Now ends with a blank or truncated page; the Apache error log shows
+`(70007)The timeout specified has expired: ap_content_length_filter:
+apr_bucket_read() failed`.** The web server saw no output for its `Timeout`.
+Since 1.53 the keepalive (every 10 s) prevents this; on older releases raise
+`Timeout` above `BACKUP_TIMEOUT`. If it still occurs, a reverse proxy or load
+balancer in front is buffering the response (see the warning under
+Requirements).
+
 **Backup Now shows "a password is required" or similar sudo text.** The
 sudoers rule from Step 6 is not matching: check the exact web-server user
 and the exact path to `fetchconfig.pl`, and that the file in
@@ -562,7 +600,7 @@ The package ships its regression tests. They run without a database or web
 server (the test harness stubs both) and take under a minute:
 
 ```sh
-cd fetchconfig-web-1.50
+cd fetchconfig-web-<version>
 prove -I t/lib t/
 ```
 
@@ -572,5 +610,5 @@ or, via the included `Makefile.PL`:
 perl Makefile.PL && make test
 ```
 
-All 267 tests should pass. Failures almost always mean a missing Perl module
+All tests should pass. Failures almost always mean a missing Perl module
 on the build host.

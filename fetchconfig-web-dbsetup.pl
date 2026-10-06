@@ -526,7 +526,6 @@ sub cfg_body {
 
 # --- fetchconfig paths ---
 DEVICE_TABLE            = /usr/local/fetchconfig/device_table
-REPOSITORY              = /usr/local/fetchconfig/config
 FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
 LOG_MAX_DEVICES         = 1000
 FONT_BASE_URL           = /fetchconfig-web/fonts
