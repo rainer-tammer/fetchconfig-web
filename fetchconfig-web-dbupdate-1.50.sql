@@ -4,7 +4,7 @@
 -- Adds the site-based access-control tables and columns to an existing
 -- fetchconfig-web database. Run it once with psql:
 --
---   psql -U <DBuser> -d <DBinst> -f fetchconfig-web-dbupdate.sql
+--   psql -U <DBuser> -d <DBinst> -f fetchconfig-web-dbupdate-1.50.sql
 --
 -- (Use the DBuser / DBinst values from /etc/fetchconfig-web.cfg.)
 --

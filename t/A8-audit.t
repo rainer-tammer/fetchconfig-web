@@ -172,6 +172,16 @@ ok(!(grep { ($_->[5]//'') eq 'keep' } @ROWS), 'unchanged option not logged');
     @rows=(); main::audit_check_device_table_change('admin');
     is(scalar(grep { $_->[2] eq 'external_change' } @rows), 0, 'mtime-only touch is not logged');
 
+    # An in-app write (restore, site rename) changes the content but records the
+    # new token via audit_record_device_table_token(), so the next check must
+    # NOT flag it as an external change. Without that call the restore tripped a
+    # false "changed outside this application" banner.
+    $TOK = '400.0:40:' . ('c' x 32);   # new content, as a restore would produce
+    main::audit_record_device_table_token($good, 'admin');   # the app records it
+    @rows=(); main::audit_check_device_table_change('admin');
+    is(scalar(grep { $_->[2] eq 'external_change' } @rows), 0,
+       'in-app write that records the token is not flagged as external');
+
     # Error path: app_state read dies -> warning set, no false log.
     my $bad = do { package FCW_BadDBH; sub new { bless {}, shift }
         sub ping {1} sub disconnect {} sub errstr { 'permission denied' }
@@ -210,6 +220,10 @@ ok(!(grep { ($_->[5]//'') eq 'keep' } @ROWS), 'unchanged option not logged');
     local *main::user_may_edit_table = sub { 0 };
     local *main::user_is_unrestricted = sub { 1 };
     local *main::fetchconfig_version_warning = sub { '' };
+    # Under the unified priority banner (E2), a more severe banner suppresses
+    # the external-change one. Stub the two higher-priority sources off so this
+    # test exercises the external-change banner specifically.
+    local *main::fatal_error_banner = sub { '' };
 
     # (a) in-request global (editor-open case)
     local $main::EXTERNAL_CHANGE_NOTICE = 'The device table was changed outside this application.';

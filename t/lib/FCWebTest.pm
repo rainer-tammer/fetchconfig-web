@@ -138,17 +138,18 @@ sub load_cgi {
     my $q = quotemeta("'/etc/fetchconfig-web.cfg'");
     $src =~ s/$q/"'" . $config_path . "'"/e;
 
-    # Neutralise the file-scope "run" statements so nothing executes (or exits)
+    # Neutralise the file-scope "run" statement so nothing executes (or exits)
     # on eval, while keeping every sub and data-table definition (which tests
-    # need). These three blocks are the only top-level executable code:
-    #   1. the read_config() config-error check + show_login_form/exit
-    #   2. the SESSION_DIR make_path check
-    #   3. the trailing main(); exit 0;
-    # Everything else at file scope is harmless "my %table = (...)" data.
-    $src =~ s/^if \(my \$cfg_err = read_config\(\)\) \{.*?^\}\n//ms;
-    $src =~ s/^if \(!-d \$SESSION_DIR\) \{.*?^\}\n//ms;
-    $src =~ s/^\s*main\(\);\s*$//m;
-    $src =~ s/^\s*exit\s+0;\s*$//m;
+    # need). Since 1.60 the only top-level executable code is the trailing
+    # dual-mode run block:
+    #   my $USE_FCGI = eval { require FCGI; 1 } ? 1 : 0;
+    #   if ($USE_FCGI) { ... accept loop ... exit 0; }
+    #   else           { handle_request(CGI->new); exit 0; }
+    # Everything above it is sub definitions and harmless "my %table = (...)"
+    # data. The per-request bootstrap (config-error check, SESSION_DIR check)
+    # now lives inside sub handle_request and is exercised by calling that sub,
+    # not at file scope. Cut from the $USE_FCGI line to end-of-file.
+    $src =~ s/^my \$USE_FCGI = eval \{ require FCGI.*\z//ms;
 
     # A second load_cgi() in one test process re-defines every sub and constant,
     # which is intentional but otherwise floods the output with "redefined"
@@ -183,6 +184,16 @@ sub load_cgi {
         eval "package main;\nno warnings 'redefine', 'once';\n" . $src . "\n";
     };
     die "loading CGI failed: $@" unless $ok;
+
+    # Since 1.60 the script sets $main::cgi inside handle_request() rather than
+    # at file scope, so after a bare load it is undef. Tests call individual
+    # subs (not handle_request), and many use $cgi->param(...), so provide a
+    # default CGI object the way the pre-1.60 file-scope "my $cgi = CGI->new"
+    # did. A test that wants specific params assigns its own $main::cgi.
+    {
+        no warnings 'once';
+        $main::cgi = CGI->new('');
+    }
     return 1;
 }
 

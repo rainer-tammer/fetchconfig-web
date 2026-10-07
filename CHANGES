@@ -1,5 +1,195 @@
-1.53
+1.60
 ====
+* Security: json_string() now also escapes <, >, / and & (\uXXXX), so a value
+  containing "</script>" cannot break out of an inline <script> block that
+  embeds the JSON (template/editor data blobs).
+* Security headers on every response (via a std_header wrapper): X-Frame-Options
+  DENY, X-Content-Type-Options nosniff, Referrer-Policy same-origin.
+* Error messages no longer leak the raw $! for template-read and session-dir
+  failures; a generic message is shown and the detail is written to the audit
+  log instead.
+* Passwords: bcrypt ($2b$) via Crypt::Bcrypt when installed -- new and changed
+  passwords are stored as bcrypt, and a legacy $apr1$ hash is transparently
+  upgraded to bcrypt on the owner's next successful login. verify_password now
+  supports bcrypt; without the module everything stays $apr1$ (still verified).
+  BCRYPT_COST = 12.
+* Login throttle (credential-stuffing mitigation): failed logins are counted in
+  a new login_attempts table, keyed separately by client IP (hard block) and by
+  username (soft -- extra delay, never a lockout, so an attacker cannot lock out
+  a real user). Default 5 failures / 15-min window / 15-min cooldown. A
+  successful login clears both counters.
+* User email: users now have an optional email address (new users.email column;
+  Add-user form field; inline edit in the user list). Audited without logging
+  the address value.
+* Password reset: a "Forgot password?" link on the login page. With EMAIL = 1
+  (and the SMTP_* config) it emails a one-time, 30-minute, single-use reset link
+  (only a hash of the token is stored; tokens are invalidated on any password
+  change) with a uniform, no-enumeration response and a per-IP rate limit. With
+  EMAIL = 0, or when the user has no address on file, it shows a "contact your
+  administrator" note. Mail is sent with Net::SMTP (SMTP_SECURITY starttls|ssl|
+  none, SMTP AUTH when EMAIL_AUTH = 1).
+* New config section (email / password reset): EMAIL, SMTP_HOST, SMTP_PORT,
+  SMTP_SECURITY, EMAIL_AUTH, SMTP_USER, SMTP_PASS, EMAIL_FROM. All shown in
+  Tools -> Show fetchconfig-web.cfg (SMTP_PASS masked like DBpass).
+* Database: new fetchconfig-web-dbupdate-1.60.sql (PostgreSQL 8.2-compatible,
+  idempotent) adds users.email, login_attempts and password_resets with the
+  right grants; fetchconfig-web-dbsetup.pl creates the same on a fresh install;
+  new fetchconfig-web-clean-resets.pl prunes spent reset tokens and stale
+  throttle rows (clean-audit.pl style, -s prints the minimal DB role).
+* Docs: Crypt::Bcrypt and Net::SMTP added to the Perl-modules table; email
+  config section and the 1.60 database upgrade documented in INSTALL.
+* Test noise silenced: t/70-highlight.t "used only once" (added no warnings
+  'once' to blocks that local-override a sub), and the benign AIX-5.28
+  "SIGTERM handler DEFAULT not defined" from the child signal reset in
+  run_command_capture (wrapped in no warnings 'signal'); behaviour unchanged.
+* Fixed (syntax highlighting): a template_dir given as a $alias (directory:
+  allow-list) was not expanded before calling fetchconfig --template-syntax, so
+  the template's declared syntax_style was never read and the device fell back
+  to the generic scheme. device_template_path() now expands the alias. Also,
+  model 'generic' no longer short-circuits to the 'generic' highlighter (which
+  shares the scheme name) -- it always goes through the template -> config ->
+  detect resolution chain, so a template's declared scheme (e.g. cisco-ios)
+  wins. Together these make certificate blocks render plain again.
+* Syntax highlighting: when SHOW_RENDER_TIME=1, a gray diagnostic line below
+  the backup content shows the highlighting scheme actually chosen and (for a
+  template-backed device) the template file it resolved from.
+* Syntax highlighting: the generic highlighter now leaves certificate hex
+  dumps ("certificate ... quit") plain, like the cisco-ios highlighter, so a
+  template-backed device's embedded certs are no longer mis-coloured; and
+  content auto-detection recognises IOS configs with crypto pki / certificate
+  blocks as cisco-ios.
+* Syntax highlighting for template-backed ("generic") devices. Their config
+  can be any syntax, so highlight_config() now resolves a scheme by priority:
+  (1) the template's declared syntax_style, read via
+  "fetchconfig.pl --template-syntax <template>" (cached per template file);
+  (2) the new GENERIC_SYNTAX config setting (a scheme name, "none", or "auto");
+  (3) when GENERIC_SYNTAX = auto (default), a content sniff. New highlighters
+  json, xml and generic; scheme-name registry entries so a scheme can be chosen
+  by name. GENERIC_SYNTAX is shown in Tools -> Show fetchconfig-web.cfg.
+* E1: the remaining raw-$! leak (the fetchconfig log viewer) now shows a generic
+  message and records the detail in the audit log, like the other read-error
+  sites.
+* E2: unified priority banner -- when several header banners could show at once
+  (fatal device-table problem, fetchconfig too old, device table changed
+  outside the app, default password), only the single most severe one is now
+  displayed instead of stacking them.
+* Database migration scripts renamed to a consistent per-version series:
+  fetchconfig-web-dbupdate.sql -> fetchconfig-web-dbupdate-1.50.sql, and
+  fetchconfig-web-audit.sql -> fetchconfig-web-dbupdate-1.51.sql (joining
+  fetchconfig-web-dbupdate-1.60.sql). Content unchanged; all references updated.
+* Docs (INSTALL.md): the mod_fcgid config block now sets FcgidProcessTableFile
+  explicitly, with a note that leaving it unset on AIX can cause
+  "(22)Invalid argument: mod_fcgid: can't lock process table" at startup (APR
+  defaults to a SysV-semaphore lock the kernel rejects); a file on local disk
+  uses a file lock and avoids it.
+* Email test tools: the "Change your email" page has a "Test my email" button
+  that emails the user's own saved address ("Your fetchconfig-web email address
+  setup was successful."); and a new admin tool, Tools -> Verify email setup,
+  sends a test message to a typed address ("Email setup of fetchconfig-web
+  successful.") and reports the real SMTP result. Both require EMAIL = 1, are
+  rate-limited per IP, and are audited.
+* User menu: new "Change your email" page lets any logged-in user set or clear
+  their own email address (used for password reset), alongside "Change your
+  password". Admins can still set any user's email from the user list. Audited
+  without logging the address value.
+* UI: the Forgot-password and reset-password pages now render inside the white
+  login card on the login backdrop (they previously placed the form directly on
+  the background image, making the label and field hard to see).
+* New test t/B6-security-1.60.t.
+* FastCGI support (mod_fcgid) with automatic fallback to plain CGI, using the
+  FCGI module directly (CGI::Fast is NOT required). At startup the script tries
+  "require FCGI"; if present it runs a persistent accept loop
+  (FCGI::Request/Accept/Finish), one request per iteration, so the ~15k-line
+  script is compiled once per worker and PostgreSQL connections are not
+  reopened for every request. If FCGI is absent it serves one request and
+  exits, exactly as before -- no configuration change needed for a plain-CGI
+  deployment.
+* Per-request bootstrap moved into handle_request($cgi); $cgi is now a package
+  global reassigned each request, so existing call sites are unchanged.
+  reset_request_state() clears every per-request global/cache and re-reads
+  /etc/fetchconfig-web.cfg at the start of each request, so config edits take
+  effect without restarting Apache. The two top-level "exit 0" bootstrap paths
+  became "return".
+* SIGTERM/SIGUSR1/SIGHUP handled via POSIX::sigaction (fires inside the XS
+  Accept()): idle -> _exit(0) at once; mid-request -> finish, then leave the
+  loop. SIGPIPE ignored at the process level. A die in a handler is caught so
+  one bad request cannot kill the persistent worker. Backup Now's own local
+  $SIG{TERM} still shadows this during a child run.
+* mod_fcgid: FcgidIOTimeout and FcgidBusyTimeout must both exceed
+  BACKUP_TIMEOUT (BusyTimeout caps total request time; the keepalive covers
+  IOTimeout). Documented in INSTALL.md.
+* Fixed: restoring the device table (Tools -> Restore device table) falsely
+  triggered the "device table was changed outside this application" banner on
+  the next login / editor open. Restore writes the table in-app but did not
+  record the new content token the external-change tripwire checks against, so
+  the restored content looked like an outside edit. do_restore_backup() (and
+  the site-rename path, which also rewrites the table) now call
+  audit_record_device_table_token() after writing, as the editor and bulk-save
+  paths already did.
+* render-doc.py: fixed three rendering bugs affecting INSTALL.html (and the
+  other generated pages): (1) in-page Table-of-Contents links were dead because
+  hand-written anchors like "#part-1----before-you-start" did not match the
+  generated heading ids -- in-page anchors are now normalised through the same
+  slug() as the ids; (2) fenced code blocks indented inside a numbered list
+  item (the whole mod_fcgid Apache config, and several shell snippets) rendered
+  as literal back-tick text instead of boxes -- indented fences are now
+  recognised and de-indented; (3) an "apache"/"conf" fence is now labelled
+  "Apache config" (like "shell" for sh). INSTALL.md TOC links to the dotted
+  version headings were corrected to match.
+* INSTALL.md: documented reloading a new script under FastCGI -- mod_fcgid does
+  not watch the file mtime, so "touch" does not reload; run "apachectl
+  graceful" (Step 7a and the Upgrading section). Plain CGI needs no reload step.
+* Help menu: new "Installation fetchconfig-web" entry linking INSTALL.html,
+  between "Documentation fetchconfig-web" and "Documentation fetchconfig"
+  (shown only when INSTALL.html is present in HELP_DIR, like the other doc
+  entries). INSTALL.md's static-file copy steps now also copy the Help-menu
+  documentation/licence HTML pages (including INSTALL.html) into HELP_DIR, so
+  every menu entry appears out of the box.
+* New test t/B4-fastcgi.t. Requires only the FCGI module (0.67+; tested with
+  0.82) in addition to the existing dependencies.
+* Fixed (FastCGI): CGI->new caches the parsed request parameters in a package
+  global, so under the persistent accept loop a bodyless GET after a POST
+  reused the POST's params -- e.g. the first page view after login reported
+  action=login and was rejected with "This action requires a POST request."
+  The loop now calls CGI::initialize_globals() before each CGI->new, the same
+  reset CGI::Fast performs, so every request is parsed fresh. New regression
+  test t/B5-cgi-reset.t. Plain-CGI mode is unaffected (one request per process).
+* About dialog shows a "Run mode" row (CGI or FCGI), read per request from
+  FCGI's IsFastCGI(), so it reflects the real transport even when the FCGI
+  module is installed but the script was reached as a plain CGI.
+* Fixed (FastCGI): Backup Now and Empty Backup Cleanup died with
+  "Operation 'OPEN' not supported on FCGI::Stream handle" (visible as a blank
+  or <!-- keepalive -->-only result). run_command_capture() spawned the child
+  with Perl's fork-open open(FH,'-|'), and the child redirected its output with
+  open(STDOUT/STDERR, ...). Under FastCGI *STDOUT/*STDERR are TIED to an
+  FCGI::Stream object, so the fork-open and any open() against those handles are
+  dispatched to the tie, which does not support them. It now spawns over an
+  explicit pipe + fork; the child unties *STDOUT/*STDERR and redirects its REAL
+  descriptors 1 and 2 to the pipe with POSIX::dup2 (kernel-level, never through
+  Perl's tied filehandle layer), then execs; the parent reaps the child with
+  waitpid (the fork-open form used to reap on close). run_fetchconfig already
+  used open3 (its own pipes, no reopen of the tied handles) and was unaffected.
+* Fixed (FastCGI): Backup Now / Empty Backup Cleanup showed the literal
+  "Content-Type: text/html; charset=UTF-8" rendered as body text. With the old
+  fork-open spawn the child shared the parent's STDOUT stream and its buffered
+  header leaked into the captured output. The dup2 child (above) captures only
+  the exec'd program's output over its own pipe, so this cannot happen; no
+  STDOUT flush is needed or performed before the fork. An interim flush that
+  did "print STDOUT ''" through the tied FastCGI STDOUT was removed from both
+  run_command_capture() and run_fetchconfig() -- in run_fetchconfig() (open3,
+  JSON scan endpoints) that print to the tie aborted the request before the
+  fork, so the per-device scan spawned no fetchconfig.pl and its progress bar
+  stayed at 0.
+* Docs (INSTALL.md): mod_fcgid section notes that FcgidMaxProcessesPerClass
+  must be >= MAX_PARALLEL_SCAN, or the browser-driven scan tools' concurrent
+  per-device requests queue behind busy workers and the progress bar stalls at
+  0; example pool raised to Max 32 / Min-per-class 2 / Max-per-class 8.
+* Test fix (AIX): t/B2-keepalive-abort.t's "SIGPIPE not ignored" subtest read
+  the Linux-format /proc/<pid>/status SigIgn mask, which does not exist on AIX
+  (binary /proc), so it failed there. It now skips unless a Linux-style
+  "SigIgn:" line is present; the portable broken-pipe and SIGTERM subtests
+  already cover the child's signal reset.
+
 * Backup Now and Empty Backup Cleanup: keepalive. While fetchconfig.pl runs,
   the page start is flushed and an HTML comment is written every 10 s
   ($KEEPALIVE_INTERVAL), so the web server's inactivity timeout (Apache

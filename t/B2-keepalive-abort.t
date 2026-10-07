@@ -95,9 +95,16 @@ SKIP: {
 # not swallowed by a stale handler.
 is($SIG{TERM}, undef, 'SIGTERM handler restored after run');
 
-# The child must not inherit SIGPIPE=IGNORE from the run (Linux /proc check).
+# The child must not inherit SIGPIPE=IGNORE from the run. This reads the
+# Linux-format /proc/<pid>/status "SigIgn:" bitmask, which only exists on
+# Linux; AIX (and other non-Linux) /proc use a different, binary format, so
+# skip there. The portable broken-pipe and SIGTERM tests above already prove
+# the child gets default signal behaviour -- this is just a direct check of
+# the mask where the OS exposes it as text.
 SKIP: {
-    skip "no /proc/<pid>/status", 1 unless $sh && -r "/proc/$$/status";
+    skip "Linux-format /proc not available", 1
+        unless $sh && -r "/proc/$$/status"
+            && do { local (@ARGV, $/) = ("/proc/$$/status"); (<> // '') =~ /^SigIgn:/m };
     my ($out) = main::run_command_capture('/bin/sh', '-c', 'grep SigIgn /proc/$$/status');
     my ($mask) = $out =~ /SigIgn:\s*([0-9a-f]+)/i;
     ok(defined $mask && !(hex(substr($mask, -4)) & (1 << (13 - 1))), 'child: SIGPIPE not ignored');

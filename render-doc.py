@@ -661,8 +661,17 @@ def inline(text):
             out += '<code>' + html.escape(seg) + '</code>'
         else:
             seg = html.escape(seg)
-            # links [text](url)
-            seg = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', lambda m: '<a href="%s">%s</a>' % (html.escape(m.group(2)), m.group(1)), seg)
+            # links [text](url). An in-page anchor (#...) is normalised through
+            # the same slug() rules as the heading ids, so a hand-written TOC
+            # link like "#part-1----before-you-start" matches the generated id
+            # "part-1-before-you-start" (GitHub keeps the doubled hyphens; this
+            # renderer collapses them, so without this the TOC links are dead).
+            def _link(m):
+                text, url = m.group(1), m.group(2)
+                if url.startswith('#'):
+                    url = '#' + slug(url[1:])
+                return '<a href="%s">%s</a>' % (html.escape(url), text)
+            seg = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _link, seg)
             out += seg
     # Protect any run of 3+ asterisks and the password-mask literal so the
     # bold/italic passes below don't chew them up (e.g. "?***?").
@@ -681,15 +690,22 @@ def render_body(body):
     n = len(body)
     while i < n:
         ln = body[i]
-        # fenced code block
-        if re.match(r'^```', ln):
-            lang = ln.strip('`').strip()
+        # fenced code block. The opening fence may be indented (e.g. a fence
+        # inside a numbered list item is indented to align with the item text);
+        # that indent is stripped from the fence and from every code line, so
+        # indented blocks render as boxes instead of leaking literal backticks.
+        mfence = re.match(r'^(\s*)```(.*)$', ln)
+        if mfence:
+            indent = mfence.group(1)
+            lang = mfence.group(2).strip()
             code = []
             i += 1
-            while i < n and not re.match(r'^```', body[i]):
-                code.append(body[i]); i += 1
+            while i < n and not re.match(r'^\s*```', body[i]):
+                cl = body[i]
+                cl = cl[len(indent):] if cl.startswith(indent) else cl.lstrip()
+                code.append(cl); i += 1
             i += 1  # skip closing ```
-            label = {'':'code','sql':'sql','sh':'shell','bash':'shell','perl':'perl','text':'text'}.get(lang, lang or 'code')
+            label = {'':'code','sql':'sql','sh':'shell','bash':'shell','perl':'perl','text':'text','apache':'Apache config','conf':'Apache config'}.get(lang, lang or 'code')
             out.append('<span class="file-label">%s</span>' % html.escape(label))
             esc = html.escape('\n'.join(code))
             # simple comment highlight for # / -- / :: lines
@@ -924,7 +940,8 @@ page = (u"""<!DOCTYPE html>
         only needs to be longer than 10 s and <code>BACKUP_TIMEOUT</code> may exceed
         it. <code>BACKUP_TIMEOUT</code> must be higher than the longest backup
         run of any device in the device table. A reverse proxy or load balancer
-        in front must not buffer the response.</p>
+        in front must not buffer the response; under mod_fcgid, FcgidBusyTimeout
+        must also exceed BACKUP_TIMEOUT.</p>
       </div>
       <div class="hero-stats">
         <div class="hero-stat"><span class="num">{app_version}</span><span class="label">version</span></div>

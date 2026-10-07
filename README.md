@@ -20,8 +20,10 @@ title bar's nav row:
 > higher than the longest backup run of any device in the device table
 > (bounded by its `timeout`, `fetch_timeout` and `banner_timeout` options).
 > A reverse proxy or load balancer in front of the web server must not buffer
-> the response, otherwise its own timeout applies. Closing the browser tab
-> during a run terminates it (audited as `ABORTED`).
+> the response, otherwise its own timeout applies. Under **mod_fcgid**,
+> `FcgidBusyTimeout` (default 300 s) caps the total request time and so must
+> also exceed `BACKUP_TIMEOUT`; `FcgidIOTimeout` is covered by the keepalive.
+> Closing the browser tab during a run terminates it (audited as `ABORTED`).
 
 1. Login against the PostgreSQL user database (see "Configuration" and the
    `fetchconfig-web-dbsetup.pl` setup script below).
@@ -131,6 +133,17 @@ small **PostgreSQL** database. Because it is a plain CGI, it runs under any
 standard web server (Apache `mod_cgi` and comparable setups) with no
 application server or daemon to manage.
 
+The same script also runs under **FastCGI / mod_fcgid** with no code change
+and no extra configuration file: at start-up it loads the `FCGI` module if
+present and, when started by a FastCGI process manager, runs a persistent
+accept loop (one iteration per request) instead of exiting after one request.
+This avoids recompiling the script and reopening the database on every
+request. `CGI::Fast` is not used; only the `FCGI` module is needed. If `FCGI`
+is absent, or the script is reached through plain `mod_cgi`, it behaves exactly
+as a one-shot CGI. Each request re-reads `/etc/fetchconfig-web.cfg`, so config
+edits take effect without restarting Apache. See *Running under mod_fcgid* in
+INSTALL.md.
+
 A running instance is made up of: the CGI script, a configuration file
 (`/etc/fetchconfig-web.cfg`), the PostgreSQL `users` table (created by the
 bundled setup script), an installed copy of fetchconfig, and -- optionally -- a
@@ -154,7 +167,7 @@ each of these in turn.
 - `INSTALL.md` + `INSTALL.html` -- the step-by-step
   installation and upgrade guide (Markdown, and the same rendered to HTML).
   Start there for a new deployment; this README is the full reference.
-- `fetchconfig-web-audit.sql` -- standalone, idempotent SQL to add the audit
+- `fetchconfig-web-dbupdate-1.51.sql` -- standalone, idempotent SQL to add the audit
   log tables to an existing database (PostgreSQL 8.2+). Not needed at runtime.
 - `fetchconfig-web-clean-audit.pl` -- standalone maintenance script that prunes
   old audit-log rows (run by a privileged DB role; see its `-h`/`-s`). Not
@@ -397,7 +410,7 @@ Format and loading:
   also cap connections per host (about 6), which bounds the effective
   parallelism.
 
-**Repository.** There is no `REPOSITORY` setting (removed in 1.53). The
+**Repository.** There is no `REPOSITORY` setting (removed in 1.60). The
 repository of a device is taken from the device table exactly as
 `fetchconfig.pl` resolves it: the device's own `repository=` option, else its
 model's `default:` line(s) (all `default:` lines of a model merge; the last
@@ -498,7 +511,7 @@ it to display something else. `COPYRIGHT` is read from the config file.
   the **verbatim** target device line (`find_device_table_line()`). No
   repository is added: the device's repository comes from its own line or
   its model's `default:` line(s), resolved by `fetchconfig.pl` exactly as for
-  a cron run. (Before 1.53 a `default: <model> repository=$REPOSITORY` line
+  a cron run. (Before 1.60 a `default: <model> repository=$REPOSITORY` line
   was appended after the real directives; it overrode the model's own
   `repository=` and sent the backup to the wrong directory.) Two things matter here, both learned the
   hard way against fetchconfig 9.28-ACME:
@@ -580,10 +593,10 @@ it to display something else. `COPYRIGHT` is read from the config file.
 The bundled `fetchconfig-web-dbsetup.pl` script creates the PostgreSQL role, database and `users` table.
 
 To enable per-site access on an **existing** installation, run the bundled
-`fetchconfig-web-dbupdate.sql` once against the fetchconfig-web database:
+`fetchconfig-web-dbupdate-1.50.sql` once against the fetchconfig-web database:
 
 ```
-psql -U <DBuser> -d <DBinst> -f fetchconfig-web-dbupdate.sql
+psql -U <DBuser> -d <DBinst> -f fetchconfig-web-dbupdate-1.50.sql
 ```
 
 It is idempotent, PostgreSQL 8.2-compatible, and starts every existing user unrestricted (site 0). It also grants the web user the privileges it needs on the new tables (important if you run it as `postgres` rather than the web DB user).
@@ -840,6 +853,20 @@ highlighter is registered for the device's model. This is **extensible**:
 `highlight_config()` uses it if present, otherwise falls back to the plain
 escaped `<pre>`. To add another model, write a `highlight_<model>()` sub and
 add one line to the registry.
+
+**Template-backed (`generic`) devices.** A device whose model is `generic` is
+backed up via a template, so its config can be in any syntax. For these,
+`highlight_config()` resolves a scheme by priority: (1) the template's own
+declared **`syntax_style`**, read from `fetchconfig.pl --template-syntax
+<template>` (cached per template file); (2) the **`GENERIC_SYNTAX`** config
+setting -- a scheme name, `none`, or `auto`; (3) when `GENERIC_SYNTAX = auto`
+(the default), a lightweight **content sniff** (`{`/`[` -> `json`, `<` ->
+`xml`, `!`-comments + IOS keywords -> `cisco-ios`, else `generic`). Scheme
+names are: `cisco-ios`, `procurve`, `comware`, `zyxel`, `aruba-cx`, `nexus`,
+`mediant`, `json`, `xml`, `generic`. So a template can declare its output
+syntax once (via `syntax_style`) and every `generic` device using it is
+highlighted correctly, with the `GENERIC_SYNTAX` config and content detection
+as fallbacks. With `SHOW_RENDER_TIME = 1`, a gray line below the config shows the highlighting scheme that was actually chosen and, for a template-backed device, the template file it resolved from -- useful for verifying which scheme a device ends up with.
 
 A Cisco IOS highlighter is registered for `cisco-ios` and `cisco-ios-ssh`.
 It's a lightweight, line-oriented colouriser (not a full grammar): comment/
@@ -1543,7 +1570,7 @@ current filter.
 
 The tables are created by `fetchconfig-web-dbsetup.pl` on a fresh install, or
 added to an existing database with the idempotent, PostgreSQL 8.2-compatible
-`fetchconfig-web-audit.sql` (also folded into `fetchconfig-web-dbupdate.sql`).
+`fetchconfig-web-dbupdate-1.51.sql` (also folded into `fetchconfig-web-dbupdate-1.50.sql`).
 
 #### Show fetchconfig-web.cfg
 
@@ -1761,7 +1788,7 @@ searchable checklist (scales to ~1000 sites) to assign codes and toggle the
 with a tooltip listing all.
 
 **Enabling it on an existing install.** Run the bundled
-`fetchconfig-web-dbupdate.sql` once (see
+`fetchconfig-web-dbupdate-1.50.sql` once (see
 [The user database](#the-user-database)); it creates the `sites` and
 `user_sites` tables, adds the `download_full_report` column, seeds site 0, and
 **starts every existing user as unrestricted** so nobody is locked out. Then

@@ -62,12 +62,12 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.53';
+use constant APP_VERSION => '1.60';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '1.53';
+use constant APP_VERSION_INTERNAL => '1.60';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -105,7 +105,9 @@ my ($DEVICE_TABLE, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFIG_BIN_FULL,
     $HELP_FILE, $HELP_DIR, $APP_VERSION, $COPYRIGHT,
     $FETCHCONFIG_LOG, $LOG_MAX_DEVICES, $MAX_PARALLEL_SCAN, $BACKUP_TIMEOUT,
     $FONT_BASE_URL, $IMAGE_BASE_URL, $TEMPLATE_HELPER, $HELP_BASE_URL,
-    $HTTPS_ENABLED, $SHOW_RENDER_TIME);
+    $HTTPS_ENABLED, $SHOW_RENDER_TIME,
+    $EMAIL, $SMTP_HOST, $SMTP_PORT, $SMTP_SECURITY, $EMAIL_AUTH, $GENERIC_SYNTAX,
+    $SMTP_USER, $SMTP_PASS, $EMAIL_FROM);
 
 # Parse $CONFIG_FILE (key = value, '#' comments and blank lines ignored,
 # optional surrounding quotes on the value) into a hashref, or (undef,
@@ -173,11 +175,21 @@ my @CFG_KEYS = (
     [ 'HELP_FILE',              'help_file', '/www/pub/fetchconfig-web/help.html',     'file name, or absolute path (old style)' ],
     [ 'APP_VERSION',            'str',       APP_VERSION,                              'string (overrides the shown version)' ],
     [ 'COPYRIGHT',              'str',       DEFAULT_COPYRIGHT,                        'string' ],
+    # email / password reset (see read_config and send_mail / do_forgot_password)
+    [ 'EMAIL',                  'bool',      '0',                                      '0 | 1 (enable password-reset email)' ],
+    [ 'SMTP_HOST',              'str',       '(none)',                                 'host name or address (required when EMAIL=1)' ],
+    [ 'SMTP_PORT',              'int',       '587',                                    'integer 1..65535',             1, 65535 ],
+    [ 'SMTP_SECURITY',          'enum',      'starttls',                               'starttls | ssl | none' ],
+    [ 'EMAIL_AUTH',             'bool',      '0',                                      '0 | 1 (SMTP AUTH)' ],
+    [ 'SMTP_USER',              'str',       '(none)',                                 'string (required when EMAIL_AUTH=1)' ],
+    [ 'SMTP_PASS',              'str',       '(empty)',                                'string (required when EMAIL_AUTH=1)' ],
+    [ 'EMAIL_FROM',             'str',       '(none)',                                 'from address (required when EMAIL=1)' ],
+    [ 'GENERIC_SYNTAX',         'enum',      'auto',                                   'auto | none | cisco-ios | procurve | comware | zyxel | aruba-cx | nexus | mediant | json | xml | generic' ],
 );
 
 # Keys that were valid in an earlier release and are now ignored.
 my %CFG_OBSOLETE = (
-    REPOSITORY => 'obsolete since 1.53 -- remove it (the repository comes from the device table)',
+    REPOSITORY => 'obsolete since 1.60 -- remove it (the repository comes from the device table)',
 );
 
 # Validate one value against its registry entry. Returns undef if valid, else
@@ -198,6 +210,11 @@ sub cfg_value_problem {
             unless $v =~ /^\d+$/ && (!defined $min || $v >= $min) && (!defined $max || $v <= $max);
     }
     elsif ($type eq 'bool') { return 'must be 0 or 1 (default used instead)' unless $v =~ /^[01]$/; }
+    elsif ($type eq 'enum') {
+        # Allowed values are the "a | b | c" list in the range text.
+        my @ok = ($range =~ /([A-Za-z0-9_]+)/g);
+        return "must be one of: $range" unless grep { lc($_) eq lc($v) } @ok;
+    }
     elsif ($type eq 'url')  {
         return "must be an $range of letters, digits, '.', '_', '~', '-', '/'"
             unless $v =~ m{^/[A-Za-z0-9._~/-]*$};
@@ -209,7 +226,7 @@ sub cfg_value_problem {
 # that looks like a password (e.g. a mistyped DBpass).
 sub cfg_key_is_secret {
     my ($key, $known) = @_;
-    return 1 if $key eq 'DBpass';
+    return 1 if $key eq 'DBpass' || $key eq 'SMTP_PASS';
     return (!$known && $key =~ /pass|secret/i) ? 1 : 0;
 }
 
@@ -418,6 +435,23 @@ sub read_config {
     # Number of device scans the Tools scan tools run concurrently in the
     # browser. Missing -> 1 (serial); if present, an integer 1..5.
     $MAX_PARALLEL_SCAN   = $cfg_int->('MAX_PARALLEL_SCAN', 1, 1, 5);
+
+    # --- email / password reset ---
+    $EMAIL         = (defined $kv->{EMAIL} && $kv->{EMAIL} =~ /^[01]$/) ? $kv->{EMAIL} : 0;
+    $SMTP_HOST     = defined $kv->{SMTP_HOST} ? $kv->{SMTP_HOST} : '';
+    $SMTP_PORT     = $cfg_int->('SMTP_PORT', 587, 1, 65535);
+    $SMTP_SECURITY = (defined $kv->{SMTP_SECURITY} && $kv->{SMTP_SECURITY} =~ /^(starttls|ssl|none)$/i)
+                     ? lc($kv->{SMTP_SECURITY}) : 'starttls';
+    $EMAIL_AUTH    = (defined $kv->{EMAIL_AUTH} && $kv->{EMAIL_AUTH} =~ /^[01]$/) ? $kv->{EMAIL_AUTH} : 0;
+    $SMTP_USER     = defined $kv->{SMTP_USER} ? $kv->{SMTP_USER} : '';
+    $SMTP_PASS     = defined $kv->{SMTP_PASS} ? $kv->{SMTP_PASS} : '';
+    $EMAIL_FROM    = defined $kv->{EMAIL_FROM} ? $kv->{EMAIL_FROM} : '';
+
+    # Syntax-highlighting scheme for template-backed ('generic') devices whose
+    # template does not declare a syntax_style: 'auto' (detect from content),
+    # 'none', or a scheme name. Anything unrecognised falls back to 'auto'.
+    $GENERIC_SYNTAX = (defined $kv->{GENERIC_SYNTAX} && $kv->{GENERIC_SYNTAX} ne '')
+                      ? lc($kv->{GENERIC_SYNTAX}) : 'auto';
 
     # Surface the first invalid integer value (if any) as a config error.
     return $cfg_err if defined $cfg_err;
@@ -925,34 +959,88 @@ ICONB64
 # --------------------------------------------------------------------------
 # Bootstrap
 # --------------------------------------------------------------------------
-my $cgi = CGI->new;
+# The current request's CGI object. A package global (not a lexical) so the
+# ~1300 `$cgi->...` call sites work unchanged whether the process runs as plain
+# CGI (one request) or FastCGI (handle_request reassigns $cgi per request; see
+# the Run section at the end of the file).
+our $cgi;
+
+# Per-request globals and in-memory caches, predeclared here so both
+# reset_request_state() (just below) and their real definitions further down
+# refer to the same package variables. reset_request_state() clears every one
+# of them at the start of each request; see the note there.
+our $AUDIT_WARNING;
+our $EXTERNAL_CHANGE_NOTICE;
+our $_fatal_error_cache;
+our $_sites_cache;
+our %_user_sites_cache;
+our $_allowed_dirs_cache;
+our $_templates_t_cache;
+
 # Byte-oriented output: the page is declared UTF-8 (HTTP header + <meta
 # charset>), and config content is passed through as raw UTF-8 bytes. We use
 # raw (not ':utf8') STDOUT so those bytes are emitted unchanged -- a ':utf8'
 # layer double-encodes already-UTF-8 bytes on some Perls (older AIX builds),
-# producing mojibake. All other output the app generates is ASCII.
+# producing mojibake. All other output the app generates is ASCII. Done once;
+# under FastCGI the FCGI STDOUT is re-tied each request but the binmode layer
+# set here on the Perl handle persists across requests.
 binmode(STDOUT);
 
-# Load all site config from $CONFIG_FILE before doing anything else. A
-# failure here (missing file, missing required key) is shown as a plain
-# page rather than a bare 500, since nothing downstream can work without it.
-if (my $cfg_err = read_config()) {
-    # Show the misconfiguration on the normal styled Login page (same as a
-    # login failure), not as a bare text/plain 500. read_config() only needs
-    # $APP_TITLE/$LOGO_BASE64 (both always set) to render, and because it
-    # returned an error nothing is dispatched -- so, e.g., an out-of-range
-    # MAX_PARALLEL_SCAN both shows cleanly here AND prevents any scan (or any
-    # other action) from running.
-    show_login_form("Server misconfiguration: $cfg_err");
-    exit 0;
+# Per-request globals and in-memory caches. Under plain CGI the process handles
+# one request and exits, so this clears nothing that matters; under FastCGI the
+# process is persistent, so every one of these MUST be cleared at the start of
+# each request or data (and config) leaks from one request into the next.
+# Keep this in sync with every file-scoped request cache (grep for "our \$_").
+sub reset_request_state {
+    $AUDIT_WARNING          = undef;
+    $EXTERNAL_CHANGE_NOTICE = undef;
+    $_fatal_error_cache     = undef;
+    $_sites_cache           = undef;
+    %_user_sites_cache      = ();
+    $_allowed_dirs_cache    = undef;
+    $_templates_t_cache     = undef;
+    _syntax_cache_reset();
+    # Re-read the config file each request so an edited /etc/fetchconfig-web.cfg
+    # takes effect without restarting Apache (matches plain-CGI behaviour,
+    # where every request re-runs read_config()). Returns an error string on a
+    # bad config, which handle_request() renders.
+    return read_config();
 }
 
-if (!-d $SESSION_DIR) {
-    make_path($SESSION_DIR, { mode => 0700 }) or do {
-        print $cgi->header('text/plain');
-        print "Server misconfiguration: cannot create session directory $SESSION_DIR: $!\n";
-        exit 0;
-    };
+# Handle exactly one request: $q is the CGI object for it. Called once under
+# plain CGI, and once per Accept() under FastCGI.
+sub handle_request {
+    my ($q) = @_;
+    $cgi = $q;
+
+    # Load all site config from $CONFIG_FILE before doing anything else (and,
+    # under FastCGI, clear last request's state). A failure here (missing file,
+    # missing required key, bad value) is shown as a plain page rather than a
+    # bare 500, since nothing downstream can work without it.
+    if (my $cfg_err = reset_request_state()) {
+        # Show the misconfiguration on the normal styled Login page (same as a
+        # login failure), not as a bare text/plain 500. read_config() only needs
+        # $APP_TITLE/$LOGO_BASE64 (both always set) to render, and because it
+        # returned an error nothing is dispatched -- so, e.g., an out-of-range
+        # MAX_PARALLEL_SCAN both shows cleanly here AND prevents any scan (or any
+        # other action) from running.
+        show_login_form("Server misconfiguration: $cfg_err");
+        return;
+    }
+
+    if (!-d $SESSION_DIR) {
+        make_path($SESSION_DIR, { mode => 0700 }) or do {
+            my $why = "$!";
+            audit(action => 'error', object_type => 'session', object_id => $SESSION_DIR,
+                  detail => "cannot create session directory: $why");
+            print std_header('text/plain');
+            print "Server misconfiguration: the session directory could not be created. "
+                . "See the audit log for details.\n";
+            return;
+        };
+    }
+
+    main();
 }
 
 # Actions that change server state must be POST (so they can't be triggered
@@ -960,7 +1048,7 @@ if (!-d $SESSION_DIR) {
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
 my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report upload_logo delete_logo);
+    qw(login logout change_password change_email test_my_email verify_email reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report set_email reset_do upload_logo delete_logo);
 
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
@@ -975,7 +1063,7 @@ sub main {
     if ($STATE_CHANGING{$action} && $method ne 'POST') {
         # A state-changing action arrived as GET (or HEAD, etc.). Refuse it
         # outright rather than acting on it.
-        print $cgi->header(-type => 'text/plain', -status => '405 Method Not Allowed',
+        print std_header(-type => 'text/plain', -status => '405 Method Not Allowed',
                            -allow => 'POST');
         print "This action requires a POST request.\n";
         return;
@@ -985,6 +1073,15 @@ sub main {
         do_login();
     } elsif ($action eq 'logout') {
         do_logout();
+    } elsif ($action eq 'forgot_password') {
+        # Pre-auth, like login: GET shows the page, POST processes the request.
+        # No session CSRF (there is no session yet); the uniform response and
+        # the per-IP rate limit are the abuse controls.
+        $method eq 'POST' ? do_forgot_password() : show_forgot_password();
+    } elsif ($action eq 'reset_token') {
+        show_reset_token();          # GET: the token landing page
+    } elsif ($action eq 'reset_do') {
+        do_reset_do();               # POST: consume token + set password
     } else {
         my ($sid, $user, $csrf) = current_session();
         if (!defined $user) {
@@ -1003,7 +1100,7 @@ sub main {
         # covered below).
         elsif ($STATE_CHANGING{$action} && !csrf_ok($csrf)) {
             audit(action => 'denied', username => $user, detail => "CSRF check failed for action '$action'");
-            print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+            print std_header(-type => 'text/plain', -status => '403 Forbidden');
             print "Invalid or missing CSRF token. Go back, reload the page, and try again.\n";
             return;
         }
@@ -1027,7 +1124,7 @@ sub main {
             audit(action => 'denied', username => $user, object_type => 'device',
                   object_id => scalar($cgi->param('dev')),
                   detail => "out-of-site device access denied for action '$action'");
-            print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+            print std_header(-type => 'text/html', -charset => 'UTF-8');
             print page_head('Not available', $user);
             print qq{<p class="error">That device is not available to you.</p>\n};
             print page_foot();
@@ -1051,6 +1148,16 @@ sub main {
             show_change_password_form($user);
         } elsif ($action eq 'change_password') {
             do_change_password($user);
+        } elsif ($action eq 'change_email_form') {
+            show_change_email_form($user);
+        } elsif ($action eq 'change_email') {
+            do_change_email($user);
+        } elsif ($action eq 'test_my_email') {
+            do_test_my_email($user);
+        } elsif ($action eq 'tool_verify_email') {
+            show_verify_email($user);
+        } elsif ($action eq 'verify_email') {
+            do_verify_email($user);
         } elsif ($action eq 'reset_password_form') {
             show_reset_password_form($user);
         } elsif ($action eq 'reset_password') {
@@ -1069,6 +1176,8 @@ sub main {
             do_set_user_sites($user);
         } elsif ($action eq 'set_download_full_report') {
             do_set_download_full_report($user);
+        } elsif ($action eq 'set_email') {
+            do_set_email($user);
         } elsif ($action eq 'add_user') {
             do_add_user($user);
         } elsif ($action eq 'delete_user') {
@@ -1219,16 +1328,23 @@ sub db_connect {
     return $dbh;   # undef on failure
 }
 
-# --- Audit log -------------------------------------------------------------
-# Request-global set when an audit INSERT fails, so the footer can show a
-# non-fatal warning (fail-open: the action still completes).
-our $AUDIT_WARNING;
+# FastCGI accept-loop state (see the Run section at the end). $IN_REQUEST is
+# true while a request is being handled, so the SIGTERM handler knows whether
+# it may _exit immediately (idle) or must let the request finish first.
+# $EXIT_REQUESTED is set by that handler to break the loop after Finish().
+our $IN_REQUEST    = 0;
+our $EXIT_REQUESTED = 0;
 
-# Set by the device-table change tripwire when it detects (and logs) an
-# out-of-application edit, so page_head() can show the user a visible banner --
-# the audit-log row alone is not seen by the person at the screen. Holds the
-# detail string of the change.
-our $EXTERNAL_CHANGE_NOTICE;
+# Run mode for display (About dialog): 'FCGI' once the FastCGI accept loop is
+# entered, 'CGI' otherwise. Set in the Run section at the end of the file.
+our $RUN_MODE = 'CGI';
+
+# --- Audit log -------------------------------------------------------------
+# ($AUDIT_WARNING and $EXTERNAL_CHANGE_NOTICE are declared with the other
+# per-request globals near the top of the file. $AUDIT_WARNING is set when an
+# audit INSERT fails, so the footer can show a non-fatal warning, fail-open.
+# $EXTERNAL_CHANGE_NOTICE is set by the device-table change tripwire when it
+# detects an out-of-application edit, so page_head() can show a banner.)
 
 # Device-table option keys whose values are secret and must NEVER be stored in
 # the audit log (logged as "***" instead). Password changes for USERS never
@@ -1465,9 +1581,220 @@ sub db_get_user {
     my ($dbh, $username) = @_;
     my $row = $dbh->selectrow_hashref(
         'SELECT username, pass_hash, edit_device_table, admin_function, '
-      . 'download_full_report FROM users WHERE username = ?',
+      . 'download_full_report, email FROM users WHERE username = ?',
         undef, $username);
     return $row;
+}
+
+# --- B1: online login throttle (credential-stuffing mitigation) -------------
+# Failed logins are counted in the login_attempts table, keyed separately by
+# client IP and by username, each with a rolling window. Past a threshold the
+# key is in "cooldown" and further attempts are refused BEFORE the password is
+# checked -- so a distributed guess is slowed per source IP, and a focused
+# guess against one account is slowed per account. The IP limit is hard (it
+# blocks); the account limit is soft -- it adds delay but does not hard-block,
+# so an attacker hammering a known username cannot lock the real user out.
+# A successful login clears that account's and that IP's counters.
+use constant LOGIN_MAX_FAILURES => 5;      # failures within the window before throttling
+use constant LOGIN_WINDOW_SECS  => 900;    # 15 min: failures older than this don't count
+use constant LOGIN_COOLDOWN_SECS=> 900;    # 15 min: how long a tripped key stays throttled
+
+# Return the number of failures for ($kind,$key) within the window, and the
+# epoch of the most recent one, or (0, undef) on any error (fail-open on DB
+# trouble so a database hiccup never locks everyone out).
+sub _login_fail_state {
+    my ($dbh, $kind, $key) = @_;
+    return (0, undef) unless $dbh;
+    my $row = eval {
+        $dbh->selectrow_arrayref(
+            'SELECT failures, EXTRACT(EPOCH FROM last_fail)::bigint '
+          . '  FROM login_attempts WHERE kind = ? AND keyval = ?',
+            undef, $kind, $key);
+    };
+    return (0, undef) unless $row && @$row;
+    my ($n, $last) = @$row;
+    return (0, undef) unless defined $last;
+    # Window expired -> treat as zero (the row is overwritten on next failure).
+    return (0, undef) if (time() - $last) > LOGIN_WINDOW_SECS;
+    return ($n || 0, $last);
+}
+
+# Is this ($kind,$key) currently throttled? True once failures have reached the
+# threshold and the cooldown since the last failure has not yet elapsed.
+sub login_is_throttled {
+    my ($dbh, $kind, $key) = @_;
+    return 0 unless defined $key && $key ne '';
+    my ($n, $last) = _login_fail_state($dbh, $kind, $key);
+    return 0 unless $n >= LOGIN_MAX_FAILURES && defined $last;
+    return (time() - $last) <= LOGIN_COOLDOWN_SECS ? 1 : 0;
+}
+
+# Record one failed attempt for ($kind,$key): increment within the window, or
+# restart the count if the previous failure is outside the window. Best-effort.
+sub login_record_failure {
+    my ($dbh, $kind, $key) = @_;
+    return unless $dbh && defined $key && $key ne '';
+    eval {
+        my ($n, $last) = _login_fail_state($dbh, $kind, $key);
+        my $next = ($n || 0) + 1;
+        # UPSERT without 8.2 ON CONFLICT: UPDATE first, INSERT if no row.
+        my $upd = $dbh->do(
+            'UPDATE login_attempts SET failures = ?, last_fail = now() '
+          . ' WHERE kind = ? AND keyval = ?', undef, $next, $kind, $key);
+        if (!$upd || $upd == 0) {
+            $dbh->do('INSERT INTO login_attempts (kind, keyval, failures, last_fail) '
+                   . 'VALUES (?, ?, ?, now())', undef, $kind, $key, $next);
+        }
+        1;
+    };
+}
+
+# Clear the counters for an account and an IP after a successful login.
+sub login_clear {
+    my ($dbh, $username, $ip) = @_;
+    return unless $dbh;
+    eval {
+        $dbh->do('DELETE FROM login_attempts WHERE (kind=? AND keyval=?) OR (kind=? AND keyval=?)',
+                 undef, 'user', ($username // ''), 'ip', ($ip // ''));
+        1;
+    };
+}
+
+# --- C: set a user's email (nullable). Best-effort; returns 1/0. ------------
+sub db_set_email {
+    my ($dbh, $username, $email) = @_;
+    return 0 unless $dbh;
+    my $val = (defined $email && $email ne '') ? $email : undef;
+    my $ok = eval { $dbh->do('UPDATE users SET email = ? WHERE username = ?',
+                             undef, $val, $username); };
+    return $ok ? 1 : 0;
+}
+
+# Find a user by email (lowercased exact match), for the "forgot password"
+# lookup when the identifier is an address. Returns the username or undef.
+sub db_user_by_email {
+    my ($dbh, $email) = @_;
+    return undef unless $dbh && defined $email && $email ne '';
+    my ($u) = eval {
+        $dbh->selectrow_array('SELECT username FROM users WHERE lower(email) = lower(?)',
+                              undef, $email);
+    };
+    return $u;
+}
+
+# --- D: email sending ------------------------------------------------------
+# Send one plain-text email via Net::SMTP. Honours the email config section:
+# SMTP_HOST/PORT, SMTP_SECURITY (starttls|ssl|none), and SMTP AUTH when
+# EMAIL_AUTH=1 with SMTP_USER/SMTP_PASS. Returns (1, undef) on success or
+# (0, "reason") on failure. Never dies -- all errors are caught and returned
+# so a mail problem degrades gracefully. The caller decides what to tell the
+# user (and must NOT leak whether a given address exists).
+sub send_mail {
+    my (%a) = @_;  # to, subject, body
+    return (0, 'email is disabled')          unless $EMAIL;
+    return (0, 'SMTP_HOST not configured')   if $SMTP_HOST eq '';
+    return (0, 'EMAIL_FROM not configured')  if $EMAIL_FROM eq '';
+    return (0, 'no recipient')               unless defined $a{to} && $a{to} ne '';
+
+    my $ok = eval {
+        require Net::SMTP;
+        my $sec = $SMTP_SECURITY || 'starttls';
+        my @opt = (Timeout => 20, Hello => ($ENV{SERVER_NAME} || 'localhost'));
+        my $smtp;
+        if ($sec eq 'ssl') {
+            # Implicit TLS (usually port 465): Net::SMTP >= 3.x with SSL => 1.
+            $smtp = Net::SMTP->new($SMTP_HOST, Port => $SMTP_PORT, SSL => 1, @opt);
+        } else {
+            $smtp = Net::SMTP->new($SMTP_HOST, Port => $SMTP_PORT, @opt);
+        }
+        die "connect failed\n" unless $smtp;
+        if ($sec eq 'starttls') {
+            $smtp->starttls() or die "STARTTLS failed\n";
+        }
+        if ($EMAIL_AUTH && $SMTP_USER ne '') {
+            $smtp->auth($SMTP_USER, $SMTP_PASS) or die "SMTP AUTH failed\n";
+        }
+        $smtp->mail($EMAIL_FROM)           or die "MAIL FROM rejected\n";
+        $smtp->to($a{to})                  or die "RCPT TO rejected\n";
+        $smtp->data()                      or die "DATA rejected\n";
+        my $subj = defined $a{subject} ? $a{subject} : '';
+        $smtp->datasend("From: $EMAIL_FROM\r\n");
+        $smtp->datasend("To: $a{to}\r\n");
+        $smtp->datasend("Subject: $subj\r\n");
+        $smtp->datasend("MIME-Version: 1.0\r\n");
+        $smtp->datasend("Content-Type: text/plain; charset=UTF-8\r\n");
+        $smtp->datasend("\r\n");
+        $smtp->datasend((defined $a{body} ? $a{body} : '') . "\r\n");
+        $smtp->dataend()                   or die "message not accepted\n";
+        $smtp->quit();
+        1;
+    };
+    return (1, undef) if $ok;
+    my $why = $@ || 'unknown error';
+    chomp $why;
+    return (0, $why);
+}
+
+# --- D: password-reset tokens ----------------------------------------------
+# A reset token is a long random value handed to the user in the email link.
+# Only its SHA/MD5 hash is stored, so the DB never holds the usable token.
+# Tokens expire (RESET_TOKEN_TTL), are single-use (used flag), and are all
+# invalidated when the user's password changes.
+use constant RESET_TOKEN_TTL => 1800;   # 30 minutes
+
+# Hash a token for storage/lookup. Uses Digest::MD5 (already a dependency) as a
+# fast one-way function -- the token itself is 128 bits of urandom, so a plain
+# hash is sufficient to stop DB-read -> usable-token, which is all this needs.
+sub _reset_token_hash { return Digest::MD5::md5_hex($_[0]); }
+
+# Create a reset token for $username: returns the clear token (for the email)
+# or undef on error. Stores only its hash with an expiry.
+sub reset_token_create {
+    my ($dbh, $username) = @_;
+    return undef unless $dbh;
+    my $bytes;
+    if (open(my $rf, '<:raw', '/dev/urandom')) { read($rf, $bytes, 16); close($rf); }
+    else { $bytes = join('', map { chr(int(rand(256))) } 1 .. 16); }
+    my $tok  = unpack('H*', $bytes);
+    my $hash = _reset_token_hash($tok);
+    my $ok = eval {
+        $dbh->do('INSERT INTO password_resets (token_hash, username, created, expires, used) '
+               . "VALUES (?, ?, now(), now() + (? || ' seconds')::interval, FALSE)",
+                 undef, $hash, $username, RESET_TOKEN_TTL);
+        1;
+    };
+    return $ok ? $tok : undef;
+}
+
+# Resolve a clear token to its username if it is valid (exists, not used, not
+# expired). Returns the username or undef. Does NOT consume it.
+sub reset_token_user {
+    my ($dbh, $tok) = @_;
+    return undef unless $dbh && defined $tok && $tok =~ /^[0-9a-f]{32}$/;
+    my ($u) = eval {
+        $dbh->selectrow_array(
+            'SELECT username FROM password_resets '
+          . ' WHERE token_hash = ? AND used = FALSE AND expires > now()',
+            undef, _reset_token_hash($tok));
+    };
+    return $u;
+}
+
+# Mark a token used (single-use). Best-effort.
+sub reset_token_consume {
+    my ($dbh, $tok) = @_;
+    return unless $dbh && defined $tok;
+    eval { $dbh->do('UPDATE password_resets SET used = TRUE WHERE token_hash = ?',
+                    undef, _reset_token_hash($tok)); };
+}
+
+# Invalidate all outstanding reset tokens for a user (called whenever their
+# password changes, so a pending link can't be used afterwards).
+sub reset_token_invalidate_user {
+    my ($dbh, $username) = @_;
+    return unless $dbh && defined $username;
+    eval { $dbh->do('UPDATE password_resets SET used = TRUE WHERE username = ? AND used = FALSE',
+                    undef, $username); };
 }
 
 # All users, ordered by username, as an arrayref of hashrefs. Empty list on
@@ -1476,7 +1803,7 @@ sub db_all_users {
     my ($dbh) = @_;
     my $rows = $dbh->selectall_arrayref(
         'SELECT username, pass_hash, edit_device_table, admin_function, '
-      . 'download_full_report FROM users ORDER BY username',
+      . 'download_full_report, email FROM users ORDER BY username',
         { Slice => {} });
     return $rows || [];
 }
@@ -1621,7 +1948,7 @@ sub site_ctx_init {
 
 # All sites as an arrayref of { id, code, description }, ordered (id 0 first,
 # then by code). Cached per request.
-my $_sites_cache;
+
 sub db_all_sites {
     my ($dbh) = @_;
     return $_sites_cache if defined $_sites_cache;
@@ -1636,7 +1963,7 @@ sub db_all_sites {
 
 # The set of site CODES a user may access (as a hashref { code => 1 }), plus a
 # flag. Cached per (username) per request. admin / holding site 0 => unrestricted.
-my %_user_sites_cache;
+
 sub user_site_access {
     my ($dbh, $username) = @_;
     return $_user_sites_cache{$username} if exists $_user_sites_cache{$username};
@@ -1800,7 +2127,7 @@ sub device_accessible {
 sub deny_device {
     my ($user, $devid) = @_;
     return 0 if device_accessible($user, $devid);
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Not available', $user);
     print qq{<p class="error">That device is not available to you.</p>\n};
     print page_foot();
@@ -1879,10 +2206,13 @@ sub verify_password {
     elsif ($hash =~ /^\$1\$/) {
         return secure_compare(md5_crypt($plain, $hash, '$1$'), $hash);
     }
-    elsif ($hash =~ /^\$(2[aby]?)\$/) {
-        # bcrypt - not implemented in pure perl here.
-        warn "fetchconfig-web: bcrypt hash encountered but unsupported (see README)\n";
-        return 0;
+    elsif ($hash =~ /^\$2[aby]?\$/) {
+        # bcrypt ($2a$/$2b$/$2y$): verified via Crypt::Bcrypt when available.
+        # This is the preferred format (see password_hash and the login-time
+        # transparent upgrade). Without the module a pre-existing bcrypt hash
+        # cannot be checked -- fail closed.
+        return 0 unless bcrypt_available();
+        return Crypt::Bcrypt::bcrypt_check($plain, $hash) ? 1 : 0;
     }
     else {
         # $5$ / $6$ (glibc SHA-256/512) or traditional DES crypt: delegate
@@ -1970,6 +2300,47 @@ sub md5_crypt {
 # with a random 8-char salt. Pure Perl -- no htpasswd binary needed. The
 # output is byte-for-byte what `openssl passwd -apr1` produces, and
 # verify_password() reads it back via md5_crypt().
+# Is Crypt::Bcrypt usable? Probed once and cached. bcrypt is the preferred
+# password hash (stronger than the legacy $apr1$ MD5); when the module is not
+# installed the app transparently falls back to $apr1$ so it still runs.
+{
+    my $probe;
+    sub bcrypt_available {
+        return $probe if defined $probe;
+        $probe = eval {
+            require Crypt::Bcrypt;
+            # Confirm the primitive actually works on this build (AIX etc.).
+            my $h = Crypt::Bcrypt::bcrypt('x', '2b', 10, ('0' x 16));
+            Crypt::Bcrypt::bcrypt_check('x', $h) ? 1 : 0;
+        } ? 1 : 0;
+        return $probe;
+    }
+}
+
+# bcrypt cost (work factor). 12 is a reasonable 2026 default; each +1 doubles
+# the time. Kept modest so a login on the 32-bit AIX Perl stays well under a
+# second.
+use constant BCRYPT_COST => 12;
+
+# Hash a new/changed password for storage. Prefers bcrypt ($2b$) when
+# Crypt::Bcrypt is available, else falls back to the legacy Apache MD5 ($apr1$).
+# verify_password() reads either back. Used by every password set/change/add
+# and by the login-time transparent upgrade.
+sub password_hash {
+    my ($password) = @_;
+    if (bcrypt_available()) {
+        my $salt;
+        if (open(my $rf, '<:raw', '/dev/urandom')) { read($rf, $salt, 16); close($rf); }
+        else { $salt = join('', map { chr(int(rand(256))) } 1 .. 16); }
+        return Crypt::Bcrypt::bcrypt($password, '2b', BCRYPT_COST, $salt);
+    }
+    return apr1_hash($password);
+}
+
+# True if $hash is already in the preferred (bcrypt) format, so the login-time
+# upgrade knows whether a re-hash is needed.
+sub hash_is_preferred { my ($h) = @_; return defined $h && $h =~ /^\$2[aby]?\$/ ? 1 : 0; }
+
 sub apr1_hash {
     my ($password) = @_;
     my @itoa64 = ('.', '/', 0 .. 9, 'A' .. 'Z', 'a' .. 'z');
@@ -2291,10 +2662,51 @@ sub do_login {
         return;
     }
 
+    # B1: refuse before checking the password when this IP (hard) or this
+    # account (soft) is in cooldown from too many recent failures. The message
+    # is uniform and does not reveal which key tripped.
+    my $ip = $ENV{REMOTE_ADDR} // '';
+    if (login_is_throttled($dbh, 'ip', $ip)) {
+        $dbh->disconnect;
+        audit(action => 'login_throttled', username => $username,
+              detail => 'login refused: too many recent failures from this address');
+        sleep 2;
+        show_login_form('Too many failed attempts. Please wait a few minutes and try again.');
+        return;
+    }
+
     my $u = db_get_user($dbh, $username);
+    my $ok = $u && verify_password($password, $u->{pass_hash});
+
+    # Account-soft throttle: if this username is in cooldown, add delay even
+    # when the password is right-ish, but never hard-block (so an attacker
+    # cannot lock out a real user by guessing their name).
+    my $acct_throttled = login_is_throttled($dbh, 'user', $username);
+
+    # Transparent hash upgrade: if the login succeeded and the stored hash is
+    # not already in the preferred (bcrypt) format, re-hash the just-verified
+    # plaintext and store it, so legacy $apr1$ hashes migrate to bcrypt on
+    # next login. Best-effort -- a failure here never blocks the login. Done
+    # while we still hold $dbh, before disconnecting.
+    if ($ok && bcrypt_available() && !hash_is_preferred($u->{pass_hash})) {
+        eval {
+            my $new = password_hash($password);
+            db_set_password($dbh, $username, $new) if $new ne '';
+            1;
+        };
+    }
+
+    # B1: update the throttle counters while the handle is open. Success clears
+    # this account's and this IP's counters; failure records one more for both.
+    if ($ok) {
+        login_clear($dbh, $username, $ip);
+    } else {
+        login_record_failure($dbh, 'ip',   $ip);
+        login_record_failure($dbh, 'user', $username);
+    }
     $dbh->disconnect;
 
-    if ($u && verify_password($password, $u->{pass_hash})) {
+    if ($ok) {
         # Flag the session if this account is still on the default password,
         # so a "change it" banner shows until they do. The message differs
         # for admin vs. everyone else (see the banner in page_head()).
@@ -2313,14 +2725,16 @@ sub do_login {
         # hidden "next" in the login form), if it is a safe landing action;
         # otherwise the default Devices page.
         my $dest = login_next_url(scalar $cgi->param('next'));
-        print $cgi->header(-cookie => $cookie, -location => $dest, -status => '302 Found');
+        print std_header(-cookie => $cookie, -location => $dest, -status => '302 Found');
     } else {
         # Slow down online brute-force attempts. Applied on every failure --
         # unknown user or wrong password alike -- so timing doesn't reveal
         # which one was wrong.
         audit(action => 'login_failed', username => $username,
               detail => 'invalid username or password');   # never logs the password
-        sleep 2;
+        # Base delay, plus extra when this account is already in soft cooldown
+        # (slows a focused guess against one username without hard-blocking it).
+        sleep($acct_throttled ? 5 : 2);
         show_login_form('Invalid username or password.');
     }
 }
@@ -2341,9 +2755,9 @@ sub do_logout {
         my $cookie = CGI::Cookie->new(-name => $COOKIE_NAME, -value => '', -path => '/',
                                       -httponly => 1, -samesite => 'Lax', -expires => '-1d',
                                       ($HTTPS_ENABLED ? (-secure => 1) : ()));
-        print $cgi->header(-cookie => $cookie, -location => script_url(), -status => '302 Found');
+        print std_header(-cookie => $cookie, -location => script_url(), -status => '302 Found');
     } else {
-        print $cgi->header(-location => script_url(), -status => '302 Found');
+        print std_header(-location => script_url(), -status => '302 Found');
     }
 }
 
@@ -2359,7 +2773,7 @@ sub show_login_form {
     my ($error, $next, $notice) = @_;
     # Fall back to the "next" the browser submitted (e.g. a failed login retry).
     $next = $cgi->param('next') unless defined $next;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Login');
     print qq{<div class="login-box">\n};
     print qq{<img class="login-icon" src="data:image/png;base64,$LOGIN_ICON_BASE64" }
@@ -2387,8 +2801,198 @@ sub show_login_form {
     print qq{</label><br>\n};
     print $cgi->submit(-value => 'Log in');
     print $cgi->end_form;
+    # Forgot-password link. Always shown; the target page explains the
+    # self-service flow (when EMAIL=1) or tells the user to contact the admin.
+    print qq{<p class="login-forgot"><a href="}
+        . esc(script_url() . '?action=forgot_password') . qq{">Forgot password?</a></p>\n};
     print qq{</div>\n};
     print page_foot();
+}
+
+# --- D: forgot-password / reset flow ---------------------------------------
+# Step 1 (GET): the "Forgot password?" page. If email is not enabled, show the
+# contact-admin note. Otherwise a form to enter a username or email.
+sub show_forgot_password {
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Forgot password');            # pre-login: login backdrop
+    print qq{<div class="login-box no-icon">\n};
+    print qq{<h1>Forgot password</h1><br>\n};
+    if (!$EMAIL) {
+        print qq{<p>Password reset by email is not enabled on this server. }
+            . qq{Please contact your administrator to have your password changed.</p>\n};
+        print qq{<p><a class="btn btn-green" href="} . esc(script_url()) . qq{">&larr; Back to login</a></p>\n};
+        print qq{</div>\n}; print page_foot();
+        return;
+    }
+    my $note = $cgi->param('note');
+    if (defined $note && $note ne '') {
+        print qq{<p class="success">} . esc($note) . qq{</p>\n};
+        print qq{<p><a class="btn btn-green" href="} . esc(script_url()) . qq{">&larr; Back to login</a></p>\n};
+        print qq{</div>\n}; print page_foot();
+        return;
+    }
+    print qq{<p class="muted">Enter your username or email address. If an account }
+        . qq{matches, a reset link will be emailed to the address on file.</p><br>\n};
+    print $cgi->start_form(-method => 'POST', -action => script_url());
+    print qq{<input type="hidden" name="action" value="forgot_password">\n};
+    print csrf_field();
+    print qq{<label>Username or email<br>};
+    print $cgi->textfield(-name => 'who', -autocomplete => 'off');
+    print qq{</label><br>\n};
+    print qq{<button type="submit" class="btn">Send reset link</button>\n};
+    print $cgi->end_form;
+    print qq{</div>\n};                             # .login-box
+    print page_foot();
+}
+
+# Step 2 (POST): process the request. ALWAYS responds with the same uniform
+# message, whether or not the account/email exists and whether or not mail was
+# actually sent -- so this never reveals which usernames or addresses are
+# valid (no account enumeration).
+sub do_forgot_password {
+    my $uniform = 'If an account matches, a reset link has been sent to the '
+                . 'email address on file. Check your inbox.';
+    # Email disabled: route to the contact-admin page instead.
+    unless ($EMAIL) {
+        print std_header(-location => script_url() . '?action=forgot_password', -status => '302 Found');
+        return;
+    }
+    my $who = $cgi->param('who') // '';
+    $who =~ s/^\s+|\s+$//g;
+
+    my $dbh = db_connect();
+    if ($dbh && $who ne '') {
+        # Rate-limit reset requests per IP using the same throttle as login,
+        # so this can't be used to blast mail or enumerate by timing.
+        my $ip = $ENV{REMOTE_ADDR} // '';
+        unless (login_is_throttled($dbh, 'ip', $ip)) {
+            my $username;
+            if ($who =~ /@/) {
+                my $em = normalize_email($who);
+                $username = defined $em && $em ne '' ? db_user_by_email($dbh, $em) : undef;
+            } elsif (valid_id($who) && db_user_exists($dbh, $who)) {
+                $username = $who;
+            }
+            if (defined $username) {
+                my $u = db_get_user($dbh, $username);
+                my $addr = $u ? ($u->{email} // '') : '';
+                if ($addr ne '') {
+                    my $tok = reset_token_create($dbh, $username);
+                    if ($tok) {
+                        my $link = _reset_link($tok);
+                        my ($sent, $err) = send_mail(
+                            to => $addr,
+                            subject => 'fetchconfig-web password reset',
+                            body => "A password reset was requested for your fetchconfig-web "
+                                  . "account '$username'.\n\n"
+                                  . "To set a new password, open this link within 30 minutes:\n\n"
+                                  . "$link\n\n"
+                                  . "If you did not request this, you can ignore this email; "
+                                  . "your password will not change.\n");
+                        audit(dbh => $dbh, action => 'reset_requested', username => $username,
+                              detail => ($sent ? 'reset link emailed'
+                                               : "reset link NOT emailed: " . ($err // 'error')));
+                    }
+                }
+                # Count a request against the IP so repeated use trips the throttle.
+                login_record_failure($dbh, 'ip', $ip);
+            }
+        }
+    }
+    $dbh->disconnect if $dbh;
+    print std_header(-location => script_url() . '?action=forgot_password&note='
+                     . CGI::escape($uniform), -status => '302 Found');
+}
+
+# Build the absolute reset link for a clear token.
+sub _reset_link {
+    my ($tok) = @_;
+    my $base = $cgi->url(-full => 1);
+    return $base . '?action=reset_token&tok=' . CGI::escape($tok);
+}
+
+# Step 3 (GET): the token landing page -- a form to set a new password. The
+# token is validated but NOT consumed here (it is consumed on the POST).
+sub show_reset_token {
+    my $tok = $cgi->param('tok') // '';
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Reset password');             # pre-login: login backdrop
+    print qq{<div class="login-box no-icon">\n};
+    print qq{<h1>Reset password</h1>\n};
+    my $dbh = db_connect();
+    my $username = $EMAIL ? reset_token_user($dbh, $tok) : undef;
+    $dbh->disconnect if $dbh;
+    unless (defined $username) {
+        print qq{<p class="error">This reset link is invalid or has expired. }
+            . qq{Please request a new one.</p>\n};
+        print qq{<p><a class="btn btn-green" href="} . esc(script_url() . '?action=forgot_password')
+            . qq{">Request a new link</a></p>\n};
+        print qq{</div>\n}; print page_foot();
+        return;
+    }
+    print $cgi->start_form(-method => 'POST', -action => script_url());
+    print qq{<input type="hidden" name="action" value="reset_do">\n};
+    print qq{<input type="hidden" name="tok" value="} . esc($tok) . qq{">\n};
+    print csrf_field();
+    print qq{<p class="muted">Set a new password for <strong>} . esc($username) . qq{</strong>.</p>\n};
+    print qq{<label>New password<br>};
+    print $cgi->password_field(-name => 'new_password', -autocomplete => 'new-password');
+    print qq{</label><br>\n<label>Confirm new password<br>};
+    print $cgi->password_field(-name => 'confirm_password', -autocomplete => 'new-password');
+    print qq{</label><br>\n};
+    print qq{<button type="submit" class="btn">Set password</button>\n};
+    print $cgi->end_form;
+    print qq{</div>\n};                             # .login-box
+    print page_foot();
+}
+
+# Step 4 (POST): consume the token and set the new password.
+sub do_reset_do {
+    my $tok     = $cgi->param('tok') // '';
+    my $new     = $cgi->param('new_password') // '';
+    my $confirm = $cgi->param('confirm_password') // '';
+    my $back    = script_url() . '?action=reset_token&tok=' . CGI::escape($tok);
+
+    unless ($EMAIL) {
+        print std_header(-location => script_url(), -status => '302 Found');
+        return;
+    }
+    my $dbh = db_connect();
+    my $username = $dbh ? reset_token_user($dbh, $tok) : undef;
+    unless (defined $username) {
+        $dbh->disconnect if $dbh;
+        print std_header(-type=>'text/html',-charset=>'UTF-8');
+        print page_head('Reset password');
+        print qq{<div class="login-box no-icon">\n};
+        print qq{<h1>Reset password</h1>\n<p class="error">This reset link is invalid or has }
+            . qq{expired. Please request a new one.</p>\n};
+        print qq{<p><a class="btn btn-green" href="} . esc(script_url() . '?action=forgot_password')
+            . qq{">Request a new link</a></p>\n};
+        print qq{</div>\n}; print page_foot();
+        return;
+    }
+    if (length($new) < $MIN_PASSWORD_LENGTH) {
+        $dbh->disconnect;
+        print std_header(-location => $back, -status => '302 Found'); return;
+    }
+    if ($new ne $confirm) {
+        $dbh->disconnect;
+        print std_header(-location => $back, -status => '302 Found'); return;
+    }
+    db_set_password($dbh, $username, password_hash($new));
+    reset_token_consume($dbh, $tok);
+    reset_token_invalidate_user($dbh, $username);   # kill any other pending links
+    audit(dbh => $dbh, action => 'reset_password', username => $username,
+          object_type => 'user', object_id => $username,
+          detail => 'password set via email reset link');
+    $dbh->disconnect;
+    print std_header(-type=>'text/html',-charset=>'UTF-8');
+    print page_head('Password changed');
+    print qq{<div class="login-box no-icon">\n};
+    print qq{<h1>Password changed</h1>\n<p class="success">Your password has been set. }
+        . qq{You can now log in.</p>\n};
+    print qq{<p><a class="btn btn-green" href="} . esc(script_url()) . qq{">Go to login</a></p>\n};
+    print qq{</div>\n}; print page_foot();
 }
 
 sub show_device_list {
@@ -2399,7 +3003,7 @@ sub show_device_list {
     my ($devices, $err) = read_device_ids($user);
     my $load_secs = Time::HiRes::tv_interval($t0);
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Devices', $user, 'full');
     print qq{<h1>Devices</h1>\n};
 
@@ -2742,7 +3346,7 @@ JS
 sub show_status_page {
     my ($user) = @_;
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Status', $user, 'full');
     print qq{<h1>Status</h1>\n};
 
@@ -3004,7 +3608,7 @@ JS
 sub show_backup_list {
     my ($user, $dev) = @_;
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     unless (valid_id($dev)) {
         print page_head('Error', $user);
@@ -3230,11 +3834,152 @@ sub hl {
 # Return highlighted HTML for $content given the device $model, or undef if
 # no highlighter is registered for that model.
 sub highlight_config {
-    my ($model, $content) = @_;
+    my ($model, $content, $dev, $scheme_out) = @_;
     return undef unless defined $model;
-    my $fn = $SYNTAX_HIGHLIGHTERS{$model};
-    return undef unless $fn;
-    return $fn->($content);
+
+    # Direct hit: a built-in model with its own registered highlighter. The
+    # scheme reported is the model name itself (that is the key used).
+    # EXCEPTION: model 'generic' is a template-backed device, not a syntax --
+    # it must go through the resolution chain below (template syntax_style ->
+    # GENERIC_SYNTAX -> detect), even though 'generic' is also a scheme name.
+    if ($model ne 'generic') {
+        if (my $fn = $SYNTAX_HIGHLIGHTERS{$model}) {
+            $$scheme_out = $model if ref $scheme_out;
+            return $fn->($content);
+        }
+    }
+
+    # No direct highlighter -- this is typically a template-backed ('generic')
+    # device, whose config can be any syntax. Resolve a scheme by priority:
+    #   1. the template's own declared syntax_style (fetchconfig --template-syntax)
+    #   2. the GENERIC_SYNTAX config setting (a named scheme, or 'auto'/'none')
+    #   3. content auto-detection (only when GENERIC_SYNTAX is 'auto')
+    my $scheme = resolve_syntax_scheme($model, $content, $dev);
+    $$scheme_out = $scheme if ref $scheme_out;
+    return undef unless defined $scheme && $scheme ne '' && $scheme ne 'none';
+    my $fn = $SYNTAX_HIGHLIGHTERS{$scheme};
+    return $fn ? $fn->($content) : undef;
+}
+
+# Resolve the highlighting scheme name for a template-backed device, or undef.
+sub resolve_syntax_scheme {
+    my ($model, $content, $dev) = @_;
+
+    # Layer 1: the template's declared syntax_style.
+    if (defined $dev && $dev ne '') {
+        my $declared = template_syntax_style_for_device($dev);
+        return $declared if defined $declared && $declared ne ''
+                         && exists $SYNTAX_HIGHLIGHTERS{$declared};
+    }
+
+    # Layer 2: the GENERIC_SYNTAX config setting.
+    my $cfg = defined $GENERIC_SYNTAX ? $GENERIC_SYNTAX : 'auto';
+    return 'none' if $cfg eq 'none';
+    if ($cfg ne 'auto') {
+        return exists $SYNTAX_HIGHLIGHTERS{$cfg} ? $cfg : undef;
+    }
+
+    # Layer 3: auto-detect from the content.
+    return detect_syntax_scheme($content);
+}
+
+# Ask fetchconfig for a device's template syntax_style, cached per template
+# file (path + mtime). Returns the scheme name, or undef if none is declared
+# or it can't be determined.
+{
+    my %cache;   # "path\0mtime" => scheme | ''   (reset per request by reset_request_state)
+    sub _syntax_cache_reset { %cache = (); }
+    sub template_syntax_style_for_device {
+        my ($dev) = @_;
+        my $path = device_template_path($dev);
+        return undef unless defined $path && $path ne '';
+        my @st = stat($path);
+        return undef unless @st;
+        my $key = "$path\0$st[9]";
+        return ($cache{$key} ne '' ? $cache{$key} : undef) if exists $cache{$key};
+        my $scheme = _run_template_syntax($path);
+        $cache{$key} = defined $scheme ? $scheme : '';
+        return $scheme;
+    }
+}
+
+# Run `fetchconfig.pl --template-syntax <path>` and return the scheme name from
+# stdout (exit 0), or undef (no style declared / error). Diagnostics are on
+# stderr and ignored. Uses the standard run_fetchconfig pipeline.
+sub _run_template_syntax {
+    my ($path) = @_;
+    return undef unless defined $path && $path ne '';
+    # run_fetchconfig returns ($stdout, $stderr, $status, $fork_err) with the
+    # two streams SEPARATE -- the scheme token is on stdout, diagnostics on
+    # stderr. Exit 0 with a token = declared; non-zero / empty = none.
+    my ($out, $err, $status, $fork_err) = run_fetchconfig('--template-syntax', $path);
+    return undef if $fork_err;
+    return undef if defined $status && $status != 0;
+    return undef unless defined $out;
+    for my $line (split /\n/, $out) {
+        $line =~ s/^\s+|\s+$//g;
+        next if $line eq '';
+        next if $line =~ /^fetchconfig\.pl:/;   # stray diagnostic, be safe
+        return $line if $line =~ /^[a-z0-9_-]+$/;
+        last;
+    }
+    return undef;
+}
+
+# Resolve a device's template file path (for a generic/template-backed device).
+# Returns the absolute .tmpl path, or undef if the device has no template.
+sub device_template_path {
+    my ($dev) = @_;
+    my ($content, $err) = slurp_device_table();
+    return undef if $err || !defined $content;
+    my $recs = parse_device_table($content);
+    my ($model, $tmpl, $tdir);
+    my %default_dir;
+    for my $r (@$recs) {
+        if ($r->{kind} eq 'default') {
+            for my $p (@{ $r->{opts} }) {
+                $default_dir{ $r->{model} } = $p->[1] if $p->[0] eq 'template_dir';
+            }
+        } elsif ($r->{kind} eq 'device' && $r->{id} eq $dev) {
+            $model = $r->{model};
+            for my $p (@{ $r->{opts} }) {
+                $tmpl = $p->[1] if $p->[0] eq 'template' || $p->[0] eq 'model';
+                $tdir = $p->[1] if $p->[0] eq 'template_dir';
+            }
+        }
+    }
+    return undef unless defined $tmpl && $tmpl ne '';
+    # If the template is already a path with a slash, expand a leading $alias
+    # (directory: allow-list, kind 'template') and use it.
+    if ($tmpl =~ m{/}) {
+        return resolve_dir_alias('template', $tmpl);
+    }
+    my $dir = defined $tdir ? $tdir
+            : (defined $model && defined $default_dir{$model}) ? $default_dir{$model}
+            : undef;
+    return undef unless defined $dir && $dir ne '';
+    # The template_dir may be a $alias from the directory: allow-list; expand it
+    # to the real filesystem path, or fetchconfig can't stat it (and the gray
+    # diagnostic would show the literal "$alias/...").
+    $dir = resolve_dir_alias('template', $dir);
+    $dir =~ s{/+$}{};
+    my $name = $tmpl =~ /\.tmpl$/ ? $tmpl : "$tmpl.tmpl";
+    return "$dir/$name";
+}
+
+# Cheap content sniff for GENERIC_SYNTAX = auto. Returns a scheme name.
+sub detect_syntax_scheme {
+    my ($content) = @_;
+    return 'generic' unless defined $content;
+    (my $head = $content) =~ s/^\s+//;
+    return 'json' if $head =~ /^[\[{]/;
+    return 'xml'  if $head =~ /^<\?xml/i || $head =~ /^<[A-Za-z]/;
+    # Cisco-ish: '!' comment lines plus common IOS keywords. "crypto pki" /
+    # "certificate" are strong IOS signals and (unlike generic) the cisco-ios
+    # highlighter leaves their hex dumps plain, so detect them here too.
+    return 'cisco-ios' if $content =~ /^\s*!/m
+        && $content =~ /^\s*(interface|hostname|ip address|router|crypto pki|certificate|version \d)\b/mi;
+    return 'generic';
 }
 
 # --- Cisco IOS highlighter (cisco-ios, cisco-ios-ssh) --------------------
@@ -3874,6 +4619,126 @@ sub highlight_template {
     return join("\n", @out);
 }
 
+# --- JSON highlighter (scheme 'json') ---------------------------------------
+# Line-oriented, lightweight: colours keys, string/number/keyword values and
+# punctuation structure. Everything is esc()'d first, so the strip invariant
+# (strip(spans) == esc(original)) holds and nothing can be injected.
+sub highlight_json {
+    my ($content) = @_;
+    my @out;
+    for my $line (split /\n/, $content, -1) {
+        push @out, _hl_json_line($line);
+    }
+    return join("\n", @out);
+}
+sub _hl_json_line {
+    my ($line) = @_;
+    return '' if $line =~ /^\s*$/;
+    my ($ind) = $line =~ /^(\s*)/;
+    my $rest = substr($line, length $ind);
+    my $h = esc($ind);
+    # "key":  -> key as a kw; the rest tokenised as value(s).
+    if ($rest =~ /^("(?:\\.|[^"\\])*")(\s*:\s*)(.*)$/) {
+        my ($key, $sep, $val) = ($1, $2, $3);
+        $h .= hl('kw', esc($key)) . esc($sep) . _hl_json_value($val);
+    } else {
+        $h .= _hl_json_value($rest);
+    }
+    return $h;
+}
+sub _hl_json_value {
+    my ($v) = @_;
+    my $out = '';
+    while (length $v) {
+        if    ($v =~ s/^("(?:\\.|[^"\\])*")//)        { $out .= hl('string', esc($1)); }
+        elsif ($v =~ s/^(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)//) { $out .= hl('num', esc($1)); }
+        elsif ($v =~ s/^(true|false|null)\b//)        { $out .= hl('kw', esc($1)); }
+        elsif ($v =~ s/^(\s+)//)                      { $out .= esc($1); }
+        else  { $v =~ s/^(.)//s; $out .= esc($1); }   # punctuation / other, one char
+    }
+    return $out;
+}
+
+# --- XML highlighter (scheme 'xml') -----------------------------------------
+# Colours tags (<...>), attribute names/values and comments; text between tags
+# is left plain. esc() first, so the strip invariant holds.
+sub highlight_xml {
+    my ($content) = @_;
+    my @out;
+    for my $line (split /\n/, $content, -1) {
+        push @out, _hl_xml_line($line);
+    }
+    return join("\n", @out);
+}
+sub _hl_xml_line {
+    my ($line) = @_;
+    return '' if $line =~ /^\s*$/;
+    my $out = '';
+    my $s = $line;
+    while (length $s) {
+        if ($s =~ s/^(<!--.*?-->)//s) {                      # comment
+            $out .= hl('comment', esc($1));
+        } elsif ($s =~ s/^(<\/?[A-Za-z_][\w:.-]*)//) {       # tag open + name
+            $out .= hl('kw', esc($1));
+        } elsif ($s =~ s/^(\s+[A-Za-z_][\w:.-]*)(=)("(?:[^"]*)"|'(?:[^']*)')//) {
+            $out .= esc($1) . esc($2) . hl('string', esc($3)); # attr="value"
+        } elsif ($s =~ s/^(\/?>)//) {                        # tag close
+            $out .= hl('kw', esc($1));
+        } elsif ($s =~ s/^([^<]+)//) {                       # text run
+            $out .= esc($1);
+        } else {
+            $s =~ s/^(.)//s; $out .= esc($1);
+        }
+    }
+    return $out;
+}
+
+# --- Generic highlighter (scheme 'generic') ---------------------------------
+# For template-produced text with no specific grammar: colour whole-line
+# comments (# or !), a leading command keyword, quoted strings and numbers.
+# Conservative on purpose -- it only adds a little structure.
+sub highlight_generic {
+    my ($content) = @_;
+    my @out;
+    my $in_cert = 0;   # inside a "certificate ... quit" hex dump
+    for my $line (split /\n/, $content, -1) {
+        if ($in_cert) {
+            # The hex-dump body must never be tokenised. End the block on the
+            # closing "quit", a comment, or a blank line.
+            if ($line =~ /^\s*quit\s*$/ || $line =~ /^\s*[#!;]/ || $line =~ /^\s*$/) {
+                $in_cert = 0;
+                push @out, _hl_generic_line($line);
+            } else {
+                push @out, esc($line);   # escape only, no colouring
+            }
+            next;
+        }
+        if ($line =~ /^\s*certificate\b/) {
+            $in_cert = 1;
+            push @out, _hl_generic_line($line);
+            next;
+        }
+        push @out, _hl_generic_line($line);
+    }
+    return join("\n", @out);
+}
+sub _hl_generic_line {
+    my ($line) = @_;
+    return '' if $line =~ /^\s*$/;
+    return hl('comment', esc($line)) if $line =~ /^\s*[#!;]/;   # comment line
+    my ($ind, $rest) = $line =~ /^(\s*)(.*)$/;
+    my $h = esc($ind);
+    # Leading bareword command -> kw.
+    if ($rest =~ s/^([A-Za-z_][\w.-]*)//) { $h .= hl('kw', esc($1)); }
+    while (length $rest) {
+        if    ($rest =~ s/^("(?:\\.|[^"\\])*"|'[^']*')//)  { $h .= hl('string', esc($1)); }
+        elsif ($rest =~ s/^(\b\d+(?:\.\d+)*\b)//)          { $h .= hl('num', esc($1)); }
+        elsif ($rest =~ s/^(\s+)//)                        { $h .= esc($1); }
+        else  { $rest =~ s/^(\S+)//; $h .= esc($1); }
+    }
+    return $h;
+}
+
 # Register the highlighters. Add new models here.
 $SYNTAX_HIGHLIGHTERS{'cisco-ios'}     = \&highlight_cisco_ios;
 $SYNTAX_HIGHLIGHTERS{'cisco-ios-ssh'} = \&highlight_cisco_ios;
@@ -3887,8 +4752,21 @@ $SYNTAX_HIGHLIGHTERS{'planet-ssh'}    = \&highlight_cisco_ios;
 $SYNTAX_HIGHLIGHTERS{'aruba-cx-ssh'}  = \&highlight_aruba_cx;
 $SYNTAX_HIGHLIGHTERS{'nexus-ssh'}     = \&highlight_nexus;
 $SYNTAX_HIGHLIGHTERS{'mediant-sbc'}   = \&highlight_mediant;
+# Scheme-name entries (used when a scheme is chosen by name rather than by
+# model -- e.g. a template's declared syntax_style, or GENERIC_SYNTAX). The
+# model-name keys above and these scheme-name keys share the same functions.
+$SYNTAX_HIGHLIGHTERS{'procurve'}      = \&highlight_procurve;
+$SYNTAX_HIGHLIGHTERS{'comware'}       = \&highlight_comware;
+$SYNTAX_HIGHLIGHTERS{'aruba-cx'}      = \&highlight_aruba_cx;
+$SYNTAX_HIGHLIGHTERS{'nexus'}         = \&highlight_nexus;
+$SYNTAX_HIGHLIGHTERS{'mediant'}       = \&highlight_mediant;
+$SYNTAX_HIGHLIGHTERS{'json'}          = \&highlight_json;
+$SYNTAX_HIGHLIGHTERS{'xml'}           = \&highlight_xml;
+$SYNTAX_HIGHLIGHTERS{'generic'}       = \&highlight_generic;
+
 # Synthetic key for the Tools template viewer (not a device model).
 $SYNTAX_HIGHLIGHTERS{'__template__'}  = \&highlight_template;
+$SYNTAX_HIGHLIGHTERS{'template'}      = \&highlight_template;
 
 # Model of a device (field 0 of its device-table line), or undef.
 sub device_model {
@@ -4054,7 +4932,7 @@ sub web_config_filename {
 sub show_backup_content {
     my ($user, $dev, $idx) = @_;
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     unless (valid_id($dev) && $idx =~ /^\d+$/) {
         print page_head('Error', $user);
@@ -4093,7 +4971,8 @@ sub show_backup_content {
             # Syntax-highlight the config if a highlighter is registered for
             # this device's model; otherwise show the plain escaped text. The
             # highlighter output is already HTML-escaped (and secret-masked).
-            my $highlighted = highlight_config($model, $content);
+            my $scheme;
+            my $highlighted = highlight_config($model, $content, $dev, \$scheme);
             my $body = defined $highlighted ? $highlighted : esc($content);
             my $hl_class = defined $highlighted ? ' hl' : '';
 
@@ -4101,6 +4980,16 @@ sub show_backup_content {
             print copy_button_html();
             print qq{<pre class="config$hl_class" id="config-content">} . $body . qq{</pre>\n};
             print qq{</div>\n};
+            # Diagnostic (SHOW_RENDER_TIME=1): which highlighting scheme was
+            # chosen, and -- for a template-backed device -- the template file
+            # it was resolved from. Helps verify the scheme-resolution chain.
+            if ($SHOW_RENDER_TIME) {
+                my $sch = (defined $scheme && $scheme ne '') ? $scheme : 'none';
+                my $tpl = device_template_path($dev);
+                print qq{<p class="render-diag">highlight scheme: } . esc($sch);
+                print qq{ &middot; template: } . esc($tpl) if defined $tpl && $tpl ne '';
+                print qq{</p>\n};
+            }
             print copy_button_script();
             print top_bottom_nav();
         }
@@ -4117,19 +5006,19 @@ sub download_latest_config {
     my ($user, $dev) = @_;
 
     unless (valid_id($dev)) {
-        print $cgi->header(-type => 'text/plain', -status => '400 Bad Request');
+        print std_header(-type => 'text/plain', -status => '400 Bad Request');
         print "Invalid device id.\n";
         return;
     }
 
     my ($backups, $lerr) = list_backups($dev);
     if ($lerr) {
-        print $cgi->header(-type => 'text/plain', -status => '502 Bad Gateway');
+        print std_header(-type => 'text/plain', -status => '502 Bad Gateway');
         print "Could not list backups: $lerr\n";
         return;
     }
     unless (@$backups) {
-        print $cgi->header(-type => 'text/plain', -status => '404 Not Found');
+        print std_header(-type => 'text/plain', -status => '404 Not Found');
         print "No backups available for this device.\n";
         return;
     }
@@ -4139,7 +5028,7 @@ sub download_latest_config {
 
     my ($content, $err) = get_backup_content($dev, $newest->{idx});
     if ($err || !defined $content) {
-        print $cgi->header(-type => 'text/plain', -status => '502 Bad Gateway');
+        print std_header(-type => 'text/plain', -status => '502 Bad Gateway');
         print "Could not retrieve backup: " . ($err // 'unknown error') . "\n";
         return;
     }
@@ -4149,12 +5038,12 @@ sub download_latest_config {
         # Binary web-GUI config: uudecode and use the per-model filename.
         my ($bytes, $derr) = uudecode_content($content);
         if ($derr) {
-            print $cgi->header(-type => 'text/plain', -status => '500 Internal Server Error');
+            print std_header(-type => 'text/plain', -status => '500 Internal Server Error');
             print "Could not decode backup: $derr\n";
             return;
         }
         my $fname = web_config_filename($model, $dev);
-        print $cgi->header(
+        print std_header(
             -type           => 'application/octet-stream',
             -attachment     => $fname,
             -Content_Length => length($bytes),
@@ -4173,7 +5062,7 @@ sub download_latest_config {
     my $ext    = $suffix ne '' ? $suffix : '.cfg';
     my $fname  = $stamp ne '' ? "$dev-$stamp$ext" : "$dev$ext";
     # get_backup_content returns raw bytes (UTF-8 passthrough); serve as-is.
-    print $cgi->header(
+    print std_header(
         -type           => 'application/octet-stream',
         -attachment     => $fname,
         -Content_Length => length($content),
@@ -4218,21 +5107,21 @@ sub download_tplink_config {
     my ($user, $dev, $idx) = @_;
 
     unless (valid_id($dev) && $idx =~ /^\d+$/) {
-        print $cgi->header(-type => 'text/plain', -status => '400 Bad Request');
+        print std_header(-type => 'text/plain', -status => '400 Bad Request');
         print "Invalid device id or backup index.\n";
         return;
     }
 
     my ($content, $err) = get_backup_content($dev, $idx);
     if ($err || !defined $content) {
-        print $cgi->header(-type => 'text/plain', -status => '502 Bad Gateway');
+        print std_header(-type => 'text/plain', -status => '502 Bad Gateway');
         print "Could not retrieve backup: " . ($err // 'unknown error') . "\n";
         return;
     }
 
     my ($bytes, $derr) = uudecode_content($content);
     if ($derr) {
-        print $cgi->header(-type => 'text/plain', -status => '500 Internal Server Error');
+        print std_header(-type => 'text/plain', -status => '500 Internal Server Error');
         print "Could not decode backup: $derr\n";
         return;
     }
@@ -4240,7 +5129,7 @@ sub download_tplink_config {
     # Filename is per-model (ProCurve 1700 -> "-switch.cfg", TP-Link ->
     # "-config.cfg"). $dev matches ^[\w.\-]+$ so it's safe in the header.
     my $fname = web_config_filename(device_model($dev), $dev);
-    print $cgi->header(
+    print std_header(
         -type                  => 'application/octet-stream',
         -attachment            => $fname,
         -Content_Length        => length($bytes),
@@ -4352,7 +5241,7 @@ sub show_compare {
     my $dev = $cgi->param('dev') // '';
     my @sel = $cgi->multi_param('sel');
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     unless (valid_id($dev)) {
         print page_head('Error', $user);
@@ -4483,7 +5372,7 @@ sub show_side_by_side {
     my $dev = $cgi->param('dev') // '';
     my @sel = $cgi->multi_param('sel');
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     unless (valid_id($dev)) {
         print page_head('Error', $user);
@@ -4654,7 +5543,7 @@ sub show_backup_now {
     my ($user) = @_;
     my $dev = $cgi->param('dev') // '';
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     unless (valid_id($dev)) {
         print page_head('Error', $user);
@@ -4738,7 +5627,7 @@ sub show_check_empty {
     my ($user) = @_;
     my $dev = $cgi->param('dev') // '';
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     unless (valid_id($dev)) {
         print page_head('Error', $user);
@@ -4823,7 +5712,7 @@ my %TOOL_TITLE = (
 # selected) it shows a short "pick a tool from the Tools menu" prompt.
 sub show_tools {
     my ($user, $only) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
@@ -5160,7 +6049,7 @@ sub show_tool_suffix     { show_tools($_[0], 'suffix'); }
 # arrayref of messages to show (from a failed upload/delete).
 sub show_tool_logo {
     my ($user, $errs, $msg) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -5321,7 +6210,7 @@ sub collect_repo_dirs {
 # (and any unknown password-like key) is shown as "****".
 sub show_tool_show_cfg {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -5390,7 +6279,7 @@ sub show_tool_show_cfg {
 # how to install it rather than breaking the app.
 sub show_tool_diskspace {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -5537,7 +6426,7 @@ sub show_audit_data {
     my $dbh = db_connect();
     unless ($dbh && user_is_admin($dbh, $user)) {
         $dbh->disconnect if $dbh;
-        print $cgi->header(-type => 'application/json', -status => '403 Forbidden');
+        print std_header(-type => 'application/json', -status => '403 Forbidden');
         print '{"error":"forbidden"}';
         return;
     }
@@ -5561,7 +6450,7 @@ sub show_audit_data {
     };
     $dbh->disconnect;
     unless ($ok) {
-        print $cgi->header(-type => 'application/json', -status => '500 Internal Server Error');
+        print std_header(-type => 'application/json', -status => '500 Internal Server Error');
         print '{"error":"query failed"}';
         return;
     }
@@ -5573,7 +6462,7 @@ sub show_audit_data {
                    qw(ts username ip action object_type object_id field old_value new_value detail))
             . '}';
     }
-    print $cgi->header(-type => 'application/json', -charset => 'UTF-8');
+    print std_header(-type => 'application/json', -charset => 'UTF-8');
     print '{"total":' . ($total+0) . ',"offset":' . ($offset+0)
         . ',"limit":' . $limit . ',"rows":[' . join(',', @items) . ']}';
 }
@@ -5585,12 +6474,12 @@ sub do_audit_csv {
     my $dbh = db_connect();
     unless ($dbh && user_is_admin($dbh, $user)) {
         $dbh->disconnect if $dbh;
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "Not allowed.\n";
         return;
     }
     my ($where, $binds) = audit_filter_sql();
-    print $cgi->header(-type => 'text/csv', -charset => 'UTF-8',
+    print std_header(-type => 'text/csv', -charset => 'UTF-8',
                        -attachment => 'audit-log.csv');
     my $csv = sub {   # minimal RFC-4180 quoting
         join(',', map { my $v = defined $_ ? $_ : '';
@@ -5615,7 +6504,7 @@ sub do_audit_csv {
 # from show_audit_data() so the (potentially large) table is never sent whole.
 sub show_tool_audit {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     my $dbh = db_connect();
     my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
     $dbh->disconnect if $dbh;
@@ -5764,7 +6653,7 @@ HTML
 sub show_fetchconfig_log {
     my ($user) = @_;
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     unless (user_may_use_tools($user)) {
         print page_head('Tools', $user);
@@ -5787,8 +6676,11 @@ sub show_fetchconfig_log {
 
     my $t0 = [Time::HiRes::gettimeofday()];
     open(my $fh, '<', $FETCHCONFIG_LOG) or do {
-        print qq{<p class="error">Cannot read log file }
-            . esc($FETCHCONFIG_LOG) . qq{: } . esc("$!") . qq{</p>\n};
+        my $why = "$!";
+        audit(action => 'error', object_type => 'log', object_id => $FETCHCONFIG_LOG,
+              detail => "cannot read fetchconfig log file: $why");
+        print qq{<p class="error">The fetchconfig log file could not be read. }
+            . qq{See the audit log for details.</p>\n};
         print qq{</div>\n};   # .tool-section
         print page_foot();
         return;
@@ -6015,7 +6907,7 @@ sub list_reports {
 # The Reports list page (?action=report), all logged-in users.
 sub show_reports {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Reports', $user, 'full');
     my $flash_msg = $cgi->param('msg');
     my $flash_err = $cgi->param('err');
@@ -6161,7 +7053,7 @@ sub html_unescape {
 # Expand/Collapse all -- like the fetchconfig-log viewer.
 sub show_view_report {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('View report', $user, 'full');
     my $back = esc(script_url() . '?action=report');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="$back">&larr; Reports</a></p>\n};
@@ -6286,7 +7178,7 @@ sub do_download_report {
     my $may  = $gdbh ? user_may_download_full_report($gdbh, $user) : 0;
     $gdbh->disconnect if $gdbh;
     unless ($may) {
-        print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+        print std_header(-type => 'text/html', -charset => 'UTF-8');
         print page_head('Not allowed', $user);
         print qq{<p class="error">You are not allowed to download the full report. }
             . qq{Use <strong>View</strong> to see the sections for your sites.</p>\n};
@@ -6297,7 +7189,7 @@ sub do_download_report {
     my $file = $cgi->param('file');
     $file = '' unless defined $file;
     unless (defined $dir && valid_report_name($file) && -f "$dir/$file") {
-        print $cgi->header(-status => '404 Not Found', -type => 'text/plain', -charset => 'UTF-8');
+        print std_header(-status => '404 Not Found', -type => 'text/plain', -charset => 'UTF-8');
         print "Report not found.\n";
         return;
     }
@@ -6305,7 +7197,7 @@ sub do_download_report {
     my $size = (stat($path))[7];
     if (open(my $fh, '<', $path)) {
         binmode($fh);
-        print $cgi->header(-type => 'text/html', -charset => 'UTF-8',
+        print std_header(-type => 'text/html', -charset => 'UTF-8',
                            -attachment => $file,
                            (defined $size ? ('-Content_length' => $size) : ()));
         binmode(STDOUT);
@@ -6313,7 +7205,7 @@ sub do_download_report {
         while (my $chunk = <$fh>) { print $chunk; }
         close($fh);
     } else {
-        print $cgi->header(-status => '500 Internal Server Error', -type => 'text/plain', -charset => 'UTF-8');
+        print std_header(-status => '500 Internal Server Error', -type => 'text/plain', -charset => 'UTF-8');
         print "Cannot read report.\n";
     }
 }
@@ -6342,7 +7234,7 @@ sub redirect_to_logo_tool {
     my $url = script_url() . '?action=tool_logo';
     $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
     $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print $cgi->header(-location => $url, -status => '302 Found');
+    print std_header(-location => $url, -status => '302 Found');
 }
 
 # Upload a report logo into report_dir (POST + CSRF, multipart). Enforces:
@@ -6478,7 +7370,7 @@ sub redirect_to_reports {
     my $url = script_url() . '?action=report';
     $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
     $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print $cgi->header(-location => $url, -status => '302 Found');
+    print std_header(-location => $url, -status => '302 Found');
 }
 
 sub human_size {
@@ -6502,7 +7394,7 @@ sub fmt_mtime {
 # (de-duplicated by full path), sorted by template name.
 sub show_view_templates {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You do not have permission to use the tools.</p>\n};
@@ -6562,7 +7454,7 @@ sub show_view_templates {
 # list (exact full-path whitelist); anything else is refused.
 sub show_view_template {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You do not have permission to use the tools.</p>\n};
@@ -6593,7 +7485,11 @@ sub show_view_template {
     my $content;
     {
         open(my $fh, '<', $path) or do {
-            print qq{<p class="error">Cannot read template: } . esc("$!") . qq{</p>\n};
+            my $why = "$!";
+            audit(action => 'error', object_type => 'template', object_id => $path,
+                  detail => "cannot read template file: $why");
+            print qq{<p class="error">The template could not be read. }
+                . qq{See the audit log for details.</p>\n};
             print page_foot();
             return;
         };
@@ -6622,7 +7518,7 @@ sub show_view_template {
 # read-only. Returns {"models":[...]}.
 sub show_template_models_json {
     my ($user) = @_;
-    print $cgi->header(-type => 'application/json', -charset => 'UTF-8');
+    print std_header(-type => 'application/json', -charset => 'UTF-8');
     my $dbh = db_connect();
     my $allowed = $dbh ? user_may_edit_table($dbh, $user) : 0;
     $dbh->disconnect if $dbh;
@@ -6643,7 +7539,7 @@ sub show_template_models_json {
 # .bak exists), Cancel. Save is blocked if the syntax check fails.
 sub show_edit_template {
     my ($user, %opt) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8')
+    print std_header(-type => 'text/html', -charset => 'UTF-8')
         unless $opt{no_header};
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
@@ -6672,9 +7568,13 @@ sub show_edit_template {
     my $saved;
     {
         open(my $fh, '<', $path) or do {
+            my $why = "$!";
+            audit(action => 'error', object_type => 'template', object_id => $path,
+                  detail => "cannot read template file: $why");
             print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
                 . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
-            print qq{<p class="error">Cannot read template: } . esc("$!") . qq{</p>\n};
+            print qq{<p class="error">The template could not be read. }
+                . qq{See the audit log for details.</p>\n};
             print page_foot();
             return;
         };
@@ -6799,7 +7699,7 @@ sub template_check_result_html {
 # not save. (action=check_template)
 sub do_check_template {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You do not have permission to use the tools.</p>\n};
@@ -6825,7 +7725,7 @@ sub do_check_template {
 # POST: syntax-check then save (only if ok). (action=save_template)
 sub do_save_template {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You do not have permission to use the tools.</p>\n};
@@ -6864,7 +7764,7 @@ sub do_save_template {
 # POST: revert to <target>.bak, reload the editor from the restored file.
 sub do_revert_template {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You do not have permission to use the tools.</p>\n};
@@ -7178,7 +8078,7 @@ sub _all_ok_js {
 # show. Rendered side-by-side (red/green), admin-only, passwords masked.
 sub show_compare_backups {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -7280,13 +8180,13 @@ sub show_compare_backups {
 sub do_check_suffix_one {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
-        print $cgi->header(-type => 'application/json', -status => '403 Forbidden');
+        print std_header(-type => 'application/json', -status => '403 Forbidden');
         print '{"error":"forbidden"}';
         return;
     }
     my $dev = $cgi->param('dev') // '';
     unless (valid_id($dev)) {
-        print $cgi->header(-type => 'application/json', -status => '400 Bad Request');
+        print std_header(-type => 'application/json', -status => '400 Bad Request');
         print '{"error":"bad device id"}';
         return;
     }
@@ -7294,7 +8194,7 @@ sub do_check_suffix_one {
     # Return the failure detail too, so the scan UI can show WHY a device
     # could not be checked (a truncated read, a real non-zero exit, or a
     # spawn failure) instead of a bare "could not be checked".
-    print $cgi->header(-type => 'application/json', -charset => 'UTF-8');
+    print std_header(-type => 'application/json', -charset => 'UTF-8');
     if ($status eq 'error' && defined $detail && $detail ne '') {
         print qq({"dev":"$dev","status":"$status","detail":) . json_string($detail) . qq(});
     } else {
@@ -7307,13 +8207,13 @@ sub do_check_suffix_one {
 sub do_check_backups_one {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
-        print $cgi->header(-type => 'application/json', -status => '403 Forbidden');
+        print std_header(-type => 'application/json', -status => '403 Forbidden');
         print '{"error":"forbidden"}';
         return;
     }
     my $dev = $cgi->param('dev') // '';
     unless (valid_id($dev)) {
-        print $cgi->header(-type => 'application/json', -status => '400 Bad Request');
+        print std_header(-type => 'application/json', -status => '400 Bad Request');
         print '{"error":"bad device id"}';
         return;
     }
@@ -7321,7 +8221,7 @@ sub do_check_backups_one {
     # Return the failure detail too, so the scan UI can show WHY a device
     # could not be checked (a truncated read, a real non-zero exit, or a
     # spawn failure) instead of a bare "could not be checked".
-    print $cgi->header(-type => 'application/json', -charset => 'UTF-8');
+    print std_header(-type => 'application/json', -charset => 'UTF-8');
     if ($status eq 'error' && defined $detail && $detail ne '') {
         print qq({"dev":"$dev","status":"$status","detail":) . json_string($detail) . qq(});
     } else {
@@ -7333,7 +8233,7 @@ sub do_check_backups_one {
 # Passwords are masked in the display like every other config view.
 sub show_view_backup {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -7375,7 +8275,7 @@ sub show_view_backup {
 sub do_restore_backup {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "You are not allowed to use Tools.\n";
         return;
     }
@@ -7424,6 +8324,11 @@ sub do_restore_backup {
     }
     audit(action=>'restore_backup', object_type=>'table', object_id=>$name,
           detail=>"restored device table from backup $name");
+    # Record the new content token so the external-change tripwire does not
+    # flag this restore (an in-application write) as an outside edit on the
+    # next login / editor open. Same step the editor and bulk-save paths do
+    # via audit_device_table_changes().
+    audit_record_device_table_token(undef, $user);
     redirect_to_tools(msg => "Device table restored from $name. "
         . "(Previous table backed up as $info.)");
 }
@@ -7432,7 +8337,7 @@ sub do_restore_backup {
 sub do_delete_backup {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "You are not allowed to use Tools.\n";
         return;
     }
@@ -7457,7 +8362,7 @@ sub do_delete_backup {
 sub do_delete_old_backups {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "You are not allowed to use Tools.\n";
         return;
     }
@@ -7503,7 +8408,7 @@ sub do_delete_old_backups {
 # same layout as Backup Now / Check Empty Backups.
 sub show_orphan_check {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -7559,7 +8464,7 @@ sub show_orphan_check {
 # CSRF (state-changing), admin only, re-checked here.
 sub do_orphan_delete {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -7614,7 +8519,7 @@ sub do_orphan_delete {
 # Empty-directory check page: full output of `fetchconfig.pl -e`.
 sub show_empty_check {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -7669,7 +8574,7 @@ sub show_empty_check {
 # Empty-directory delete page: full output of `fetchconfig.pl -e -D`.
 sub do_empty_delete {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -7723,7 +8628,7 @@ sub do_empty_delete {
 # count is taken from the summary line, not the exit status.
 sub show_empty_bk_check {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -7746,7 +8651,7 @@ sub show_empty_bk_check {
 # "Empty Backup Cleanup" DELETE: fetchconfig.pl -Z -D (POST + CSRF). Audited.
 sub do_empty_bk_delete {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -7879,13 +8784,13 @@ sub empty_bk_result_fragment {
 sub show_empty_bk_check_data {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "Not allowed.\n"; return;
     }
     # Header (and page start) first, so the keepalive can flow while the scan
     # runs (see run_command_capture).
     my $inline = $cgi->param('inline') ? 1 : 0;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Check for empty backups', $user, 'checkout') if $inline;
     my $frag;
     {
@@ -7901,13 +8806,13 @@ sub show_empty_bk_check_data {
 sub do_empty_bk_delete_data {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "Not allowed.\n"; return;
     }
     # Header (and page start) first, so the keepalive can flow while the scan
     # runs (see run_command_capture).
     my $inline = $cgi->param('inline') ? 1 : 0;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Delete empty backups', $user, 'checkout') if $inline;
     my $frag;
     {
@@ -7929,7 +8834,7 @@ sub redirect_to_user_page {
     $url .= '&err=' . CGI::escape($opts{err}) if defined $opts{err} && $opts{err} ne '';
     my @hdr = (-location => $url, -status => '302 Found');
     push @hdr, (-cookie => $opts{cookie}) if defined $opts{cookie};  # session rotation
-    print $cgi->header(@hdr);
+    print std_header(@hdr);
 }
 
 # =============================================================================
@@ -7943,7 +8848,7 @@ sub redirect_to_user_page {
 # large list (hundreds of sites) stays manageable.
 sub show_sites_page {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     my $dbh = db_connect();
     my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
     unless ($is_admin) {
@@ -8041,7 +8946,7 @@ sub show_sites_page {
 
 sub _sites_redirect { my (%o)=@_; my $u=script_url().'?action=sites';
     $u.='&msg='.CGI::escape($o{msg}) if $o{msg}; $u.='&err='.CGI::escape($o{err}) if $o{err};
-    print $cgi->header(-location=>$u, -status=>'302 Found'); }
+    print std_header(-location=>$u, -status=>'302 Found'); }
 
 sub do_add_site {
     my ($user) = @_;
@@ -8099,6 +9004,9 @@ sub do_edit_site {
             if ($changed) {
                 my $new = serialize_records($recs);
                 backup_and_write_table($content, $new);
+                # In-app write -> record the new token so the external-change
+                # tripwire does not flag this site rename as an outside edit.
+                audit_record_device_table_token($dbh, $user);
             }
         }
     }
@@ -8131,7 +9039,7 @@ sub do_delete_site {
 # Per-user site assignment (admin only): a checkbox list of all site codes.
 sub show_user_sites_form {
     my ($admin) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     my $dbh = db_connect();
     unless ($dbh && user_is_admin($dbh, $admin)) {
         $dbh->disconnect if $dbh;
@@ -8235,7 +9143,7 @@ sub do_set_user_sites {
     my ($admin) = @_;
     my $dbh = db_connect();
     unless ($dbh && user_is_admin($dbh, $admin)) { $dbh->disconnect if $dbh;
-        print $cgi->header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
+        print std_header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
     my $target = $cgi->param('username') // '';
     my $trow = $target ne '' ? db_get_user($dbh, $target) : undef;
     unless ($trow) { $dbh->disconnect; redirect_to_user_page(action=>"user_list", err=>'User not found.'); return; }
@@ -8275,7 +9183,7 @@ sub do_set_download_full_report {
     my ($admin) = @_;
     my $dbh = db_connect();
     unless ($dbh && user_is_admin($dbh, $admin)) { $dbh->disconnect if $dbh;
-        print $cgi->header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
+        print std_header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
     my $target = $cgi->param('username') // '';
     my $val = $cgi->param('value') ? 1 : 0;
     $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $val, $target)
@@ -8285,6 +9193,32 @@ sub do_set_download_full_report {
           field=>'download_full_report', new_value=>($val?'yes':'no'),
           detail=>($val ? 'granted report-download right' : 'revoked report-download right'));
     redirect_to_user_page(action=>"user_list", msg=>"Updated report-download right for $target.");
+}
+
+sub do_set_email {
+    my ($admin) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $admin)) { $dbh->disconnect if $dbh;
+        print std_header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
+    my $target = $cgi->param('username') // '';
+    unless (valid_id($target) && db_user_exists($dbh, $target)) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_list", err => 'Unknown user.');
+        return;
+    }
+    my $email = normalize_email(scalar $cgi->param('email'));
+    if (!defined $email) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_list", err => 'Invalid email address.');
+        return;
+    }
+    db_set_email($dbh, $target, $email);
+    $dbh->disconnect;
+    # Audit the change WITHOUT logging the address value (it is PII); just note
+    # whether an address was set or cleared.
+    audit(action=>'set_email', object_type=>'user', object_id=>$target,
+          field=>'email', detail=>($email ne '' ? 'email address set/updated' : 'email address cleared'));
+    redirect_to_user_page(action=>"user_list", msg=>"Updated email for $target.");
 }
 
 sub show_user_page {
@@ -8300,14 +9234,16 @@ sub show_user_page {
     # a non-admin has only the password page, so they go straight there.
     my $landing = !(defined $only && $only ne '');
     $only = 'password' if $landing && !$is_admin;
-    # A non-admin can only reach the password page.
-    $only = 'password' unless $is_admin || (defined $only && $only eq 'password');
+    # A non-admin can only reach their own self-service pages (password, email).
+    $only = 'password'
+        unless $is_admin || (defined $only && ($only eq 'password' || $only eq 'email'));
 
     my %utitle = (users => 'Users', add => 'Add user',
-                  password => 'Change your password');
+                  password => 'Change your password',
+                  email    => 'Change your email');
     my $title = ($landing && $is_admin) ? 'User' : ($utitle{$only} || 'User');
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head($title, $user, 'full');
     print qq{<h1>} . esc($title) . qq{</h1>\n};
 
@@ -8352,6 +9288,43 @@ sub show_user_page {
     return;
     }
 
+    if ($only eq 'email') {
+        # Self-service: a user sets their own email (used for password reset).
+        my $cur = '';
+        if ($admin_dbh) {
+            my $me = db_get_user($admin_dbh, $user);
+            $cur = $me->{email} if $me && defined $me->{email};
+        }
+        print qq{<div class="user-section">\n};
+        print qq{<h2>Change your email</h2>\n};
+        print qq{<p class="muted">Email address, used for password reset; }
+            . qq{leave blank to remove.</p>\n};
+        print qq{<div class="form-narrow">\n};
+        print $cgi->start_form(-method => 'POST', -action => script_url());
+        print qq{<input type="hidden" name="action" value="change_email">\n};
+        print csrf_field();
+        print $cgi->textfield(-name => 'email', -value => $cur, -autocomplete => 'off', -size => 32);
+        print qq{<p><button type="submit" class="btn">Save email</button></p>\n};
+        print $cgi->end_form;
+        print qq{</div>\n};   # .form-narrow
+        # "Test my email": send a confirmation to the user's own saved address.
+        # Shown only when email is enabled on the server and an address is set.
+        if ($EMAIL && $cur ne '') {
+            print qq{<p class="muted">Send a test message to your saved address to confirm it works:</p>\n};
+            print $cgi->start_form(-method => 'POST', -action => script_url());
+            print qq{<input type="hidden" name="action" value="test_my_email">\n};
+            print csrf_field();
+            print qq{<button type="submit" class="btn btn-green">Test my email</button>\n};
+            print $cgi->end_form;
+        } elsif ($EMAIL) {
+            print qq{<p class="muted">Save an email address above, then you can send yourself a test message.</p>\n};
+        }
+        print qq{</div>\n};   # .user-section (Change your email)
+        $admin_dbh->disconnect if $admin_dbh;
+        print page_foot();
+        return;
+    }
+
     if ($only eq 'users' && $is_admin) {
         print qq{<div class="user-section">\n};
         print qq{<h2>Users</h2>\n};
@@ -8363,13 +9336,25 @@ sub show_user_page {
                 print qq{<p>No users found.</p>\n};
             } else {
                 print qq{<table class="list">\n}
-                    . qq{<tr><th>Username</th><th>Admin functions</th>}
+                    . qq{<tr><th>Username</th><th>Email</th><th>Admin functions</th>}
                     . qq{<th>Edit device</th><th>Full Report</th><th>Sites</th><th></th></tr>\n};
                 # Preload all site codes by id for the display.
                 my %site_code; $site_code{$_->{id}} = $_->{code} for @{ db_all_sites($admin_dbh) };
                 for my $row (@$users) {
                     my $u = $row->{username};
                     print qq{<tr><td>} . esc($u) . qq{</td>};
+
+                    # Email: shown with a small inline edit form (POST+CSRF).
+                    print qq{<td class="user-email-cell">};
+                    print $cgi->start_form(-method => 'POST', -action => script_url(), -class => 'inline-email-form');
+                    print qq{<input type="hidden" name="action" value="set_email">};
+                    print qq{<input type="hidden" name="username" value="} . esc($u) . qq{">};
+                    print csrf_field();
+                    print $cgi->textfield(-name => 'email', -value => ($row->{email} // ''),
+                                          -size => 22, -autocomplete => 'off');
+                    print qq{ <button type="submit" class="btn btn-small">Save</button>};
+                    print $cgi->end_form;
+                    print qq{</td>};
 
                     # Admin-functions right. The built-in admin always has
                     # it and can't be toggled; every other user gets a
@@ -8477,6 +9462,9 @@ sub show_user_page {
         print qq{<label>Confirm password<br>};
         print $cgi->password_field(-name => 'confirm_password', -autocomplete => 'new-password');
         print qq{</label>\n};
+        print qq{<label>Email <span class="muted">(optional; used for password reset)</span><br>};
+        print $cgi->textfield(-name => 'email', -autocomplete => 'off');
+        print qq{</label>\n};
         print qq{<label class="checkbox-label nowrap"><input type="checkbox" name="admin" value="1"> }
             . qq{Grant admin functions (full admin, like the admin account)</label>\n};
         print qq{<label class="checkbox-label"><input type="checkbox" name="edit" value="1"> }
@@ -8494,6 +9482,165 @@ sub show_user_page {
 # Thin per-page handlers for the split User menu.
 sub show_user_add             { show_user_page($_[0], 'add'); }
 sub show_change_password_form { show_user_page($_[0], 'password'); }
+sub show_change_email_form    { show_user_page($_[0], 'email'); }
+
+# Self-service: the logged-in user sets their OWN email address. Any logged-in
+# user may do this (unlike set_email, which is an admin editing another user).
+sub do_change_email {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh) {
+        redirect_to_user_page(action=>"change_email_form", err => 'Cannot reach the user database.');
+        return;
+    }
+    my $email = normalize_email(scalar $cgi->param('email'));
+    if (!defined $email) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"change_email_form", err => 'Invalid email address.');
+        return;
+    }
+    db_set_email($dbh, $user, $email);
+    $dbh->disconnect;
+    # Audited WITHOUT the address value (PII); note set vs cleared only.
+    audit(action=>'change_email', object_type=>'user', object_id=>$user,
+          field=>'email', detail=>($email ne '' ? 'own email address set/updated'
+                                               : 'own email address cleared'));
+    redirect_to_user_page(action=>"change_email_form",
+        msg => ($email ne '' ? 'Your email address was updated.'
+                             : 'Your email address was removed.'));
+}
+
+# Self-service: send a test message to the logged-in user's own saved address.
+sub do_test_my_email {
+    my ($user) = @_;
+    unless ($EMAIL) {
+        redirect_to_user_page(action=>"change_email_form",
+            err => 'Email is not enabled on this server.');
+        return;
+    }
+    my $dbh = db_connect();
+    my $addr = '';
+    if ($dbh) { my $me = db_get_user($dbh, $user); $addr = $me->{email} if $me && defined $me->{email}; }
+    # Rate-limit test sends per IP (reuses the login throttle).
+    my $ip = $ENV{REMOTE_ADDR} // '';
+    if ($dbh && login_is_throttled($dbh, 'ip', $ip)) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"change_email_form",
+            err => 'Too many attempts. Please wait a few minutes and try again.');
+        return;
+    }
+    if ($addr eq '') {
+        $dbh->disconnect if $dbh;
+        redirect_to_user_page(action=>"change_email_form",
+            err => 'You have no email address saved.');
+        return;
+    }
+    my ($ok, $why) = send_mail(
+        to      => $addr,
+        subject => 'fetchconfig-web test email',
+        body    => "Your fetchconfig-web email address setup was successful.\n");
+    login_record_failure($dbh, 'ip', $ip) if $dbh;   # count against the throttle
+    audit(dbh => $dbh, action => 'test_email', object_type => 'user', object_id => $user,
+          detail => ($ok ? 'self-service test email sent'
+                         : 'self-service test email FAILED: ' . ($why // 'error')));
+    $dbh->disconnect if $dbh;
+    if ($ok) {
+        redirect_to_user_page(action=>"change_email_form",
+            msg => 'Test email sent to your saved address.');
+    } else {
+        redirect_to_user_page(action=>"change_email_form",
+            err => 'Test email could not be sent: ' . ($why // 'unknown error'));
+    }
+}
+
+# --- Admin: Tools -> Verify email setup -------------------------------------
+# A diagnostic that sends a fixed confirmation message to a typed address and
+# shows the real SMTP result, so an admin can validate the email configuration.
+sub show_verify_email {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to use Tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Verify email setup', $user, 'full');
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Verify email setup</h2>\n};
+    if (!$EMAIL) {
+        print qq{<p class="error">Email is disabled (<code>EMAIL = 0</code> in }
+            . qq{the configuration). Enable it and set the <code>SMTP_*</code> }
+            . qq{options, then try again.</p>\n};
+        print qq{</div>\n}; print page_foot();
+        return;
+    }
+    my $msg = $cgi->param('msg'); my $err = $cgi->param('err');
+    print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
+    print qq{<p class="error">}   . esc($err) . qq{</p>\n} if defined $err && $err ne '';
+    print qq{<p class="muted">Sends a test message to the address below and reports }
+        . qq{the result, so you can confirm the <code>SMTP_*</code> settings work.</p>\n};
+    print qq{<div class="form-narrow">\n};
+    print $cgi->start_form(-method => 'POST', -action => script_url());
+    print qq{<input type="hidden" name="action" value="verify_email">\n};
+    print csrf_field();
+    print qq{<label>Recipient email address<br>};
+    print $cgi->textfield(-name => 'to', -value => (scalar $cgi->param('to') // ''),
+                          -autocomplete => 'off', -size => 32);
+    print qq{</label>\n};
+    print qq{<p><button type="submit" class="btn">Send test email</button></p>\n};
+    print $cgi->end_form;
+    print qq{</div>\n</div>\n};
+    print page_foot();
+}
+
+sub do_verify_email {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_may_use_tools($user)) {
+        $dbh->disconnect if $dbh;
+        print std_header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return;
+    }
+    unless ($EMAIL) {
+        $dbh->disconnect;
+        print std_header(-location => script_url() . '?action=tool_verify_email', -status => '302 Found');
+        return;
+    }
+    # Rate-limit per IP.
+    my $ip = $ENV{REMOTE_ADDR} // '';
+    if (login_is_throttled($dbh, 'ip', $ip)) {
+        $dbh->disconnect;
+        _verify_email_redirect(err => 'Too many attempts. Please wait a few minutes and try again.');
+        return;
+    }
+    my $to = normalize_email(scalar $cgi->param('to'));
+    if (!defined $to || $to eq '') {
+        $dbh->disconnect;
+        _verify_email_redirect(err => 'Enter a valid recipient email address.',
+                               to => scalar $cgi->param('to'));
+        return;
+    }
+    my ($ok, $why) = send_mail(
+        to      => $to,
+        subject => 'fetchconfig-web email setup test',
+        body    => "Email setup of fetchconfig-web successful.\n");
+    login_record_failure($dbh, 'ip', $ip);
+    audit(dbh => $dbh, action => 'test_email', object_type => 'email',
+          detail => ($ok ? 'admin verify-email sent' : 'admin verify-email FAILED: ' . ($why // 'error')));
+    $dbh->disconnect;
+    if ($ok) { _verify_email_redirect(msg => "Test email sent to $to."); }
+    else     { _verify_email_redirect(err => 'Test email could not be sent: ' . ($why // 'unknown error'),
+                                      to => $to); }
+}
+
+sub _verify_email_redirect {
+    my (%a) = @_;
+    my $url = script_url() . '?action=tool_verify_email';
+    $url .= '&msg=' . CGI::escape($a{msg}) if defined $a{msg};
+    $url .= '&err=' . CGI::escape($a{err}) if defined $a{err};
+    $url .= '&to='  . CGI::escape($a{to})  if defined $a{to} && $a{to} ne '';
+    print std_header(-location => $url, -status => '302 Found');
+}
 
 # A small grant/revoke toggle form for a right (edit_device_table or
 # admin_function): shows the current state as a tag and a button that
@@ -8550,7 +9697,8 @@ sub do_change_password {
         return;
     }
 
-    my ($ok, $err) = db_set_password($dbh, $user, apr1_hash($new));
+    my ($ok, $err) = db_set_password($dbh, $user, password_hash($new));
+    reset_token_invalidate_user($dbh, $user) if $ok;   # kill any pending reset links
     $dbh->disconnect;
     if (!$ok) {
         redirect_to_user_page(action=>"change_password_form", err => "Could not update password: " . ($err // 'unknown error'));
@@ -8619,7 +9767,7 @@ sub show_reset_password_form {
         return;
     }
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head("Change password: $target", $user);
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url() . '?action=user_list') . qq{">&larr; User</a></p>\n};
     print qq{<h1>Set a new password for } . esc($target) . qq{</h1>\n};
@@ -8690,7 +9838,8 @@ sub do_reset_password {
         return;
     }
 
-    my ($ok, $err) = db_set_password($dbh, $target, apr1_hash($new));
+    my ($ok, $err) = db_set_password($dbh, $target, password_hash($new));
+    reset_token_invalidate_user($dbh, $target) if $ok;   # kill any pending reset links
     $dbh->disconnect;
     if (!$ok) {
         redirect_to_user_page(action=>"user_list", err => "Could not update password: " . ($err // 'unknown error'));
@@ -8764,7 +9913,15 @@ sub do_add_user {
         return;
     }
 
-    my ($ok, $err) = db_add_user($dbh, $new_user, apr1_hash($password), $edit, $admin);
+    my $email = normalize_email(scalar $cgi->param('email'));
+    if (!defined $email) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_add", err => 'Invalid email address.');
+        return;
+    }
+
+    my ($ok, $err) = db_add_user($dbh, $new_user, password_hash($password), $edit, $admin);
+    if ($ok && $email ne '') { db_set_email($dbh, $new_user, $email); }
     $dbh->disconnect;
     if (!$ok) {
         redirect_to_user_page(action=>"user_add", err => "Could not add user: " . ($err // 'unknown error'));
@@ -8773,6 +9930,7 @@ sub do_add_user {
     audit(action=>'add_user', object_type=>'user', object_id=>$new_user,
           detail=>"added user (edit device table: " . ($edit ? 'yes' : 'no')
                 . ", admin function: " . ($admin ? 'yes' : 'no')
+                . ($email ne '' ? ', email set' : '')
                 . "; site assignment set separately)");
     redirect_to_user_page(action=>"user_list", msg => "User '$new_user' added.");
 }
@@ -8950,7 +10108,7 @@ sub clear_pw_warning_if_changed {
 sub show_help {
     my ($user) = @_;
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Help', $user, 'help80');
     print qq{<h1>Help</h1>\n};
     print read_help_file();
@@ -8981,7 +10139,7 @@ sub show_setup {
         return;
     }
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless ($allowed) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to view the device table.</p>\n};
@@ -10022,7 +11180,7 @@ sub show_edit_table {
     # last wrote it (logged once; see audit_check_device_table_change).
     audit_check_device_table_change($user);
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     my $dbh = db_connect();
     my $allowed = $dbh ? user_may_edit_table($dbh, $user) : 0;
@@ -10809,7 +11967,7 @@ sub generic_model_dir_error {
 sub show_preview_table {
     my ($user) = @_;
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     my $dbh = db_connect();
     my $allowed = $dbh ? user_may_edit_table($dbh, $user) : 0;
     $dbh->disconnect if $dbh;
@@ -10895,7 +12053,7 @@ sub do_save_table {
     my $known_codes = $dbh ? known_site_codes($dbh) : {};
     $dbh->disconnect if $dbh;
     unless ($allowed) {
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "You are not allowed to edit the device table.\n";
         return;
     }
@@ -11214,7 +12372,7 @@ sub redirect_to_tools {
     my $url = script_url() . '?action=tool_restore';
     $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
     $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print $cgi->header(-location => $url, -status => '302 Found');
+    print std_header(-location => $url, -status => '302 Found');
 }
 
 sub redirect_to_editor {
@@ -11222,7 +12380,7 @@ sub redirect_to_editor {
     my $url = script_url() . '?action=edit_table';
     $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
     $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print $cgi->header(-location => $url, -status => '302 Found');
+    print std_header(-location => $url, -status => '302 Found');
 }
 
 # Redirect to the "Show device table" view with a flash message (PRG).
@@ -11231,7 +12389,7 @@ sub redirect_to_setup {
     my $url = script_url() . '?action=setup';
     $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
     $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print $cgi->header(-location => $url, -status => '302 Found');
+    print std_header(-location => $url, -status => '302 Found');
 }
 
 # =============================================================================
@@ -11287,7 +12445,7 @@ sub text_to_devices {
 sub show_bulk_edit {
     my ($user, $prefill, $errors) = @_;
 
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     my $dbh = db_connect();
     my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
@@ -11402,7 +12560,7 @@ sub do_bulk_save {
     my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
     $dbh->disconnect if $dbh;
     unless ($is_admin) {
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "Only an admin can bulk-edit the device table.\n";
         return;
     }
@@ -11542,7 +12700,7 @@ sub show_edit_card {
     my $allowed = $dbh ? user_may_edit_table($dbh, $user) : 0;
     unless ($allowed) {
         $dbh->disconnect if $dbh;
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "Not allowed.\n";
         return;
     }
@@ -11552,14 +12710,14 @@ sub show_edit_card {
 
     my $idx = $cgi->param('idx');
     unless (defined $idx && $idx =~ /^\d+$/) {
-        print $cgi->header(-type => 'text/plain', -status => '400 Bad Request');
+        print std_header(-type => 'text/plain', -status => '400 Bad Request');
         print "Invalid index.\n";
         return;
     }
 
     my ($content, $err) = slurp_device_table();
     if ($err) {
-        print $cgi->header(-type => 'text/plain', -status => '500 Internal Server Error');
+        print std_header(-type => 'text/plain', -status => '500 Internal Server Error');
         print "Could not read the device table.\n";
         return;
     }
@@ -11567,13 +12725,13 @@ sub show_edit_card {
     model_defaults_init($records);   # for the blue "default" flag on the card
     my $r = $records->[$idx];
     unless ($r && $r->{kind} eq 'device') {
-        print $cgi->header(-type => 'text/plain', -status => '404 Not Found');
+        print std_header(-type => 'text/plain', -status => '404 Not Found');
         print "No device at that position.\n";
         return;
     }
     # A site-limited user may only expand a device they can see.
     unless ($site_acc->{unrestricted} || device_visible_to_acc($site_acc, $r)) {
-        print $cgi->header(-type => 'text/plain', -status => '403 Forbidden');
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
         print "That device is not available to you.\n";
         return;
     }
@@ -11586,7 +12744,7 @@ sub show_edit_card {
         # "server N ms" part of the AJAX timing line.
         $hdr{'-X-Render-Time'} = "${ms}ms";
     }
-    print $cgi->header(%hdr);
+    print std_header(%hdr);
     print $card_html;
 }
 
@@ -12838,7 +13996,7 @@ sub find_device_table_line {
 #   { present, rc, raw, repository=>[{alias,path}], template=>[...],
 #     fetch_run=>[...], fetch_run_configured, fetch_run_disabled,
 #     alias2path=>{ kind => { '$A'=>'/p' } } }
-my $_allowed_dirs_cache;
+
 sub read_allowed_dirs {
     return $_allowed_dirs_cache if defined $_allowed_dirs_cache;
     my %al = (present => 0, rc => 0, raw => '',
@@ -13193,7 +14351,7 @@ sub fetchconfig_version_cached {
 #     mandatory for every fetchconfig model and fetchconfig has no global
 #     fallback, so no device can be backed up, listed or shown.
 # Computed once per request ($_fatal_error_cache).
-our $_fatal_error_cache;
+
 sub fatal_error_text {
     return $_fatal_error_cache if defined $_fatal_error_cache;
     my $msg = '';
@@ -13252,6 +14410,12 @@ sub run_fetchconfig {
     my ($stdin, $stdout, $stderr);
     $stderr = gensym();
 
+    # No STDOUT flush/manipulation here on purpose: open3 gives the child its
+    # OWN pipes for stdout and stderr, so nothing the parent buffered on STDOUT
+    # can leak into what we capture, and touching the tied FastCGI STDOUT here
+    # is both unnecessary and risky. (run_command_capture, which merges the
+    # child's output onto the parent's STDOUT path, handles the tie explicitly
+    # in the child instead.)
     my $pid = eval { open3($stdin, $stdout, $stderr, $FETCHCONFIG_BIN_FULL, @args) };
     if (!$pid) {
         return (undef, undef, undef, "Cannot run fetchconfig.pl: $@");
@@ -13496,7 +14660,7 @@ sub run_orphan_check {
 #              command could not be run.
 #   rows : [ { section, path, model, dir } ]
 #   raw  : combined stdout+stderr, for display when rc is 1 or 2.
-my $_templates_t_cache;
+
 sub run_templates_t {
     return $_templates_t_cache if defined $_templates_t_cache;
     my ($out, $err, $status, $fork_err) =
@@ -13998,17 +15162,52 @@ sub run_command_capture {
     local $SIG{HUP}  = $on_signal;
     local $SIG{PIPE} = 'IGNORE';
 
-    my $pid = open(my $fh, '-|');
+    # Spawn the child over an EXPLICIT pipe, not Perl's fork-open open(FH,'-|').
+    # Under FastCGI, STDOUT is tied to an FCGI::Stream object; the fork-open
+    # form, and the child's open(STDERR,'>&STDOUT') dup, operate on that tied
+    # handle and die with "Operation 'OPEN' not supported on FCGI::Stream
+    # handle". An explicit pipe plus a hand-rolled fork lets the child dup the
+    # pipe write-end onto its REAL descriptors 1 and 2 (bypassing the tie
+    # entirely), so the merged stdout+stderr capture works under FastCGI and
+    # plain CGI alike. (run_fetchconfig uses open3, which likewise avoids the
+    # tied handle; only this path used the fork-open form.)
+    pipe(my $rd, my $wr) or return (undef, undef, "Cannot pipe: $!", 0);
+    my $pid = fork();
     if (!defined $pid) {
+        close($rd); close($wr);
         return (undef, undef, "Cannot fork: $!", 0);
     }
     if ($pid == 0) {
-        $SIG{$_} = 'DEFAULT' for qw(TERM INT HUP PIPE);
-        open(STDERR, '>&STDOUT');
+        # Child. Give signals back to default, then point the process's REAL
+        # descriptors 1 and 2 at the pipe write-end (merging stderr into
+        # stdout) and exec.
+        #
+        # Under FastCGI, *STDOUT / *STDERR are TIED to an FCGI::Stream object,
+        # so open(STDOUT, ...) -- in any mode, including ">&=" -- is dispatched
+        # to the tie and dies with "Operation 'OPEN' not supported on
+        # FCGI::Stream handle". We therefore untie first and then dup at the
+        # POSIX fd level (dup2), which operates on the kernel descriptors
+        # directly and never goes through Perl's filehandle/tie layer. exec()
+        # then runs the child with real fd 1/2 on the pipe. Harmless under
+        # plain CGI (the handles are not tied; untie is a no-op there).
+        # Reset the four signals the parent may have handlers for back to the
+        # system default. 'DEFAULT' is the documented special value; some Perls
+        # (e.g. AIX 5.28) emit a spurious "handler DEFAULT not defined" warning
+        # if a signal arrives mid-assignment, so quiet that one benign warning.
+        { no warnings 'signal'; $SIG{$_} = 'DEFAULT' for qw(TERM INT HUP PIPE); }
+        close($rd);
+        untie *STDOUT if tied *STDOUT;
+        untie *STDERR if tied *STDERR;
+        my $wfd = fileno($wr);
+        POSIX::dup2($wfd, 1) or POSIX::_exit(127);   # real fd 1 -> pipe
+        POSIX::dup2($wfd, 2) or POSIX::_exit(127);   # real fd 2 -> pipe
         # On exec failure use _exit: never run END blocks / DESTROY (DB
         # handles, temp files) of the parent's copy in this child.
         exec(@cmd) or POSIX::_exit(127);
     }
+    # Parent reads the child's merged output from the pipe.
+    close($wr);
+    my $fh = $rd;
     # Read with a wall-clock timeout so a hung backup (e.g. a device that never
     # responds) cannot block the request forever. On timeout or abort the child
     # is killed but the OUTPUT COLLECTED SO FAR is preserved and returned
@@ -14066,7 +15265,14 @@ sub run_command_capture {
         }
     }
     close($fh);
-    my $raw    = $?;
+    # Reap the child and collect its exit status. With the explicit pipe+fork
+    # above (unlike Perl's fork-open open(FH,'-|'), which waitpid()s on close)
+    # nothing reaps the child for us, so without this it lingers as a zombie
+    # until the FastCGI worker exits. waitpid() also sets $? for the status.
+    my $raw = 0;
+    if (waitpid($pid, 0) == $pid) {
+        $raw = $?;
+    }
     my $status = ($raw >= 0) ? ($raw >> 8) : 0;
     $status = undef if $timed_out || $aborted;   # exit status is meaningless after a kill
     return (collapse_model_registration($out), $status, $err, $aborted);
@@ -14163,6 +15369,21 @@ sub valid_id {
     return defined $id && $id =~ /^[\w.][\w.\-]*$/;
 }
 
+# Normalise a user-supplied email address. Returns '' for an empty/undef input
+# (email is optional), the trimmed lowercased address if it passes a
+# conservative syntactic check, or undef if it is non-empty but invalid. The
+# check is deliberately simple (local@domain.tld, no spaces, one @, a dotted
+# domain) and length-capped -- it is a sanity filter, not RFC 5322.
+sub normalize_email {
+    my ($e) = @_;
+    return '' unless defined $e;
+    $e =~ s/^\s+|\s+$//g;
+    return '' if $e eq '';
+    return undef if length($e) > 254;
+    return undef unless $e =~ /^[^@\s]+@[^@\s]+\.[^@\s.]+$/;
+    return lc($e);
+}
+
 # Minimal JSON string escaper for the small hand-built JSON the scan endpoints
 # emit. Escapes the characters JSON requires (", \, control chars) AND every
 # non-ASCII byte (>= 0x7F) as \uXXXX, so the result is pure 7-bit ASCII and
@@ -14181,6 +15402,10 @@ sub json_string {
     # Control chars and every byte >= 0x7F -> \uXXXX (operates per byte, so it
     # is safe whether $s holds bytes or characters).
     $s =~ s/([\x00-\x1f\x7f-\xff])/sprintf('\\u%04x', ord $1)/ge;
+    # Also \u-escape < > / & so a value containing "</script>" (or "<!--")
+    # cannot break out of an inline <script> block that embeds this JSON (the
+    # FCWEB_TPL_* / __FCWEB_MODEL_OPTS blobs). Harmless in any other JSON use.
+    $s =~ s/([<>\/&])/sprintf('\\u%04x', ord $1)/ge;
     return "\"$s\"";
 }
 
@@ -14209,6 +15434,20 @@ sub color_comment_lines {
 # =============================================================================
 # HTML chrome
 # =============================================================================
+
+# Wrapper around $cgi->header that adds the standard security response headers
+# to every response (H1): clickjacking, MIME-sniffing and referrer-leak
+# defences. All handlers call std_header(...) instead of std_header(...) so
+# the headers are applied in one place. Any -Key => value pairs are forwarded
+# to CGI->header unchanged (type, charset, cookie, location, status, ...).
+sub std_header {
+    return $cgi->header(
+        '-X_Frame_Options'        => 'DENY',
+        '-X_Content_Type_Options' => 'nosniff',
+        '-Referrer_Policy'        => 'same-origin',
+        @_,
+    );
+}
 
 sub page_head {
     my ($title, $user, $main_class) = @_;
@@ -14295,6 +15534,7 @@ sub page_head {
                 $su->('Orphaned Backup Cleanup',               '?action=tool_orphan'),
                 $su->('Restore device table',                         '?action=tool_restore'),
                 $su->('Show fetchconfig-web.cfg',                     '?action=tool_show_cfg'),
+                $su->('Verify email setup',                          '?action=tool_verify_email'),
                 $su->('Template viewer',                              '?action=view_templates'),
                 $su->('Upload report logo',                           '?action=tool_logo'),
                 $su->('View fetchconfig log',                         '?action=view_log'));
@@ -14305,6 +15545,7 @@ sub page_head {
         push @user_items, $su->('Users list', '?action=user_list'),
                           $su->('Add user',   '?action=user_add') if $is_admin;
         push @user_items, $su->('Change your password', '?action=change_password_form');
+        push @user_items, $su->('Change your email',    '?action=change_email_form');
         push @user_items, $su->('Sites', '?action=sites') if $is_admin;
         my $user_menu = $group->('User', @user_items);
 
@@ -14324,6 +15565,7 @@ sub page_head {
         };
         my @help_items = ($su->('Help', '?action=help'));   # always present
         push @help_items, $doc_item->('Documentation fetchconfig-web', 'fetchconfig-web-documentation.html');
+        push @help_items, $doc_item->('Installation fetchconfig-web',  'INSTALL.html');
         push @help_items, $doc_item->('Documentation fetchconfig',     'fetchconfig-documentation.html');
         push @help_items, $doc_item->('GNU GPL v3',                    'LICENSE.html');
         push @help_items, $doc_item->('Additional terms fetchconfig-web', 'LICENSE-ADDITIONS.html');
@@ -14347,59 +15589,76 @@ sub page_head {
               . qq{</form></div>}
               . menu_bar_script();
 
-        # Default-password nag, until the account picks a real password.
-        if (defined $pw_warn && $pw_warn ne '') {
+        # Unified priority banner (E2): several conditions can be true at once
+        # (a fatal device-table problem, an old fetchconfig, an outside edit, a
+        # still-default password). Rather than stacking every banner, render
+        # only the single HIGHEST-PRIORITY one, so the most severe issue is what
+        # the user sees. Order, most severe first:
+        #   1. fatal   -- device table unreadable / no repository (red)
+        #   2. version -- installed fetchconfig too old / undetermined (red)
+        #   3. external-- device table changed outside the application (amber)
+        #   4. pw-nag  -- account still on the default password (amber)
+        # Each builder returns the banner HTML or '' when its condition is off.
+
+        my $fatal = fatal_error_banner();
+
+        my $version = $fatal ne '' ? '' : fetchconfig_version_warning();
+
+        my $external = '';
+        if ($fatal eq '' && $version eq '') {
+            # Device table changed outside the application (tripwire). Detection
+            # in the current request sets the global (editor-open case).
+            # Detection in do_login redirects, so it also left a one-shot
+            # per-user notice in app_state; read and clear it here for the first
+            # page after login.
+            my $ext = $EXTERNAL_CHANGE_NOTICE;
+            if (!defined $ext || $ext eq '') {
+                my $sdbh = db_connect();
+                if ($sdbh) {
+                    my ($pending, $ok) = app_state_get($sdbh, "external_notice:$user");
+                    if ($ok && defined $pending && $pending ne '') {
+                        $ext = $pending;
+                        # one-shot: blank it so it shows only once (the web user
+                        # has UPDATE but not DELETE on app_state, so clear by
+                        # emptying).
+                        app_state_set($sdbh, "external_notice:$user", '', $user);
+                    }
+                    $sdbh->disconnect;
+                }
+            }
+            if (defined $ext && $ext ne '') {
+                # Only admins may open the audit log, so only they get the link;
+                # a user with just the edit-device-table right sees the notice.
+                my $review = $is_admin
+                    ? qq{ Review it in <a href="} . esc(script_url() . '?action=tool_audit')
+                      . qq{">the audit log</a>.}
+                    : '';
+                # On the device-table editor and the bulk editor, make clear
+                # that what is loaded below already reflects that external
+                # change -- so the user is editing the current on-disk table,
+                # not a stale copy, and saving will build on it.
+                my $here = ($title eq 'Edit device table' || $title eq 'Bulk edit devices')
+                    ? ' The editor below has loaded this changed table, so you are'
+                      . ' editing the current content.'
+                    : '';
+                $external = qq{<div class="ext-change-warning">&#9888; } . esc($ext)
+                    . esc($here) . $review . qq{</div>};
+            }
+        }
+
+        my $pwnag = '';
+        if ($fatal eq '' && $version eq '' && $external eq ''
+            && defined $pw_warn && $pw_warn ne '') {
             my $text = $pw_warn eq 'admin'
                 ? 'Change the default admin password.'
                 : 'Do NOT use the application name as password.';
-            $warn_banner = qq{<div class="pw-warning">} . esc($text)
+            $pwnag = qq{<div class="pw-warning">} . esc($text)
                 . qq{ <a href="$user_page">Change password</a></div>};
         }
-        # FATAL device-table problems (table unreadable, or no repository
-        # configured anywhere): first, directly below the title bar.
-        $warn_banner = fatal_error_banner() . $warn_banner;
 
-        # fetchconfig version warning (shown to logged-in users on every page
-        # while the installed version is below MIN_FETCHCONFIG_VERSION, or
-        # can't be determined).
-        $warn_banner .= fetchconfig_version_warning();
-
-        # Device table changed outside the application (tripwire). Detection in
-        # the current request sets the global (editor-open case). Detection in
-        # do_login redirects, so it also left a one-shot per-user notice in
-        # app_state; read and clear it here for the first page after login.
-        my $ext = $EXTERNAL_CHANGE_NOTICE;
-        if (!defined $ext || $ext eq '') {
-            my $sdbh = db_connect();
-            if ($sdbh) {
-                my ($pending, $ok) = app_state_get($sdbh, "external_notice:$user");
-                if ($ok && defined $pending && $pending ne '') {
-                    $ext = $pending;
-                    # one-shot: blank it so it shows only once (the web user has
-                    # UPDATE but not DELETE on app_state, so clear by emptying).
-                    app_state_set($sdbh, "external_notice:$user", '', $user);
-                }
-                $sdbh->disconnect;
-            }
-        }
-        if (defined $ext && $ext ne '') {
-            # Only admins may open the audit log, so only they get the link; a
-            # user with just the edit-device-table right sees the notice alone.
-            my $review = $is_admin
-                ? qq{ Review it in <a href="} . esc(script_url() . '?action=tool_audit')
-                  . qq{">the audit log</a>.}
-                : '';
-            # On the device-table editor and the bulk editor, make clear that
-            # what is loaded below already reflects that external change -- so
-            # the user is editing the current on-disk table, not a stale copy,
-            # and saving will build on it.
-            my $here = ($title eq 'Edit device table' || $title eq 'Bulk edit devices')
-                ? ' The editor below has loaded this changed table, so you are'
-                  . ' editing the current content.'
-                : '';
-            $warn_banner .= qq{<div class="ext-change-warning">&#9888; } . esc($ext)
-                . esc($here) . $review . qq{</div>};
-        }
+        # First non-empty by priority.
+        ($warn_banner) = grep { $_ ne '' } ($fatal, $version, $external, $pwnag);
+        $warn_banner = '' unless defined $warn_banner;
     }
 
     # The login / config-error page (no $user) gets a full-page backdrop image
@@ -14608,11 +15867,18 @@ $backdrop_css
   .diff-legend .sw-uni-del { background: #ff7b72; }
   .login-box { position: relative; max-width: 320px; margin: 4em auto; background: #fff; padding: 2em;
                border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,0.15); }
+  .login-forgot { margin: 0.8em 0 0; font-size: 0.9em; }
+  .inline-email-form { display: inline-flex; gap: 0.3em; align-items: center; margin: 0; }
+  .inline-email-form input[type=text] { width: 16em; }
+  table.list td.user-email-cell { white-space: nowrap; }
   .login-icon { position: absolute; top: 1em; right: 1em; width: 100px; height: 100px; }
   /* Reserve space for the top-right icon: the heading clears it horizontally,
      and the form starts below it so it never overlaps the first field. The
      icon is 100px tall at top:1em, so ~7em of clearance from the box top. */
   .login-box h1 { margin: 0; min-height: 100px; padding-right: 112px; }
+  /* Pages that reuse the white card but have no top-right icon (forgot /
+     reset password) don't need the icon clearance. */
+  .login-box.no-icon h1 { min-height: 0; padding-right: 0; margin-bottom: 0.5em; }
   .login-box label { display: block; margin: 0.8em 0 0.2em; font-size: 0.9em; }
   .login-box input[type=text], .login-box input[type=password] {
       width: 100%; box-sizing: border-box; padding: 0.4em; margin-top: 0.2em; }
@@ -14897,6 +16163,7 @@ $backdrop_css
   /* Same small size/colour as the page footer (footer.app-footer). */
   .dev-loadtime { font-size: 0.8em; color: #888; margin: 0.6em 0 0; }
   .render-time { font-size: 0.8em; color: #888; margin: 0.6em 0 0; text-align: right; }
+  .render-diag { font-size: 0.8em; color: #888; margin: 0.4em 0 0; font-family: monospace; }
   /* Stack the stats under the table on narrow screens. */
   \@media (max-width: 700px) {
     .dev-layout { flex-direction: column; padding: 0; }
@@ -14994,7 +16261,7 @@ HTML
 # required for the per-site user access model, so this flags any gaps.
 sub show_check_site_assignment {
     my ($user) = @_;
-    print $cgi->header(-type => 'text/html', -charset => 'UTF-8');
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
     unless (user_may_use_tools($user)) {
         print page_head('Error', $user);
         print qq{<p class="error">You are not allowed to use Tools.</p>\n};
@@ -15108,6 +16375,7 @@ sub about_modal_html {
     $cr = esc($cr);
     my $fc = fetchconfig_version_cached();
     $fc = (defined $fc && $fc ne '') ? esc($fc) : 'unknown';
+    my $run_mode = esc($RUN_MODE);
     my $name = esc($APP_TITLE);
     return <<"HTML";
 <div id="fc-about" class="fc-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="fc-about-title">
@@ -15120,6 +16388,7 @@ sub about_modal_html {
       <tr><th>Configured version</th><td>$effective</td></tr>
       <tr><th>Copyright</th><td>$cr</td></tr>
       <tr><th>fetchconfig.pl</th><td>$fc</td></tr>
+      <tr><th>Run mode</th><td>$run_mode</td></tr>
     </table>
     <p class="fc-about-license">Licensed under the GNU General Public License
        version 3 (GPLv3).</p>
@@ -15263,6 +16532,72 @@ HTML
 # =============================================================================
 # Run. Called last so every static data table above (option catalog,
 # $SECRET_KEEP, etc.) has been initialized before a request is dispatched.
+#
+# Dual-mode: if the FCGI module is available (and we were actually started by a
+# FastCGI process manager -- mod_fcgid), run the persistent accept loop; one
+# iteration per HTTP request, with the process kept alive between requests to
+# avoid recompiling this ~15k-line script and reconnecting to PostgreSQL every
+# time. Otherwise fall back to plain CGI: handle one request and exit, exactly
+# as before FastCGI support existed. No FCGI installed => runs unchanged.
 # =============================================================================
-main();
-exit 0;
+my $USE_FCGI = eval { require FCGI; 1 } ? 1 : 0;
+
+if ($USE_FCGI) {
+    # SIGTERM/USR1/HUP: mod_fcgid ends worker processes with SIGTERM (idle
+    # timeout, FcgidProcessLifeTime/FcgidMaxRequestsPerProcess, graceful
+    # restart). If we are idle in Accept(), leave immediately; if we are inside
+    # a request, let it finish, then leave the loop after Finish(). sigaction
+    # with an immediate (unsafe) handler is used deliberately so it also fires
+    # while blocked in the XS Accept() call -- a %SIG handler would not.
+    # Backup Now installs its own local $SIG{TERM} inside run_command_capture()
+    # for the duration of a child run; that local handler shadows this one while
+    # a backup runs (reaping the child and removing the temp table), and this
+    # process-level handler is restored automatically when that scope exits.
+    require POSIX;
+    my $act = POSIX::SigAction->new(sub {
+        $EXIT_REQUESTED = 1;
+        POSIX::_exit(0) unless $IN_REQUEST;   # idle: safe to drop out now
+    });
+    POSIX::sigaction($_, $act)
+        for (&POSIX::SIGTERM, &POSIX::SIGUSR1, &POSIX::SIGHUP);
+    local $SIG{PIPE} = 'IGNORE';   # client vanished mid-response
+
+    my $req = FCGI::Request();     # binds STDIN/STDOUT/STDERR + %ENV from mod_fcgid
+    while ($req->Accept() >= 0) {
+        $IN_REQUEST = 1;
+        # Report the real transport. require FCGI only means the module is
+        # installed; this process is genuinely under a FastCGI manager only if
+        # the request says so. When FCGI is installed but the script was run as
+        # a plain CGI, Accept() still yields one request and IsFastCGI is false,
+        # so the About dialog then correctly shows CGI.
+        $RUN_MODE = (eval { $req->IsFastCGI() }) ? 'FCGI' : 'CGI';
+        # Force CGI.pm to parse THIS request. CGI->new caches the first
+        # request's parameters in a package global ($CGI::Q) and, left alone,
+        # hands every later CGI->new the FIRST request's params and method --
+        # so e.g. a login POST would make every following GET look like that
+        # POST ("This action requires a POST request."). CGI.pm resets itself
+        # automatically only when it is driven through CGI::Fast, which we do
+        # not use; calling initialize_globals() (the same reset CGI::Fast uses)
+        # before each CGI->new makes a bare FCGI accept loop behave correctly.
+        # FCGI has already repointed %ENV and STDIN at the current request.
+        CGI::initialize_globals() if defined &CGI::initialize_globals;
+        eval { handle_request(CGI->new); 1 } or do {
+            my $err = $@ || 'unknown error';
+            # Last-ditch: a die inside a handler must not kill the persistent
+            # process. Log it and, if nothing was sent yet, emit a 500. If the
+            # response was already partly written, the client just gets a short
+            # page; the process survives for the next request.
+            warn "fetchconfig-web: request died: $err";
+        };
+        $req->Finish();            # flush this response before looping
+        $IN_REQUEST = 0;
+        last if $EXIT_REQUESTED;
+    }
+    exit 0;
+}
+else {
+    # Plain CGI: one request, then exit (process-per-request). Unchanged from
+    # the pre-FastCGI behaviour.
+    handle_request(CGI->new);
+    exit 0;
+}

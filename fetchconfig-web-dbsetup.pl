@@ -311,7 +311,8 @@ if ($table_exists) {
             pass_hash            TEXT     NOT NULL,
             edit_device_table    BOOLEAN  NOT NULL DEFAULT FALSE,
             admin_function       BOOLEAN  NOT NULL DEFAULT FALSE,
-            download_full_report BOOLEAN  NOT NULL DEFAULT FALSE
+            download_full_report BOOLEAN  NOT NULL DEFAULT FALSE,
+            email                TEXT
         )
     }) or die_clean("CREATE TABLE failed: " . $dbh->errstr);
     print "Created table \"users\".\n";
@@ -425,6 +426,32 @@ if ($appstate_exists) {
         )
     }) or die_clean("CREATE TABLE app_state failed: " . $dbh->errstr);
     print "Created table \"app_state\".\n";
+
+    # --- v1.60: login throttle + password-reset tokens -------------------
+    $dbh->do(q{
+        CREATE TABLE login_attempts (
+            kind       TEXT        NOT NULL,
+            keyval     TEXT        NOT NULL,
+            failures   INTEGER     NOT NULL DEFAULT 0,
+            last_fail  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (kind, keyval)
+        )
+    }) or die_clean("CREATE TABLE login_attempts failed: " . $dbh->errstr);
+    $dbh->do(q{CREATE INDEX login_attempts_last_idx ON login_attempts (last_fail)});
+    print "Created table \"login_attempts\".\n";
+
+    $dbh->do(q{
+        CREATE TABLE password_resets (
+            token_hash TEXT        NOT NULL PRIMARY KEY,
+            username   TEXT        NOT NULL,
+            created    TIMESTAMPTZ NOT NULL DEFAULT now(),
+            expires    TIMESTAMPTZ NOT NULL,
+            used       BOOLEAN     NOT NULL DEFAULT FALSE
+        )
+    }) or die_clean("CREATE TABLE password_resets failed: " . $dbh->errstr);
+    $dbh->do(q{CREATE INDEX password_resets_user_idx ON password_resets (username)});
+    $dbh->do(q{CREATE INDEX password_resets_exp_idx  ON password_resets (expires)});
+    print "Created table \"password_resets\".\n";
 }
 {
     my $q_user = $dbh->quote_identifier($app_user2);
@@ -434,6 +461,10 @@ if ($appstate_exists) {
         "GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO $q_user",
         # app_state is mutable (token updates).
         "GRANT SELECT, INSERT, UPDATE ON app_state TO $q_user",
+        # v1.60: throttle counters (created/incremented/cleared at run time).
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON login_attempts TO $q_user",
+        # v1.60: reset tokens (create/look-up/mark-used; pruned by a DBA tool).
+        "GRANT SELECT, INSERT, UPDATE ON password_resets TO $q_user",
     ) {
         $dbh->do($stmt);   # best effort; ignore if already granted / owner
     }

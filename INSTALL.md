@@ -26,13 +26,14 @@ fetchconfig's device table and repository.
   - [Step 5 -- Directories and permissions](#step-5----directories-and-permissions)
   - [Step 6 -- Backup Now and sudo](#step-6----backup-now-and-sudo)
   - [Step 7 -- Serve over HTTPS](#step-7----serve-over-https)
+  - [Step 7a -- Running under mod_fcgid (optional)](#step-7a----running-under-mod_fcgid-optional)
   - [Step 8 -- First login](#step-8----first-login)
 - [Part 3 -- Upgrading](#part-3----upgrading)
   - [Upgrading the script](#upgrading-the-script)
-  - [Upgrading to 1.53](#upgrading-to-153)
-  - [Upgrading the database to 1.51 (audit log)](#upgrading-the-database-to-151-audit-log)
-  - [Upgrading the database to 1.50](#upgrading-the-database-to-150)
-  - [New configuration keys in 1.50](#new-configuration-keys-in-150)
+  - [Upgrading to 1.60](#upgrading-to-1.60)
+  - [Upgrading the database to 1.51 (audit log)](#upgrading-the-database-to-1.51-audit-log)
+  - [Upgrading the database to 1.50](#upgrading-the-database-to-1.50)
+  - [New configuration keys in 1.50](#new-configuration-keys-in-1.50)
 - [Part 4 -- Verification and troubleshooting](#part-4----verification-and-troubleshooting)
   - [Checklist](#checklist)
   - [Common problems](#common-problems)
@@ -49,11 +50,13 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
 |------|---------|
 | `fetchconfig-web.cgi` | The application: one self-contained Perl CGI script. |
 | `fetchconfig-web-dbsetup.pl` | Creates the PostgreSQL role, database and tables; bootstraps the `admin` account; can write the config file. |
-| `fetchconfig-web-audit.sql` | Standalone idempotent SQL to add the 1.51 audit-log tables to an existing database (PostgreSQL 8.2+). |
+| `fetchconfig-web-dbupdate-1.51.sql` | Standalone idempotent SQL to add the 1.51 audit-log tables to an existing database (PostgreSQL 8.2+). |
 | `fetchconfig-web-clean-audit.pl` | Standalone script to prune old audit-log rows (needs a privileged DB role; `-h` for help, `-s` to print the role SQL). |
 | `LICENSE-ADDITIONS.md`, `LICENSE-ADDITIONS.html` | Additional terms under GPLv3 Section 7 (EU/German liability adaptation). |
 | `PRIVACY.md`, `PRIVACY.html` | GDPR data-privacy notes for the operator (data controller). |
-| `fetchconfig-web-dbupdate.sql` | Idempotent SQL that upgrades an existing database to the 1.50 schema (per-site access). |
+| `fetchconfig-web-dbupdate-1.50.sql` | Idempotent SQL that upgrades an existing database to the 1.50 schema (per-site access). |
+| `fetchconfig-web-dbupdate-1.60.sql` | Idempotent SQL that upgrades an existing database to the 1.60 schema (`users.email`, login throttle, password-reset tokens; PostgreSQL 8.2+). |
+| `fetchconfig-web-clean-resets.pl` | Standalone script to prune spent password-reset tokens and stale login-throttle rows (`-h` for help, `-s` to print the role SQL). |
 | `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`, that installs an edited template file. |
 | `imageconvert.pl`, `README.imageconvert` | Optional helper for preparing the login backdrop image. |
 | `images/back.jpg` | Login-page backdrop image. |
@@ -89,8 +92,10 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
 > higher than the longest backup run of any device in the device table
 > (bounded by its `timeout`, `fetch_timeout` and `banner_timeout` options).
 > A reverse proxy or load balancer in front of the web server must not buffer
-> the response, otherwise its own timeout applies. Closing the browser tab
-> during a run terminates it (audited as `ABORTED`).
+> the response, otherwise its own timeout applies. Under **mod_fcgid**,
+> `FcgidBusyTimeout` (default 300 s) caps the total request time and so must
+> also exceed `BACKUP_TIMEOUT`; `FcgidIOTimeout` is covered by the keepalive.
+> Closing the browser tab during a run terminates it (audited as `ABORTED`).
 
 ### Perl modules
 
@@ -111,6 +116,9 @@ Most of what the two scripts need ships with Perl itself. The table lists
 | `DBD::Pg` | 3.15.0 | PostgreSQL driver for DBI (loaded at runtime via the `dbi:Pg:` DSN). | `libdbd-pg-perl` | `perl-DBD-Pg` | `perl-DBD-Pg` | `cpan DBD::Pg` |
 | `Algorithm::Diff` | 1.19 | Side-by-side and unified config diffs. | `libalgorithm-diff-perl` | `perl-Algorithm-Diff` | `perl-Algorithm-Diff` | `cpan Algorithm::Diff` |
 | `Filesys::Df` | 0.92 | **Optional** -- only for the *Tools -> Disk space* page (free-space figures). Loaded lazily; without it the app runs normally and that one tool shows an install hint. | `libfilesys-df-perl` | `perl-Filesys-Df` | (CPAN) | `cpan Filesys::Df` |
+| `FCGI` | 0.67 (tested 0.82) | **Optional** -- only to run under FastCGI / mod_fcgid (see *Running under mod_fcgid*). Loaded lazily; without it the script runs as plain CGI. `CGI::Fast` is **not** needed. | `libfcgi-perl` | `perl-FCGI` | `perl-FCGI` | `cpan FCGI` |
+| `Crypt::Bcrypt` | any | **Optional** -- enables bcrypt (`$2b$`) password hashing. When present, new and changed passwords are stored as bcrypt and legacy `$apr1$` hashes are upgraded to bcrypt on the owner's next login. Without it, passwords stay `$apr1$` (still supported). | `libcrypt-bcrypt-perl` | (CPAN) | (CPAN) | `cpan Crypt::Bcrypt` |
+| `Net::SMTP` | 3.x (for TLS) | **Optional** -- only for the self-service password-reset email (`EMAIL = 1`). STARTTLS/SSL need `Net::SMTP` 3.x with `IO::Socket::SSL`. Without `EMAIL = 1` it is not loaded, and the "Forgot password?" page just tells users to contact the admin. | `libnet-smtp-ssl-perl`, `libio-socket-ssl-perl` | `perl-Net-SMTP-SSL` | `perl-Net-SMTP-SSL` | `cpan Net::SMTP IO::Socket::SSL` |
 
 **`Digest::SHA` is not required.** This is deliberate, and worth knowing if
 you audit dependencies: password hashes are pure-Perl Apache MD5 (`$apr1$`)
@@ -247,9 +255,27 @@ PROTECTED_USER          = admin
 MIN_PASSWORD_LENGTH     = 8
 DEFAULT_PASSWORD        = fetchconfig
 
+# --- email / password reset (optional) ---
+# EMAIL = 1 turns on the self-service "Forgot password?" flow (needs Net::SMTP
+# and the SMTP_* settings below). EMAIL = 0 (default) just tells users to
+# contact the admin. SMTP_SECURITY is starttls (default), ssl or none.
+# SMTP AUTH is used only when EMAIL_AUTH = 1.
+EMAIL                   = 0
+SMTP_HOST               = mail.example.com
+SMTP_PORT               = 587
+SMTP_SECURITY           = starttls
+EMAIL_AUTH              = 0
+#SMTP_USER              = fetchconfig-web
+#SMTP_PASS              = secret
+EMAIL_FROM              = fetchconfig-web@example.com
+
 # --- misc ---
 HTTPS_ENABLED           = 0
 SHOW_RENDER_TIME        = 0
+# Syntax highlighting for template-backed ("generic") devices whose template
+# does not declare a syntax_style. auto = detect from content (default);
+# none = plain text; or a scheme name (cisco-ios, json, xml, generic, ...).
+GENERIC_SYNTAX          = auto
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
 HELP_BASE_URL           = /pub/fetchconfig-web
 IMAGE_BASE_URL          = /pub/fetchconfig-web/images
@@ -284,11 +310,21 @@ for `IMAGE_BASE_URL`, `HELP_BASE_URL` and `FONT_BASE_URL` (the example uses
 mkdir -p /www/pub/fetchconfig-web/images
 cp images/back.jpg /www/pub/fetchconfig-web/images/
 cp help.html       /www/pub/fetchconfig-web/
+# Documentation/licence pages shown in the Help menu. Each menu entry appears
+# only if its file is present in this directory (HELP_DIR), so copy the ones
+# you want listed:
+cp fetchconfig-web-documentation.html /www/pub/fetchconfig-web/   # "Documentation fetchconfig-web"
+cp INSTALL.html                       /www/pub/fetchconfig-web/   # "Installation fetchconfig-web"
+cp LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html /www/pub/fetchconfig-web/
+# Optional: the fetchconfig (CLI) manual, if you have it rendered as HTML:
+# cp fetchconfig-documentation.html   /www/pub/fetchconfig-web/   # "Documentation fetchconfig"
 ```
 
 The backdrop image is optional (the login page shows a plain background
 without it). The Help page is read from `HELP_FILE` on the filesystem and
-also linked at `HELP_BASE_URL`; both must point at the same file.
+also linked at `HELP_BASE_URL`; both must point at the same file. The Help
+menu lists each documentation/licence page only when its `.html` file exists
+in `HELP_DIR`, so a page you do not copy simply does not appear.
 
 Install the root-side template helper next to fetchconfig so the template
 editor can save files it cannot write directly (only needed if you use the
@@ -430,6 +466,162 @@ it over plain HTTP. Leave it `0` on an HTTP-only deployment -- with `Secure`
 set, the browser would withhold the cookie and login would appear to fail.
 Consider also enabling HSTS in the web server once HTTPS is stable.
 
+### Step 7a -- Running under mod_fcgid (optional)
+
+By default `fetchconfig-web.cgi` runs as a plain CGI: Apache compiles the
+~15,000-line script and opens fresh PostgreSQL connections on **every**
+request. Under FastCGI the process is kept alive between requests, so the
+script is compiled once per worker and connections are reused -- noticeably
+faster on a busy server, and especially on AIX where process start-up is
+costly.
+
+The same script runs both ways with no code change. At start-up it does
+`require FCGI`; if the module is present and Apache started it through a
+FastCGI process manager, it runs a persistent accept loop, otherwise it serves
+one request and exits as a normal CGI. So installing `FCGI` and switching the
+handler is all that is needed; removing the handler reverts to plain CGI.
+
+1. **Install the modules** (web-server Perl):
+
+   ```sh
+   perl -MFCGI -e 'print "$FCGI::VERSION\n"'    # install libfcgi-perl / perl-FCGI if this fails
+   ```
+
+   Only `FCGI` is required. `CGI::Fast` is **not** used.
+
+2. **Create the mod_fcgid socket directory.** mod_fcgid keeps a Unix-domain
+   socket per worker here. It must be on a **local** filesystem (never NFS --
+   sockets on NFS fail) and owned by the user Apache runs its child processes
+   as (the `User` directive; often `nobody`, `apache`, `www` or `daemon` --
+   check with `grep '^User' <httpd.conf>` or `ps -ef | grep fetchconfig-web`).
+   On a persistent local filesystem the directory survives reboot, so it does
+   **not** need to be recreated at boot (unlike a volatile path such as
+   `/var/run`, which does not exist on AIX in the Linux sense anyway):
+
+   ```sh
+   mkdir -p /www/mod_fcgid
+   chown nobody /www/mod_fcgid      # the owner of the httpd child processes
+   chmod 755  /www/mod_fcgid
+   ```
+
+   The sockets appear in this directory while a worker is alive (they are
+   removed when the worker exits, so an idle server may show none).
+
+3. **Load mod_fcgid** and point the one script at it. For Apache 2.2:
+
+   ```apache
+   # Without this LoadModule the whole <IfModule mod_fcgid.c> block below is
+   # silently skipped -- that guard is why a missing module raises no error.
+   LoadModule fcgid_module modules/mod_fcgid.so
+
+   <IfModule mod_fcgid.c>
+       # Socket directory from step 2 (local disk, owned by the httpd user).
+       FcgidIPCDir                /www/mod_fcgid
+       # Shared process table. Set this EXPLICITLY (a file inside the IPC dir is
+       # fine). On AIX especially, leaving it unset can make mod_fcgid fall back
+       # to a SysV-semaphore lock that the kernel rejects at startup with
+       # "(22)Invalid argument: mod_fcgid: can't lock process table" (APR on a
+       # 32-bit AIX build defaults to APR_USE_SYSVSEM_SERIALIZE); pointing it at
+       # a real file on local disk uses a file lock instead and avoids this.
+       FcgidProcessTableFile      /www/mod_fcgid/fcgid_shm
+
+       # Process pool. FcgidMaxProcessesPerClass MUST be >= MAX_PARALLEL_SCAN
+       # (see the note after this block): the browser-driven scan tools open up
+       # to MAX_PARALLEL_SCAN concurrent per-device requests, and if the worker
+       # class is smaller they queue behind busy workers and the progress bar
+       # appears stuck at 0. 8 covers the default MAX_PARALLEL_SCAN (<= 5) plus
+       # the browser's own per-host connection limit, with headroom.
+       FcgidMaxProcesses         32
+       FcgidMinProcessesPerClass  2
+       FcgidMaxProcessesPerClass  8
+       FcgidIdleTimeout         300
+       FcgidProcessLifeTime    3600
+
+       # Both MUST exceed BACKUP_TIMEOUT. FcgidBusyTimeout caps TOTAL request
+       # time, so a long Backup Now is killed if it is lower than
+       # BACKUP_TIMEOUT; FcgidIOTimeout is an inactivity timeout and is covered
+       # by the keepalive (every 10 s), but keep it above BACKUP_TIMEOUT too.
+       FcgidBusyTimeout         650
+       FcgidIOTimeout           650
+
+       # If the modules are not in the httpd user's @INC, point Perl at them;
+       # not needed when FCGI/CGI/DBI/... are already installed system-wide.
+       # FcgidInitialEnv PERL5LIB /usr/local/perl_lib
+       # FcgidInitialEnv TZ       CET-1CEST,M3.5.0,M10.5.0/3
+   </IfModule>
+
+   # Map the URL to the CGI directory. Use Alias (not ScriptAlias): with Alias,
+   # nothing in the directory executes unless a <Files> block below says so, so
+   # a stray script is served static, not run. ScriptAlias would instead make
+   # EVERY file there a CGI.
+   Alias /cgi-bin/fetchconfig-fcgi/ "/www/cgi-bin/fetchconfig-fcgi/"
+
+   <Directory "/www/cgi-bin/fetchconfig-fcgi">
+       AllowOverride None
+       Options +ExecCGI
+       <Files "fetchconfig-web.cgi">
+           SetHandler fcgid-script
+       </Files>
+   </Directory>
+   ```
+
+   `SetHandler fcgid-script` makes only the named file run under FastCGI; add a
+   further `<Files "name.cgi">` block for each additional FastCGI responder.
+   Only a script that runs a FastCGI accept loop belongs in such a block -- a
+   plain CGI handed to `fcgid-script` hangs until `FcgidBusyTimeout`.
+   `mod_fcgid` creates and owns the socket, so the `CGI::Fast`
+   socket-permission behaviour does not apply here. Keep the CGI directory
+   outside `DocumentRoot`, and do not place the socket directory under
+   `DocumentRoot` either.
+
+   **Worker pool vs. scan concurrency.** The browser-driven scan tools (*Check
+   devices for consistent backup suffixes*, *Devices without backups*, *Empty
+   Backup Cleanup*, etc.) run one request per device and keep up to
+   `MAX_PARALLEL_SCAN` (config, default `1`, max `5`) of them in flight at
+   once. Each such request occupies one FastCGI worker for the duration of its
+   `fetchconfig.pl` call, so **`FcgidMaxProcessesPerClass` must be at least
+   `MAX_PARALLEL_SCAN`** -- with a little headroom for the browser's own
+   ~6-connections-per-host limit. If it is smaller (e.g. the mod_fcgid default
+   of a small class, or `MAX_PARALLEL_SCAN` raised above the class size), the
+   concurrent per-device requests queue behind busy workers and the scan's
+   progress bar sits at `0 of N` with "`N of N scan processes in use`" until a
+   worker frees up. This is a pool-sizing issue, not a fault in the scan. With
+   the `FcgidMaxProcessesPerClass 8` above and the default `MAX_PARALLEL_SCAN`
+   you have ample margin; if you raise `MAX_PARALLEL_SCAN`, raise the class to
+   match. (Under plain CGI this never arises -- every request is its own
+   process.)
+
+4. **Restart Apache** (`apachectl configtest && apachectl restart`) and confirm
+   persistence: load a page, reload it a few times, and check that the worker
+   process (`ps -ef | grep fetchconfig-web.cgi`) keeps the same PID across
+   requests. A changing PID means it is still running as plain CGI -- the
+   handler did not take effect.
+
+To revert to plain CGI, remove the `<Files>`/`SetHandler` block (or uninstall
+`FCGI`); no change to the script is needed.
+
+**Reloading after an upgrade.** Under FastCGI the workers are long-lived and
+hold the compiled script in memory, so after copying a new
+`fetchconfig-web.cgi` the running workers keep serving the OLD code until they
+are recycled. `mod_fcgid` does **not** watch the file's modification time, so
+`touch`-ing the script does nothing. Reload the new code with a graceful
+restart, which lets in-flight requests finish and replaces the workers:
+
+```sh
+apachectl graceful
+```
+
+(`apachectl restart` works too but drops in-flight requests.) Confirm the new
+version is live via the footer or *Help -> About* (**Run mode: FCGI**), or by
+checking that the worker PIDs changed:
+
+```sh
+ps -ef | grep '[f]etchconfig-web.cgi'
+```
+
+Plain CGI needs none of this -- every request is a fresh process, so a new
+script file takes effect on the next request.
+
 ### Step 8 -- First login
 
 Browse to `https://yourhost/cgi-bin/fetchconfig-web.cgi` and log in as
@@ -461,13 +653,21 @@ cp /www/cgi-bin/fetchconfig-web.cgi /www/cgi-bin/fetchconfig-web.cgi.old
 cp fetchconfig-web.cgi /www/cgi-bin/
 chmod 755 /www/cgi-bin/fetchconfig-web.cgi
 cp help.html /www/pub/fetchconfig-web/
+# Refresh the Help-menu documentation pages as well (see Step 4):
+cp fetchconfig-web-documentation.html INSTALL.html \
+   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html /www/pub/fetchconfig-web/
 ```
 
 Then hard-reload the browser (Ctrl-F5) so cached JavaScript and CSS are
 refreshed -- several 1.50 changes are client-side, and a stale cache is the
 usual reason a fix "does not appear".
 
-### Upgrading to 1.53
+**Running under FastCGI?** Copying the new script is not enough -- the
+long-lived `mod_fcgid` workers keep running the old code until recycled, and
+`touch` does not trigger a reload. Run `apachectl graceful` after the copy
+(see *Step 7a -- Running under mod_fcgid*). Plain CGI needs no such step.
+
+### Upgrading to 1.60
 
 - **Remove `REPOSITORY`** from `/etc/fetchconfig-web.cfg`. The repository now
   always comes from the device table (device `repository=` or the model's
@@ -477,10 +677,29 @@ usual reason a fix "does not appear".
 - If the device table sets no `repository=` at all, every page shows
   `FATAL ERROR: No repository found ...` -- add a `default:` line with
   `repository=` for each model.
-- Before 1.53, *Backup Now* stored backups of devices whose repository comes
+- Before 1.60, *Backup Now* stored backups of devices whose repository comes
   from a model `default:` line in `REPOSITORY` instead, if the two differed.
   Check `REPOSITORY` for such device directories and move them into the
   device's real repository.
+- **Run the database upgrade** (adds `users.email`, `login_attempts` and
+  `password_resets`). It is idempotent and PostgreSQL 8.2-compatible:
+
+  ```sh
+  psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate-1.60.sql
+  ```
+
+- **Optional modules.** Install `Crypt::Bcrypt` to have passwords stored as
+  bcrypt and legacy `$apr1$` hashes upgraded on next login. Install `Net::SMTP`
+  (3.x, with `IO::Socket::SSL`) only if you enable the password-reset email.
+- **Optional email reset.** To let users reset their own password, set
+  `EMAIL = 1` and the `SMTP_*` / `EMAIL_FROM` keys in
+  `/etc/fetchconfig-web.cfg` (see the email section of the sample config), and
+  set each user's email address in *User -> Users*. With `EMAIL = 0` the
+  "Forgot password?" link simply tells users to contact an administrator, who
+  resets the password from *User -> Users*.
+- **Housekeeping.** Prune spent reset tokens and stale throttle rows
+  periodically (e.g. from cron) with `fetchconfig-web-clean-resets.pl` (run
+  `-s` to print the minimal DB role it needs; `-h` for options).
 
 ### Upgrading the database to 1.51 (audit log)
 
@@ -489,11 +708,11 @@ Version 1.51 adds an append-only `audit_log` table (plus a small
 script once:
 
 ```sh
-psql -U fetchconfig -d fetchconfig -f fetchconfig-web-audit.sql
+psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate-1.51.sql
 ```
 
 It is safe to re-run, and the same changes are also included in
-`fetchconfig-web-dbupdate.sql`. The web user is granted INSERT + SELECT
+`fetchconfig-web-dbupdate-1.50.sql`. The web user is granted INSERT + SELECT
 on `audit_log` only (it can never alter or erase the log); a DBA
 handles any retention/pruning.
 
@@ -505,7 +724,7 @@ Run the idempotent upgrade script **once** against the fetchconfig-web
 database:
 
 ```sh
-psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate.sql
+psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate-1.50.sql
 ```
 
 It is safe to re-run. It:
@@ -581,7 +800,7 @@ change -- this guard is what stops two people overwriting each other.
 **Backup Now ends with a blank or truncated page; the Apache error log shows
 `(70007)The timeout specified has expired: ap_content_length_filter:
 apr_bucket_read() failed`.** The web server saw no output for its `Timeout`.
-Since 1.53 the keepalive (every 10 s) prevents this; on older releases raise
+Since 1.60 the keepalive (every 10 s) prevents this; on older releases raise
 `Timeout` above `BACKUP_TIMEOUT`. If it still occurs, a reverse proxy or load
 balancer in front is buffering the response (see the warning under
 Requirements).

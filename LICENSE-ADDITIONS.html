@@ -496,7 +496,7 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v1.53</span>
+      <span class="pill">v1.60</span>
       <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
@@ -527,10 +527,11 @@
         only needs to be longer than 10 s and <code>BACKUP_TIMEOUT</code> may exceed
         it. <code>BACKUP_TIMEOUT</code> must be higher than the longest backup
         run of any device in the device table. A reverse proxy or load balancer
-        in front must not buffer the response.</p>
+        in front must not buffer the response; under mod_fcgid, FcgidBusyTimeout
+        must also exceed BACKUP_TIMEOUT.</p>
       </div>
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">1.53</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">1.60</span><span class="label">version</span></div>
         <div class="hero-stat"><span class="num">Perl CGI</span><span class="label">single file</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
