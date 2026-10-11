@@ -119,6 +119,10 @@ sub make_config {
         print $fh "$_ = $cfg{$_}\n";
     }
     close($fh);
+    # The app warns (V10) unless the config file is 0600, since it holds
+    # passwords. Write the test config the way a correct install has it, so the
+    # warning is off by default; a test of the warning itself loosens the mode.
+    chmod 0600, $path;
     return ($path, $dir, $fcp);
 }
 

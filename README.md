@@ -350,12 +350,28 @@ DBpass                  = changeme
 DBhost                  = localhost
 PROTECTED_USER          = admin
 MIN_PASSWORD_LENGTH     = 8
+MAX_PASSWORD_LENGTH     = 64
+PASSWORD_MIN_UPPER      = 0
+PASSWORD_MIN_LOWER      = 0
+PASSWORD_MIN_DIGIT      = 0
+PASSWORD_MIN_SPECIAL    = 0
+PASSWORD_MIN_CLASSES    = 0
 DEFAULT_PASSWORD        = fetchconfig
+EMAIL                   = 0
+SMTP_HOST               = mail.example.com
+SMTP_PORT               = 587
+SMTP_SECURITY           = starttls
+EMAIL_AUTH              = 0
+#SMTP_USER              = fetchconfig-web
+#SMTP_PASS              = secret
+EMAIL_FROM              = fetchconfig-web@example.com
+SITE_URL                = https://fetchconfig.example.com
 HTTPS_ENABLED           = 0
 SHOW_RENDER_TIME        = 0
+GENERIC_SYNTAX          = auto
 HELP_FILE               = /www/pub/fetchconfig-web/help.html
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
-APP_VERSION             = 1.50
+APP_VERSION             = 1.61
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 
@@ -409,6 +425,37 @@ Format and loading:
   server hosting fetchconfig can comfortably handle -- and note that browsers
   also cap connections per host (about 6), which bounds the effective
   parallelism.
+- **Password rules** (all default `0` = off, except length). `MIN_PASSWORD_LENGTH`
+  (default `8`) and `MAX_PASSWORD_LENGTH` (default `64`) bound the length;
+  `PASSWORD_MIN_UPPER`, `PASSWORD_MIN_LOWER`, `PASSWORD_MIN_DIGIT` and
+  `PASSWORD_MIN_SPECIAL` are minimum counts of each character class (special =
+  any non-alphanumeric); `PASSWORD_MIN_CLASSES` (`0..4`) is how many of those
+  four classes must be present. A new password must also differ from
+  `DEFAULT_PASSWORD` and from the username. The rules apply at every
+  password-set point (add user, admin reset, self-service change, email
+  reset) and the active requirements are shown on the change-password and
+  reset forms.
+- **Email / password reset.** `EMAIL` (`0`|`1`, default `0`) enables the
+  self-service *Forgot password?* flow; with `0` the page only tells users to
+  contact an administrator. When `EMAIL = 1`, `SMTP_HOST`, `EMAIL_FROM` and
+  **`SITE_URL`** are required: `SITE_URL` (scheme + host\[:port], no path) is the
+  public base URL used to build the reset link. The link is **never** derived
+  from the request's `Host` header -- that is attacker-controlled -- so without
+  `SITE_URL` no reset email is sent. `SMTP_PORT` (default `587`),
+  `SMTP_SECURITY` (`starttls`|`ssl`|`none`, default `starttls`), and
+  `EMAIL_AUTH` (`0`|`1`) with `SMTP_USER`/`SMTP_PASS` (used only when
+  `EMAIL_AUTH = 1`) control delivery. `SMTP_PASS` is masked in the config
+  viewer.
+- **`GENERIC_SYNTAX`** (default `auto`) selects syntax highlighting for
+  template-backed (`generic`) devices whose template does not declare a
+  `syntax_style`: `auto` detects from content, `none` disables it, or a scheme
+  name (`cisco-ios`, `procurve`, `comware`, `zyxel`, `aruba-cx`, `nexus`,
+  `mediant`, `json`, `xml`, `generic`) forces one. See *Config syntax
+  highlighting*.
+
+The configuration file holds `DBpass` and `SMTP_PASS` in cleartext, so it must
+be mode `0600` and owned by the web-server user; the application shows a red
+warning on every page until it is.
 
 **Repository.** There is no `REPOSITORY` setting (removed in 1.60). The
 repository of a device is taken from the device table exactly as
@@ -1856,8 +1903,27 @@ mkdir -p /www/pub/fetchconfig-web
 cp help.html /www/pub/fetchconfig-web/help.html
 ```
 
-`$HELP_FILE` is a **filesystem path**, read directly with Perl's `open()`
--- it is not the same as this file's HTTP-visible location. The web
+The help page is addressed by two keys. **`HELP_DIR`** is the filesystem
+directory that holds `help.html` and the sibling Help-menu documents
+(`fetchconfig-web-documentation.html`, `INSTALL.html`, `LICENSE.html`,
+`LICENSE-ADDITIONS.html`, `PRIVACY.html`); each Help-menu entry appears only
+when its file is present there. **`HELP_FILE`** is the help page's filename.
+Two equivalent styles are accepted:
+
+```
+# preferred: explicit directory + bare filename
+HELP_DIR   = /www/pub/fetchconfig-web
+HELP_FILE  = help.html
+
+# legacy: a single full path (its directory becomes HELP_DIR)
+HELP_FILE  = /www/pub/fetchconfig-web/help.html
+```
+
+When `HELP_DIR` is set, `HELP_FILE` is reduced to its basename, so a full path
+there is harmless. When `HELP_DIR` is absent, a `HELP_FILE` containing a `/`
+supplies the directory (the legacy form). `HELP_DIR`/`HELP_FILE` are filesystem
+locations read directly with Perl's `open()`; they are distinct from the
+HTTP-visible location, which is `HELP_BASE_URL` + the filename. The web
 server's existing mapping of the URL path `/fetchconfig-web/` to the
 filesystem directory `/www/pub/fetchconfig-web/` means the same file is
 also reachable in a browser at `/fetchconfig-web/help.html` -- a

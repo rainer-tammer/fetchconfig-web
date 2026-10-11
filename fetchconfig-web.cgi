@@ -62,12 +62,12 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.60';
+use constant APP_VERSION => '1.61';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '1.60';
+use constant APP_VERSION_INTERNAL => '1.61';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -101,13 +101,15 @@ my ($DEVICE_TABLE, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFIG_BIN_FULL,
     $SESSION_DIR, $BACKUP_TMP_DIR, $SESSION_TTL, $SESSION_MAX_LIFETIME, $DEVICE_ID_FIELD,
     $BACKUP_DEVICE_TABLE,
     $DBinst, $DBuser, $DBpass, $DBhost,
-    $PROTECTED_USER, $MIN_PASSWORD_LENGTH, $DEFAULT_PASSWORD,
+    $PROTECTED_USER, $MIN_PASSWORD_LENGTH, $MAX_PASSWORD_LENGTH, $DEFAULT_PASSWORD,
+    $PASSWORD_MIN_UPPER, $PASSWORD_MIN_LOWER, $PASSWORD_MIN_DIGIT,
+    $PASSWORD_MIN_SPECIAL, $PASSWORD_MIN_CLASSES,
     $HELP_FILE, $HELP_DIR, $APP_VERSION, $COPYRIGHT,
     $FETCHCONFIG_LOG, $LOG_MAX_DEVICES, $MAX_PARALLEL_SCAN, $BACKUP_TIMEOUT,
     $FONT_BASE_URL, $IMAGE_BASE_URL, $TEMPLATE_HELPER, $HELP_BASE_URL,
     $HTTPS_ENABLED, $SHOW_RENDER_TIME,
     $EMAIL, $SMTP_HOST, $SMTP_PORT, $SMTP_SECURITY, $EMAIL_AUTH, $GENERIC_SYNTAX,
-    $SMTP_USER, $SMTP_PASS, $EMAIL_FROM);
+    $SMTP_USER, $SMTP_PASS, $EMAIL_FROM, $SITE_URL);
 
 # Parse $CONFIG_FILE (key = value, '#' comments and blank lines ignored,
 # optional surrounding quotes on the value) into a hashref, or (undef,
@@ -165,6 +167,12 @@ my @CFG_KEYS = (
     [ 'DBhost',                 'str_req',   '(required)',                             'host name or address' ],
     [ 'PROTECTED_USER',         'str_req',   'admin',                                  'user name' ],
     [ 'MIN_PASSWORD_LENGTH',    'int',       '8',                                      'integer >= 1',                 1, undef ],
+    [ 'MAX_PASSWORD_LENGTH',    'int',       '64',                                     'integer >= 1',                 1, undef ],
+    [ 'PASSWORD_MIN_UPPER',     'int',       '0',                                      'integer >= 0 (0 = off)',       0, undef ],
+    [ 'PASSWORD_MIN_LOWER',     'int',       '0',                                      'integer >= 0 (0 = off)',       0, undef ],
+    [ 'PASSWORD_MIN_DIGIT',     'int',       '0',                                      'integer >= 0 (0 = off)',       0, undef ],
+    [ 'PASSWORD_MIN_SPECIAL',   'int',       '0',                                      'integer >= 0 (0 = off)',       0, undef ],
+    [ 'PASSWORD_MIN_CLASSES',   'int',       '0',                                      'integer 0..4 (0 = off)',       0, 4 ],
     [ 'DEFAULT_PASSWORD',       'str',       'fetchconfig',                            'string' ],
     [ 'HTTPS_ENABLED',          'bool',      '0',                                      '0 | 1' ],
     [ 'SHOW_RENDER_TIME',       'bool',      '0',                                      '0 | 1' ],
@@ -184,6 +192,7 @@ my @CFG_KEYS = (
     [ 'SMTP_USER',              'str',       '(none)',                                 'string (required when EMAIL_AUTH=1)' ],
     [ 'SMTP_PASS',              'str',       '(empty)',                                'string (required when EMAIL_AUTH=1)' ],
     [ 'EMAIL_FROM',             'str',       '(none)',                                 'from address (required when EMAIL=1)' ],
+    [ 'SITE_URL',               'siteurl',   '(none)',                                 'https://host[:port] -- the public base URL for reset links (required when EMAIL=1)' ],
     [ 'GENERIC_SYNTAX',         'enum',      'auto',                                   'auto | none | cisco-ios | procurve | comware | zyxel | aruba-cx | nexus | mediant | json | xml | generic' ],
 );
 
@@ -210,6 +219,10 @@ sub cfg_value_problem {
             unless $v =~ /^\d+$/ && (!defined $min || $v >= $min) && (!defined $max || $v <= $max);
     }
     elsif ($type eq 'bool') { return 'must be 0 or 1 (default used instead)' unless $v =~ /^[01]$/; }
+    elsif ($type eq 'siteurl') {
+        return 'must be http(s)://host[:port] with no path'
+            unless $v =~ m{^https?://[A-Za-z0-9.-]+(?::\d{1,5})?/?$};
+    }
     elsif ($type eq 'enum') {
         # Allowed values are the "a | b | c" list in the range text.
         my @ok = ($range =~ /([A-Za-z0-9_]+)/g);
@@ -226,7 +239,7 @@ sub cfg_value_problem {
 # that looks like a password (e.g. a mistyped DBpass).
 sub cfg_key_is_secret {
     my ($key, $known) = @_;
-    return 1 if $key eq 'DBpass' || $key eq 'SMTP_PASS';
+    return 1 if $key eq 'DBpass' || $key eq 'SMTP_PASS' || $key eq 'DEFAULT_PASSWORD';
     return (!$known && $key =~ /pass|secret/i) ? 1 : 0;
 }
 
@@ -334,6 +347,18 @@ sub read_config {
     my ($kv, $err) = parse_config_file($CONFIG_FILE);
     return $err if $err;
 
+    # V10: the config file holds DBpass and SMTP_PASS in cleartext. It must be
+    # mode 0600, owned by the httpd run-time user (it has to be readable by the
+    # process, and nobody else). Any group/other bit set -> persistent warning.
+    if (my @st = stat($CONFIG_FILE)) {
+        my $mode = $st[2] & 0777;
+        if ($mode & 0077) {
+            $main::SECURITY_WARNING ||= sprintf('%s is mode %04o; it contains passwords and must be '
+                                     . '0600, owned by the web-server user (chmod 0600)',
+                                     $CONFIG_FILE, $mode);
+        }
+    }
+
     for my $req (qw(DEVICE_TABLE FETCHCONFIG_PATH FETCHCONFIG_BIN SESSION_DIR
                     DBinst DBuser DBhost)) {
         return "$CONFIG_FILE: required setting '$req' is missing"
@@ -401,7 +426,15 @@ sub read_config {
     $SESSION_MAX_LIFETIME = $cfg_int->('SESSION_MAX_LIFETIME', 24 * 3600, 0, undef);
     $DEVICE_ID_FIELD     = $cfg_int->('DEVICE_ID_FIELD', 1, 0, undef);
     $PROTECTED_USER      = defined $kv->{PROTECTED_USER}     ? $kv->{PROTECTED_USER}     : 'admin';
-    $MIN_PASSWORD_LENGTH = $cfg_int->('MIN_PASSWORD_LENGTH', 8, 1, undef);
+    $MIN_PASSWORD_LENGTH  = $cfg_int->('MIN_PASSWORD_LENGTH', 8, 1, undef);
+    $MAX_PASSWORD_LENGTH  = $cfg_int->('MAX_PASSWORD_LENGTH', 64, 1, undef);
+    # Composition rules (all default 0 = not enforced, so existing installs are
+    # unchanged -- only MIN/MAX length apply unless these are raised).
+    $PASSWORD_MIN_UPPER   = $cfg_int->('PASSWORD_MIN_UPPER',   0, 0, undef);
+    $PASSWORD_MIN_LOWER   = $cfg_int->('PASSWORD_MIN_LOWER',   0, 0, undef);
+    $PASSWORD_MIN_DIGIT   = $cfg_int->('PASSWORD_MIN_DIGIT',   0, 0, undef);
+    $PASSWORD_MIN_SPECIAL = $cfg_int->('PASSWORD_MIN_SPECIAL', 0, 0, undef);
+    $PASSWORD_MIN_CLASSES = $cfg_int->('PASSWORD_MIN_CLASSES', 0, 0, 4);
     $DEFAULT_PASSWORD    = defined $kv->{DEFAULT_PASSWORD}   ? $kv->{DEFAULT_PASSWORD}   : 'fetchconfig';
     # Help docs live in one filesystem directory (HELP_DIR), served at the URL
     # base HELP_BASE_URL; HELP_FILE is the help page's filename (help.html). For
@@ -446,6 +479,13 @@ sub read_config {
     $SMTP_USER     = defined $kv->{SMTP_USER} ? $kv->{SMTP_USER} : '';
     $SMTP_PASS     = defined $kv->{SMTP_PASS} ? $kv->{SMTP_PASS} : '';
     $EMAIL_FROM    = defined $kv->{EMAIL_FROM} ? $kv->{EMAIL_FROM} : '';
+    # V1: the public base URL (scheme + host[:port], no path) used to build the
+    # password-reset link. It must come from config, never from the request:
+    # HTTP_HOST is attacker-controlled, and with UseCanonicalName Off (Apache's
+    # default) SERVER_NAME is derived from the Host header too. A trailing
+    # slash is tolerated and stripped.
+    $SITE_URL      = defined $kv->{SITE_URL} ? $kv->{SITE_URL} : '';
+    $SITE_URL      =~ s{/+$}{};
 
     # Syntax-highlighting scheme for template-backed ('generic') devices whose
     # template does not declare a syntax_style: 'auto' (detect from content),
@@ -969,7 +1009,8 @@ our $cgi;
 # reset_request_state() (just below) and their real definitions further down
 # refer to the same package variables. reset_request_state() clears every one
 # of them at the start of each request; see the note there.
-our $AUDIT_WARNING;
+our $AUDIT_WARNING;        # operational (amber): audit write failed, tripwire disabled, ...
+our $SECURITY_WARNING;     # security (red): e.g. config file holding passwords is not 0600
 our $EXTERNAL_CHANGE_NOTICE;
 our $_fatal_error_cache;
 our $_sites_cache;
@@ -993,6 +1034,7 @@ binmode(STDOUT);
 # Keep this in sync with every file-scoped request cache (grep for "our \$_").
 sub reset_request_state {
     $AUDIT_WARNING          = undef;
+    $SECURITY_WARNING       = undef;
     $EXTERNAL_CHANGE_NOTICE = undef;
     $_fatal_error_cache     = undef;
     $_sites_cache           = undef;
@@ -1048,7 +1090,7 @@ sub handle_request {
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
 my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password change_email test_my_email verify_email reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report set_email reset_do upload_logo delete_logo);
+    qw(login logout change_password change_email test_my_email verify_email clear_login_failures reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report set_email reset_do upload_logo delete_logo);
 
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
@@ -1225,6 +1267,12 @@ sub main {
             show_tool_show_cfg($user);
         } elsif ($action eq 'tool_audit') {
             show_tool_audit($user);
+        } elsif ($action eq 'tool_login_failures') {
+            show_login_failures($user);
+        } elsif ($action eq 'login_failures_data') {
+            show_login_failures_data($user);
+        } elsif ($action eq 'clear_login_failures') {
+            do_clear_login_failures($user);
         } elsif ($action eq 'audit_data') {
             show_audit_data($user);
         } elsif ($action eq 'audit_csv') {
@@ -1634,18 +1682,37 @@ sub login_is_throttled {
 sub login_record_failure {
     my ($dbh, $kind, $key) = @_;
     return unless $dbh && defined $key && $key ne '';
+    # UPSERT without ON CONFLICT (PostgreSQL 8.2): UPDATE, and INSERT if no row
+    # existed. Two concurrent FIRST failures for the same key can both see "no
+    # row" and both INSERT; the loser hits the primary key. So: run it in a
+    # transaction and, on a failed INSERT, retry the UPDATE once -- the winner's
+    # row now exists, so no count is lost (V11 race).
+    my $was_ac = $dbh->{AutoCommit};
     eval {
+        $dbh->begin_work if $was_ac;
         my ($n, $last) = _login_fail_state($dbh, $kind, $key);
         my $next = ($n || 0) + 1;
-        # UPSERT without 8.2 ON CONFLICT: UPDATE first, INSERT if no row.
         my $upd = $dbh->do(
             'UPDATE login_attempts SET failures = ?, last_fail = now() '
           . ' WHERE kind = ? AND keyval = ?', undef, $next, $kind, $key);
         if (!$upd || $upd == 0) {
-            $dbh->do('INSERT INTO login_attempts (kind, keyval, failures, last_fail) '
-                   . 'VALUES (?, ?, ?, now())', undef, $kind, $key, $next);
+            my $ins = eval {
+                $dbh->do('INSERT INTO login_attempts (kind, keyval, failures, last_fail) '
+                       . 'VALUES (?, ?, ?, now())', undef, $kind, $key, $next);
+            };
+            if (!$ins) {
+                # Lost the race: the other writer's row is there now -- increment it.
+                $dbh->rollback if $was_ac;        # clear the failed-INSERT state
+                $dbh->begin_work if $was_ac;
+                my ($n2) = _login_fail_state($dbh, $kind, $key);
+                $dbh->do('UPDATE login_attempts SET failures = ?, last_fail = now() '
+                       . ' WHERE kind = ? AND keyval = ?', undef, ($n2 || 0) + 1, $kind, $key);
+            }
         }
+        $dbh->commit if $was_ac;
         1;
+    } or do {
+        eval { $dbh->rollback if $was_ac };
     };
 }
 
@@ -1658,6 +1725,31 @@ sub login_clear {
                  undef, 'user', ($username // ''), 'ip', ($ip // ''));
         1;
     };
+}
+
+# All current login_attempts rows, newest failure first, for the admin viewer.
+# Each row: kind ('ip'|'user'), keyval, failures, last_fail (formatted string),
+# age_secs (seconds since last_fail). Empty list on error.
+sub db_login_attempts {
+    my ($dbh) = @_;
+    return [] unless $dbh;
+    my $rows = eval {
+        $dbh->selectall_arrayref(
+            "SELECT kind, keyval, failures, "
+          . "       to_char(last_fail, 'YYYY-MM-DD HH24:MI:SS') AS last_fail, "
+          . "       EXTRACT(EPOCH FROM (now() - last_fail))::bigint AS age_secs "
+          . "  FROM login_attempts ORDER BY last_fail DESC",
+            { Slice => {} });
+    };
+    return $rows || [];
+}
+
+# Remove every login_attempts row (admin "Clear all" in the viewer).
+sub db_login_attempts_clear_all {
+    my ($dbh) = @_;
+    return 0 unless $dbh;
+    my $ok = eval { $dbh->do('DELETE FROM login_attempts'); };
+    return $ok ? 1 : 0;
 }
 
 # --- C: set a user's email (nullable). Best-effort; returns 1/0. ------------
@@ -1741,11 +1833,14 @@ sub send_mail {
 # Tokens expire (RESET_TOKEN_TTL), are single-use (used flag), and are all
 # invalidated when the user's password changes.
 use constant RESET_TOKEN_TTL => 1800;   # 30 minutes
+# V2: minimum wall time for a forgot-password request (timing-channel floor).
+use constant RESET_FLOOR_SECS => 0.5;
 
-# Hash a token for storage/lookup. Uses Digest::MD5 (already a dependency) as a
-# fast one-way function -- the token itself is 128 bits of urandom, so a plain
-# hash is sufficient to stop DB-read -> usable-token, which is all this needs.
-sub _reset_token_hash { return Digest::MD5::md5_hex($_[0]); }
+# Hash a token for storage/lookup with SHA-256 (Digest::SHA, core Perl). The
+# token itself is 128 bits of urandom; the hash only has to stop a DB read from
+# yielding a usable token. (1.60 used MD5; the switch invalidates any token
+# issued before the upgrade -- harmless, they expire within 30 minutes.)
+sub _reset_token_hash { require Digest::SHA; return Digest::SHA::sha256_hex($_[0]); }
 
 # Create a reset token for $username: returns the clear token (for the email)
 # or undef on error. Stores only its hash with an expiry.
@@ -2337,9 +2432,94 @@ sub password_hash {
     return apr1_hash($password);
 }
 
+# A small random delay (50-100 ms) used on login failure paths instead of a
+# multi-second sleep: it flattens timing without tying up a FastCGI worker.
+sub login_jitter { select(undef, undef, undef, 0.05 + rand(0.05)); }
+
+# A hash to verify against when the username does NOT exist, so that path costs
+# the same as a real wrong-password check (V3, timing-based enumeration).
+# Computed once per process with the live algorithm/cost (bcrypt when available,
+# else $apr1$), so it always matches what verify_password() would do for a real
+# account.
+{
+    my $dummy;
+    sub dummy_password_hash {
+        $dummy = password_hash('fetchconfig-web-dummy-' . $$) unless defined $dummy;
+        return $dummy;
+    }
+}
+
 # True if $hash is already in the preferred (bcrypt) format, so the login-time
 # upgrade knows whether a re-hash is needed.
 sub hash_is_preferred { my ($h) = @_; return defined $h && $h =~ /^\$2[aby]?\$/ ? 1 : 0; }
+
+# Validate a new password against the configured policy. Returns undef if the
+# password is acceptable, or a single human-readable reason string if not.
+# $username (optional) lets it reject a password equal to the account name.
+# Called at EVERY password-set point (add user, admin reset, self-service
+# change, email reset) so the policy is enforced uniformly.
+#
+# Rules (length always; the composition minimums only when configured > 0):
+#   * MIN_PASSWORD_LENGTH / MAX_PASSWORD_LENGTH
+#   * PASSWORD_MIN_UPPER / _LOWER / _DIGIT / _SPECIAL  (per-class minimum counts)
+#   * PASSWORD_MIN_CLASSES  (at least N of the 4 classes present)
+#   * must differ from DEFAULT_PASSWORD and from the username (case-insensitive)
+# "special" is any non-alphanumeric character.
+sub password_policy_error {
+    my ($pw, $username) = @_;
+    $pw = '' unless defined $pw;
+
+    my $len = length $pw;
+    return "Password must be at least $MIN_PASSWORD_LENGTH characters."
+        if $len < $MIN_PASSWORD_LENGTH;
+    return "Password must be at most $MAX_PASSWORD_LENGTH characters."
+        if defined $MAX_PASSWORD_LENGTH && $MAX_PASSWORD_LENGTH > 0
+           && $len > $MAX_PASSWORD_LENGTH;
+
+    my $n_upper   = () = $pw =~ /[A-Z]/g;
+    my $n_lower   = () = $pw =~ /[a-z]/g;
+    my $n_digit   = () = $pw =~ /[0-9]/g;
+    my $n_special = () = $pw =~ /[^A-Za-z0-9]/g;
+
+    return "Password must contain at least $PASSWORD_MIN_UPPER uppercase letter(s)."
+        if $PASSWORD_MIN_UPPER   && $n_upper   < $PASSWORD_MIN_UPPER;
+    return "Password must contain at least $PASSWORD_MIN_LOWER lowercase letter(s)."
+        if $PASSWORD_MIN_LOWER   && $n_lower   < $PASSWORD_MIN_LOWER;
+    return "Password must contain at least $PASSWORD_MIN_DIGIT digit(s)."
+        if $PASSWORD_MIN_DIGIT   && $n_digit   < $PASSWORD_MIN_DIGIT;
+    return "Password must contain at least $PASSWORD_MIN_SPECIAL special character(s) (non-letter/non-digit)."
+        if $PASSWORD_MIN_SPECIAL && $n_special < $PASSWORD_MIN_SPECIAL;
+
+    if ($PASSWORD_MIN_CLASSES) {
+        my $classes = ($n_upper > 0) + ($n_lower > 0) + ($n_digit > 0) + ($n_special > 0);
+        return "Password must contain at least $PASSWORD_MIN_CLASSES of: uppercase, lowercase, digit, special character."
+            if $classes < $PASSWORD_MIN_CLASSES;
+    }
+
+    return 'Password must not be the same as the default password.'
+        if defined $DEFAULT_PASSWORD && $DEFAULT_PASSWORD ne '' && $pw eq $DEFAULT_PASSWORD;
+    return 'Password must not be the same as your username.'
+        if defined $username && $username ne '' && lc($pw) eq lc($username);
+
+    return undef;
+}
+
+# One-line human summary of the active password rules, for display on the
+# password forms. Returns '' if only the default length applies.
+sub password_policy_hint {
+    my @r;
+    push @r, "$MIN_PASSWORD_LENGTH-"
+           . (($MAX_PASSWORD_LENGTH && $MAX_PASSWORD_LENGTH > 0) ? $MAX_PASSWORD_LENGTH : '')
+           . ' characters';
+    push @r, "at least $PASSWORD_MIN_UPPER uppercase"   if $PASSWORD_MIN_UPPER;
+    push @r, "at least $PASSWORD_MIN_LOWER lowercase"   if $PASSWORD_MIN_LOWER;
+    push @r, "at least $PASSWORD_MIN_DIGIT digit(s)"    if $PASSWORD_MIN_DIGIT;
+    push @r, "at least $PASSWORD_MIN_SPECIAL special"   if $PASSWORD_MIN_SPECIAL;
+    push @r, "at least $PASSWORD_MIN_CLASSES of upper/lower/digit/special"
+        if $PASSWORD_MIN_CLASSES;
+    return 'Requires: ' . join('; ', @r)
+         . '. Must differ from your username and the default password.';
+}
 
 sub apr1_hash {
     my ($password) = @_;
@@ -2670,13 +2850,21 @@ sub do_login {
         $dbh->disconnect;
         audit(action => 'login_throttled', username => $username,
               detail => 'login refused: too many recent failures from this address');
-        sleep 2;
+        login_jitter();
         show_login_form('Too many failed attempts. Please wait a few minutes and try again.');
         return;
     }
 
     my $u = db_get_user($dbh, $username);
-    my $ok = $u && verify_password($password, $u->{pass_hash});
+    # V3: always pay exactly one password-verify cost, so a nonexistent user
+    # is not distinguishable from a wrong password by response time.
+    my $ok;
+    if ($u) {
+        $ok = verify_password($password, $u->{pass_hash});
+    } else {
+        verify_password($password, dummy_password_hash());
+        $ok = 0;
+    }
 
     # Account-soft throttle: if this username is in cooldown, add delay even
     # when the password is right-ish, but never hard-block (so an attacker
@@ -2732,9 +2920,11 @@ sub do_login {
         # which one was wrong.
         audit(action => 'login_failed', username => $username,
               detail => 'invalid username or password');   # never logs the password
-        # Base delay, plus extra when this account is already in soft cooldown
-        # (slows a focused guess against one username without hard-blocking it).
-        sleep($acct_throttled ? 5 : 2);
+        # V4: no multi-second sleep here. Under FastCGI a sleeping request holds a
+        # persistent worker, so a handful of concurrent bad logins could exhaust
+        # the whole pool. The DB-backed throttle is the rate limiter (it refuses
+        # immediately once tripped); a tiny jitter only flattens timing.
+        login_jitter();
         show_login_form('Invalid username or password.');
     }
 }
@@ -2860,11 +3050,18 @@ sub do_forgot_password {
     my $who = $cgi->param('who') // '';
     $who =~ s/^\s+|\s+$//g;
 
+    # V2: every request takes at least RESET_FLOOR_SECS from here to the
+    # response, whether or not the account exists or mail was sent, so timing
+    # reveals nothing. (Not a worker-exhaustion risk like the old login sleep:
+    # this endpoint is rate-limited per IP and the floor is only 0.5 s.)
+    my $t0 = [Time::HiRes::gettimeofday()];
+
     my $dbh = db_connect();
     if ($dbh && $who ne '') {
-        # Rate-limit reset requests per IP using the same throttle as login,
-        # so this can't be used to blast mail or enumerate by timing.
         my $ip = $ENV{REMOTE_ADDR} // '';
+        # V2: count EVERY request against the IP -- existing account or not --
+        # so the throttle can't be used as an oracle for which names exist.
+        login_record_failure($dbh, 'ip', $ip);
         unless (login_is_throttled($dbh, 'ip', $ip)) {
             my $username;
             if ($who =~ /@/) {
@@ -2880,42 +3077,58 @@ sub do_forgot_password {
                     my $tok = reset_token_create($dbh, $username);
                     if ($tok) {
                         my $link = _reset_link($tok);
-                        my ($sent, $err) = send_mail(
-                            to => $addr,
-                            subject => 'fetchconfig-web password reset',
-                            body => "A password reset was requested for your fetchconfig-web "
-                                  . "account '$username'.\n\n"
-                                  . "To set a new password, open this link within 30 minutes:\n\n"
-                                  . "$link\n\n"
-                                  . "If you did not request this, you can ignore this email; "
-                                  . "your password will not change.\n");
-                        audit(dbh => $dbh, action => 'reset_requested', username => $username,
-                              detail => ($sent ? 'reset link emailed'
-                                               : "reset link NOT emailed: " . ($err // 'error')));
+                        if (!defined $link) {
+                            # V1: no SITE_URL configured -> refuse to send a link
+                            # rather than build one from the request's Host.
+                            audit(dbh => $dbh, action => 'reset_requested', username => $username,
+                                  detail => 'reset link NOT emailed: SITE_URL is not configured');
+                        } else {
+                            my ($sent, $err) = send_mail(
+                                to => $addr,
+                                subject => 'fetchconfig-web password reset',
+                                body => "A password reset was requested for your fetchconfig-web "
+                                      . "account '$username'.\n\n"
+                                      . "To set a new password, open this link within 30 minutes:\n\n"
+                                      . "$link\n\n"
+                                      . "If you did not request this, you can ignore this email; "
+                                      . "your password will not change.\n");
+                            audit(dbh => $dbh, action => 'reset_requested', username => $username,
+                                  detail => ($sent ? 'reset link emailed'
+                                                   : "reset link NOT emailed: " . ($err // 'error')));
+                        }
                     }
                 }
-                # Count a request against the IP so repeated use trips the throttle.
-                login_record_failure($dbh, 'ip', $ip);
             }
         }
     }
     $dbh->disconnect if $dbh;
+
+    # V2: pad to the fixed floor.
+    my $elapsed = Time::HiRes::tv_interval($t0);
+    Time::HiRes::sleep(RESET_FLOOR_SECS - $elapsed) if $elapsed < RESET_FLOOR_SECS;
+
     print std_header(-location => script_url() . '?action=forgot_password&note='
                      . CGI::escape($uniform), -status => '302 Found');
 }
 
 # Build the absolute reset link for a clear token.
+# V1: the reset link is built ONLY from the configured SITE_URL. It is never
+# derived from the request: HTTP_HOST is attacker-controlled (Host-header
+# poisoning would send the victim a link to the attacker's server), and with
+# UseCanonicalName Off even SERVER_NAME follows the Host header. Returns undef
+# when SITE_URL is not configured -- the caller then sends no link at all.
 sub _reset_link {
     my ($tok) = @_;
-    my $base = $cgi->url(-full => 1);
-    return $base . '?action=reset_token&tok=' . CGI::escape($tok);
+    return undef unless defined $SITE_URL && $SITE_URL =~ m{^https?://[A-Za-z0-9.-]+(?::\d{1,5})?$};
+    return $SITE_URL . script_url() . '?action=reset_token&tok=' . CGI::escape($tok);
 }
 
 # Step 3 (GET): the token landing page -- a form to set a new password. The
 # token is validated but NOT consumed here (it is consumed on the POST).
 sub show_reset_token {
     my $tok = $cgi->param('tok') // '';
-    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    # V5: the token is in this page's URL; never let it leak via Referer.
+    print std_header(-type => 'text/html', -charset => 'UTF-8', '-Referrer_Policy' => 'no-referrer');
     print page_head('Reset password');             # pre-login: login backdrop
     print qq{<div class="login-box no-icon">\n};
     print qq{<h1>Reset password</h1>\n};
@@ -2934,7 +3147,10 @@ sub show_reset_token {
     print qq{<input type="hidden" name="action" value="reset_do">\n};
     print qq{<input type="hidden" name="tok" value="} . esc($tok) . qq{">\n};
     print csrf_field();
+    my $rerr = $cgi->param('err');
+    print qq{<p class="error">} . esc($rerr) . qq{</p>\n} if defined $rerr && $rerr ne '';
     print qq{<p class="muted">Set a new password for <strong>} . esc($username) . qq{</strong>.</p>\n};
+    print qq{<p class="muted">} . esc(password_policy_hint()) . qq{</p>\n};
     print qq{<label>New password<br>};
     print $cgi->password_field(-name => 'new_password', -autocomplete => 'new-password');
     print qq{</label><br>\n<label>Confirm new password<br>};
@@ -2961,7 +3177,7 @@ sub do_reset_do {
     my $username = $dbh ? reset_token_user($dbh, $tok) : undef;
     unless (defined $username) {
         $dbh->disconnect if $dbh;
-        print std_header(-type=>'text/html',-charset=>'UTF-8');
+        print std_header(-type=>'text/html',-charset=>'UTF-8', '-Referrer_Policy' => 'no-referrer');
         print page_head('Reset password');
         print qq{<div class="login-box no-icon">\n};
         print qq{<h1>Reset password</h1>\n<p class="error">This reset link is invalid or has }
@@ -2971,13 +3187,16 @@ sub do_reset_do {
         print qq{</div>\n}; print page_foot();
         return;
     }
-    if (length($new) < $MIN_PASSWORD_LENGTH) {
+    if (my $perr = password_policy_error($new, $username)) {
         $dbh->disconnect;
-        print std_header(-location => $back, -status => '302 Found'); return;
+        print std_header(-location => $back . '&err=' . CGI::escape($perr), -status => '302 Found');
+        return;
     }
     if ($new ne $confirm) {
         $dbh->disconnect;
-        print std_header(-location => $back, -status => '302 Found'); return;
+        print std_header(-location => $back . '&err=' . CGI::escape('Passwords do not match.'),
+                         -status => '302 Found');
+        return;
     }
     db_set_password($dbh, $username, password_hash($new));
     reset_token_consume($dbh, $tok);
@@ -2986,7 +3205,7 @@ sub do_reset_do {
           object_type => 'user', object_id => $username,
           detail => 'password set via email reset link');
     $dbh->disconnect;
-    print std_header(-type=>'text/html',-charset=>'UTF-8');
+    print std_header(-type=>'text/html',-charset=>'UTF-8', '-Referrer_Policy' => 'no-referrer');
     print page_head('Password changed');
     print qq{<div class="login-box no-icon">\n};
     print qq{<h1>Password changed</h1>\n<p class="success">Your password has been set. }
@@ -6499,6 +6718,247 @@ sub do_audit_csv {
     print $csv->('(export failed)') unless $ok;
 }
 
+# WHERE clause + binds for the login-failures viewer filters (f_kind, f_from,
+# f_to). All comparisons parameterized. 'to' is extended to end-of-day.
+sub login_failures_filter_sql {
+    my @w; my @b;
+    my $p = sub { my $v = $cgi->param($_[0]); return (defined $v && $v ne '') ? $v : undef; };
+    if (defined(my $k = $p->('f_kind'))) {
+        if    ($k eq 'ip')   { push @w, "kind = 'ip'"; }
+        elsif ($k eq 'user') { push @w, "kind = 'user'"; }
+    }
+    if (defined(my $from = $p->('f_from'))) { push @w, 'last_fail >= ?'; push @b, $from; }
+    if (defined(my $to   = $p->('f_to')))   { push @w, 'last_fail <  (?::date + 1)'; push @b, $to; }
+    my $sql = @w ? (' WHERE ' . join(' AND ', @w)) : '';
+    return ($sql, \@b);
+}
+
+# JSON data endpoint for the login-failures viewer (?action=login_failures_data,
+# admin only). One page of rows (newest failure first) plus the total, so the
+# client pages without receiving the whole table. Params: offset + the filters.
+sub show_login_failures_data {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) {
+        $dbh->disconnect if $dbh;
+        print std_header(-type => 'application/json', -status => '403 Forbidden');
+        print '{"error":"forbidden"}';
+        return;
+    }
+    my $offset = $cgi->param('offset') // 0;
+    $offset = 0 unless $offset =~ /^\d+$/;
+    my $limit = AUDIT_PAGE_SIZE;
+    my ($where, $binds) = login_failures_filter_sql();
+
+    my $total = 0; my $rows = [];
+    my $ok = eval {
+        ($total) = $dbh->selectrow_array("SELECT count(*) FROM login_attempts$where", undef, @$binds);
+        my $sth = $dbh->prepare(
+            "SELECT kind, keyval, failures,
+                    to_char(last_fail,'YYYY-MM-DD HH24:MI:SS') AS last_fail,
+                    EXTRACT(EPOCH FROM (now() - last_fail))::bigint AS age_secs
+               FROM login_attempts$where
+              ORDER BY last_fail DESC LIMIT $limit OFFSET $offset");
+        $sth->execute(@$binds);
+        $rows = $sth->fetchall_arrayref({});
+        1;
+    };
+    $dbh->disconnect;
+    unless ($ok) {
+        print std_header(-type => 'application/json', -status => '500 Internal Server Error');
+        print '{"error":"query failed"}';
+        return;
+    }
+    my @items;
+    for my $r (@$rows) {
+        my $throttled = ($r->{failures} >= LOGIN_MAX_FAILURES
+                         && $r->{age_secs} <= LOGIN_COOLDOWN_SECS) ? 1 : 0;
+        push @items, '{'
+            . join(',',
+                json_string('last_fail') . ':' . json_string("$r->{last_fail}"),
+                json_string('age')       . ':' . json_string(fmt_age($r->{age_secs})),
+                json_string('kind')      . ':' . json_string($r->{kind} eq 'ip' ? 'IP'
+                                                            : $r->{kind} eq 'user' ? 'Account' : $r->{kind}),
+                json_string('keyval')    . ':' . json_string("$r->{keyval}"),
+                json_string('failures')  . ':' . json_string("$r->{failures}"),
+                json_string('throttled') . ':' . ($throttled ? 'true' : 'false'),
+            ) . '}';
+    }
+    print std_header(-type => 'application/json', -charset => 'UTF-8');
+    print '{"total":' . ($total+0) . ',"offset":' . ($offset+0)
+        . ',"limit":' . $limit . ',"rows":[' . join(',', @items) . ']}';
+}
+
+# Login-failures viewer (?action=tool_login_failures, admin only). Same look
+# and paging as the audit viewer: a filter bar, First/Prev/Next/Last pagers top
+# and bottom, and the rows fetched by AJAX from show_login_failures_data().
+sub show_login_failures {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
+    $dbh->disconnect if $dbh;
+    unless ($is_admin) {
+        print page_head('Error', $user);
+        print qq{<p class="error">Login failures are available to administrators only.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Login failures', $user, 'full');
+    print qq{<div class="tool-section" id="loginfail-section">\n};
+    print qq{<h2 class="tool-section-title">Login failures</h2>\n};
+
+    my $msg = $cgi->param('msg');
+    print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
+
+    print qq{<p class="muted">Current login-throttle counters, newest failure first, }
+        . AUDIT_PAGE_SIZE . qq{ per page. A key (client IP or account name) is }
+        . qq{<strong>throttled</strong> once it reaches }
+        . LOGIN_MAX_FAILURES . qq{ failures, for }
+        . int(LOGIN_COOLDOWN_SECS / 60) . qq{ minutes after its last failure; counters older than }
+        . int(LOGIN_WINDOW_SECS / 60) . qq{ minutes no longer count. A successful login clears a key.</p>\n};
+
+    # Clear-all: POST + CSRF. data-confirm on the FORM (the global interceptor
+    # reads it from the form, not the button) routes submission through the
+    # standard styled confirmation dialog.
+    print qq{<form method="POST" action="} . esc(script_url()) . qq{" style="margin:0 0 0.8em;" }
+        . qq{data-confirm="Delete all login-failure counters? Keys currently in cooldown will be able to retry immediately." }
+        . qq{data-confirm-danger="y">\n};
+    print qq{<input type="hidden" name="action" value="clear_login_failures">\n};
+    print csrf_field();
+    print qq{<button type="submit" class="btn btn-small btn-danger">Clear all</button>\n};
+    print qq{</form>\n};
+
+    my $su = script_url();
+    print <<"HTML";
+<div class="audit-filters">
+  <label>Type
+    <select id="lf-kind">
+      <option value="">any</option>
+      <option value="ip">IP</option>
+      <option value="user">Account</option>
+    </select>
+  </label>
+  <label>From <input type="date" id="lf-from"></label>
+  <label>To <input type="date" id="lf-to"></label>
+  <button type="button" class="btn btn-small" id="lf-apply">Filter</button>
+  <button type="button" class="btn btn-small" id="lf-clear">Clear</button>
+  <button type="button" class="btn btn-small" id="lf-reload">Reload</button>
+</div>
+<div class="audit-pager">
+  <button type="button" class="btn btn-small ap-first">&laquo; First</button>
+  <button type="button" class="btn btn-small ap-prev">&larr; Prev</button>
+  <span class="ap-info pageinfo"></span>
+  <button type="button" class="btn btn-small ap-next">Next &rarr;</button>
+  <button type="button" class="btn btn-small ap-last">Last &raquo;</button>
+</div>
+<div class="audit-scroll">
+<table class="list audit-list" id="lf-table">
+  <thead><tr><th>Last failure</th><th>Age</th><th>Type</th><th>IP / account</th>
+    <th>Failures</th><th>Status</th></tr></thead>
+  <tbody id="lf-body"></tbody>
+</table>
+</div>
+<p id="lf-empty" class="muted" style="display:none;">No matching entries.</p>
+<div class="audit-pager audit-pager-bottom">
+  <button type="button" class="btn btn-small ap-first">&laquo; First</button>
+  <button type="button" class="btn btn-small ap-prev">&larr; Prev</button>
+  <span class="ap-info pageinfo"></span>
+  <button type="button" class="btn btn-small ap-next">Next &rarr;</button>
+  <button type="button" class="btn btn-small ap-last">Last &raquo;</button>
+</div>
+<script>
+(function () {
+  var url = "$su";
+  var PAGE = @{[ AUDIT_PAGE_SIZE ]};
+  var offset = 0, total = 0;
+  function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];}); }
+  function qs(){
+    var p=[];
+    function add(id,name){ var v=document.getElementById(id).value; if(v!=='') p.push(name+'='+encodeURIComponent(v)); }
+    add('lf-kind','f_kind'); add('lf-from','f_from'); add('lf-to','f_to');
+    return p.join('&');
+  }
+  function render(d){
+    total=d.total; offset=d.offset;
+    var b=document.getElementById('lf-body'); b.innerHTML='';
+    for(var i=0;i<d.rows.length;i++){ var r=d.rows[i];
+      var tr=document.createElement('tr');
+      if(r.throttled) tr.className='lf-row-throttled';
+      var status = r.throttled ? '<span class="lf-throttled">throttled</span>'
+                               : '<span class="muted">counting</span>';
+      tr.innerHTML='<td>'+esc(r.last_fail)+'</td><td>'+esc(r.age)+'</td><td>'+esc(r.kind)+'</td>'
+        +'<td>'+esc(r.keyval)+'</td><td>'+esc(r.failures)+'</td><td>'+status+'</td>';
+      b.appendChild(tr);
+    }
+    document.getElementById('lf-empty').style.display=(total===0?'':'none');
+    var from=total?offset+1:0, to=Math.min(offset+PAGE,total);
+    var info=total?(from+'\\u2013'+to+' of '+total):'0 of 0';
+    function setAll(sel,fn){ var e=document.querySelectorAll(sel); for(var i=0;i<e.length;i++) fn(e[i]); }
+    setAll('.ap-info', function(e){ e.textContent=info; });
+    setAll('.ap-first',function(e){ e.disabled=offset<=0; });
+    setAll('.ap-prev', function(e){ e.disabled=offset<=0; });
+    setAll('.ap-next', function(e){ e.disabled=offset+PAGE>=total; });
+    setAll('.ap-last', function(e){ e.disabled=offset+PAGE>=total; });
+  }
+  function load(){
+    var u=url+'?action=login_failures_data&offset='+offset+(qs()?'&'+qs():'');
+    fetch(u,{credentials:'same-origin'}).then(function(r){return r.json();})
+      .then(render).catch(function(){
+        var e=document.querySelectorAll('.ap-info'); for(var i=0;i<e.length;i++) e[i].textContent='(load failed)';
+      });
+  }
+  function bindAll(sel,h){ var e=document.querySelectorAll(sel); for(var i=0;i<e.length;i++) e[i].addEventListener('click',h); }
+  document.getElementById('lf-apply').addEventListener('click',function(){ offset=0; load(); });
+  document.getElementById('lf-reload').addEventListener('click',function(){ load(); });
+  document.getElementById('lf-clear').addEventListener('click',function(){
+    document.getElementById('lf-kind').value='';
+    document.getElementById('lf-from').value=''; document.getElementById('lf-to').value='';
+    offset=0; load();
+  });
+  bindAll('.ap-first',function(){ offset=0; load(); });
+  bindAll('.ap-prev', function(){ offset=Math.max(0,offset-PAGE); load(); });
+  bindAll('.ap-next', function(){ if(offset+PAGE<total){offset+=PAGE; load();} });
+  bindAll('.ap-last', function(){ offset=Math.max(0,Math.floor((total-1)/PAGE)*PAGE); load(); });
+  load();
+})();
+</script>
+HTML
+    print qq{</div>\n};   # .tool-section
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# Admin "Clear all" for the login-failures viewer (POST + CSRF).
+sub do_clear_login_failures {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) {
+        $dbh->disconnect if $dbh;
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
+    db_login_attempts_clear_all($dbh);
+    $dbh->disconnect;
+    audit(action => 'clear_login_failures', object_type => 'login_attempts',
+          detail => 'cleared all login-throttle counters');
+    print std_header(-location => script_url() . '?action=tool_login_failures&msg='
+                     . CGI::escape('All login-failure counters cleared.'),
+                     -status => '302 Found');
+}
+
+# Format an age in seconds as a short human string (e.g. "3m 12s", "1h 04m").
+sub fmt_age {
+    my ($s) = @_;
+    $s = 0 unless defined $s && $s >= 0;
+    return "${s}s" if $s < 60;
+    my $m = int($s / 60); my $sec = $s % 60;
+    return sprintf('%dm %02ds', $m, $sec) if $m < 60;
+    my $h = int($m / 60); $m %= 60;
+    return sprintf('%dh %02dm', $h, $m);
+}
+
 # Audit log viewer page (?action=tool_audit, admin only). Renders the filter
 # controls, an empty results table and the pager; the rows are fetched by AJAX
 # from show_audit_data() so the (potentially large) table is never sent whole.
@@ -9279,6 +9739,7 @@ sub show_user_page {
     print qq{<label>Confirm new password<br>};
     print $cgi->password_field(-name => 'confirm_password', -autocomplete => 'new-password');
     print qq{</label>\n};
+    print qq{<p class="muted">} . esc(password_policy_hint()) . qq{</p>\n};
     print qq{<p><button type="submit" class="btn">Change password</button></p>\n};
     print $cgi->end_form;
     print qq{</div>\n};
@@ -9686,9 +10147,9 @@ sub do_change_password {
         redirect_to_user_page(action=>"change_password_form", err => 'Current password is incorrect.');
         return;
     }
-    if (length($new) < $MIN_PASSWORD_LENGTH) {
+    if (my $perr = password_policy_error($new, $user)) {
         $dbh->disconnect;
-        redirect_to_user_page(action=>"change_password_form", err => "New password must be at least $MIN_PASSWORD_LENGTH characters.");
+        redirect_to_user_page(action=>"change_password_form", err => $perr);
         return;
     }
     if ($new ne $confirm) {
@@ -9822,9 +10283,9 @@ sub do_reset_password {
         redirect_to_user_page(action=>"user_list", err => qq{Use "Change your password" to change the '$PROTECTED_USER' account's own password.});
         return;
     }
-    if (length($new) < $MIN_PASSWORD_LENGTH) {
+    if (my $perr = password_policy_error($new, $target)) {
         $dbh->disconnect;
-        redirect_to_user_page(action=>"user_list", err => "New password must be at least $MIN_PASSWORD_LENGTH characters.");
+        redirect_to_user_page(action=>"user_list", err => $perr);
         return;
     }
     if ($new ne $confirm) {
@@ -9897,9 +10358,9 @@ sub do_add_user {
         redirect_to_user_page(action=>"user_add", err => 'Invalid username (letters, numbers, dot, dash, underscore only).');
         return;
     }
-    if (length($password) < $MIN_PASSWORD_LENGTH) {
+    if (my $perr = password_policy_error($password, $new_user)) {
         $dbh->disconnect;
-        redirect_to_user_page(action=>"user_add", err => "Password must be at least $MIN_PASSWORD_LENGTH characters.");
+        redirect_to_user_page(action=>"user_add", err => $perr);
         return;
     }
     if ($password ne $confirm) {
@@ -15441,12 +15902,22 @@ sub color_comment_lines {
 # the headers are applied in one place. Any -Key => value pairs are forwarded
 # to CGI->header unchanged (type, charset, cookie, location, status, ...).
 sub std_header {
-    return $cgi->header(
+    my @args = @_;
+    # A single positional arg is CGI.pm's shorthand for the content type.
+    @args = (-type => $args[0]) if @args == 1 && $args[0] !~ /^-/;
+    my %h = (
         '-X_Frame_Options'        => 'DENY',
         '-X_Content_Type_Options' => 'nosniff',
         '-Referrer_Policy'        => 'same-origin',
-        @_,
+        # V7: authenticated pages hold device configs, user lists and the audit
+        # log; never let a browser or forward proxy cache them.
+        '-Cache_Control'          => 'no-store, no-cache, must-revalidate',
+        '-Pragma'                 => 'no-cache',
+        # V6: HSTS, only when the app is actually served over TLS.
+        ($HTTPS_ENABLED ? ('-Strict_Transport_Security' => 'max-age=31536000; includeSubDomains') : ()),
+        @args,     # caller's args win (e.g. a stricter Referrer-Policy on the reset pages)
     );
+    return $cgi->header(%h);
 }
 
 sub page_head {
@@ -15525,6 +15996,7 @@ sub page_head {
         if ($is_admin) {
             $tools_menu = $group->('Tools',
                 $su->('Audit log',                                    '?action=tool_audit'),
+                $su->('Login failures',                               '?action=tool_login_failures'),
                 $su->('Check devices for consistent backup suffixes', '?action=tool_suffix'),
                 $su->('Check site assignment',                        '?action=check_site_assignment'),
                 $su->('Devices without backups',                      '?action=tool_nobackup'),
@@ -16061,8 +16533,13 @@ $backdrop_css
   .fc-about-license { margin: 0 0 1.3em; font-size: 0.9em; color: #555; }
   .logo-thumb { max-width: 250px; max-height: 50px; vertical-align: middle;
                 background: #fff; border: 1px solid #eee; }
-  .audit-warn { color: #8a6d00; background: #fff3cd; border: 1px solid #ffe08a;
-                border-radius: 4px; padding: 0.05em 0.5em; margin-left: 0.6em; }
+  /* Footer warning lines: each on its own centred line, above the copyright
+     line. Security warnings red, operational warnings amber. */
+  .footer-warn { display: table; margin: 0 auto 0.5em; border-radius: 4px;
+                 padding: 0.25em 0.7em; font-size: 1.05em; font-weight: 600; }
+  .audit-warn    { color: #8a6d00; background: #fff3cd; border: 1px solid #ffe08a; }
+  .security-warn { color: #fff;    background: #c0362c; border: 1px solid #7a1c14; }
+  .footer-line   { display: block; }
   .audit-filters { margin: 0.5em 0; display: flex; flex-wrap: wrap; gap: 0.6em; align-items: end; }
   .audit-filters label { font-size: 0.85em; color: #444; display: flex; flex-direction: column; }
   .audit-pager { margin: 0.5em 0; display: flex; gap: 0.5em; align-items: center; }
@@ -16071,8 +16548,11 @@ $backdrop_css
      table.list gives width:100%; audit-list only tweaks density + wrapping. */
   /* Full-width box (override the default fit-content tool box): the inner
      scroll wrapper handles any overflow, so the box fills main.full exactly. */
-  #audit-section { width: 100%; min-width: 0; }
+  #audit-section, #loginfail-section { width: 100%; min-width: 0; }
   .audit-scroll { width: 100%; max-width: 100%; overflow-x: auto; }
+  /* Login-failures viewer: highlight keys currently in cooldown. */
+  tr.lf-row-throttled td { background: #fdecea; }
+  .lf-throttled { color: #c0362c; font-weight: 600; }
   .audit-list th, .audit-list td { font-size: 0.82em; vertical-align: top;
                                    white-space: normal; overflow-wrap: anywhere; }
   .fs-group-title { margin: 1em 0 0.3em; font-size: 1em; color: #16232e; }
@@ -16357,10 +16837,16 @@ sub page_foot {
     # the action still completed -- flag it here (yellow warning) after the
     # copyright so it is noticed without blocking anything.
     my $warn = '';
-    if (defined $AUDIT_WARNING && $AUDIT_WARNING ne '') {
-        $warn = qq{ <span class="audit-warn">&#9888; } . esc($AUDIT_WARNING) . qq{</span>};
+    # Warnings go on their own line(s) ABOVE the copyright line: security ones
+    # in red, operational ones in amber. Both are per-request and cleared by
+    # reset_request_state().
+    if (defined $SECURITY_WARNING && $SECURITY_WARNING ne '') {
+        $warn .= qq{<div class="footer-warn security-warn">&#9888; } . esc($SECURITY_WARNING) . qq{</div>\n};
     }
-    return qq{</main>\n<footer class="app-footer">$name_ver &mdash; $cr$warn</footer>\n$confirm_html$about_html</body>\n</html>\n};
+    if (defined $AUDIT_WARNING && $AUDIT_WARNING ne '') {
+        $warn .= qq{<div class="footer-warn audit-warn">&#9888; } . esc($AUDIT_WARNING) . qq{</div>\n};
+    }
+    return qq{</main>\n<footer class="app-footer">$warn<div class="footer-line">$name_ver &mdash; $cr</div></footer>\n$confirm_html$about_html</body>\n</html>\n};
 }
 
 # About dialog: reached from the title-bar program icon. Shows the internal

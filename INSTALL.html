@@ -496,14 +496,14 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v1.60</span>
+      <span class="pill">v1.61</span>
       <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
     <nav>
 <div class="nav-group"><div class="nav-group-label">Before you start</div><a href="#what-is-in-the-package">What is in the package</a><a href="#requirements">Requirements</a><a href="#perl-modules">Perl modules</a><a href="#planning-the-layout">Planning the layout</a></div>
 <div class="nav-group"><div class="nav-group-label">Fresh installation</div><a href="#step-1-install-the-perl-modules">Step 1 -- Install the Perl modules</a><a href="#step-2-create-the-user-database">Step 2 -- Create the user database</a><a href="#step-3-write-the-configuration-file">Step 3 -- Write the configuration file</a><a href="#step-4-install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</a><a href="#step-5-directories-and-permissions">Step 5 -- Directories and permissions</a><a href="#step-6-backup-now-and-sudo">Step 6 -- Backup Now and sudo</a><a href="#step-7-serve-over-https">Step 7 -- Serve over HTTPS</a><a href="#step-7a-running-under-mod-fcgid-optional">Step 7a -- Running under mod_fcgid (optional)</a><a href="#step-8-first-login">Step 8 -- First login</a></div>
-<div class="nav-group"><div class="nav-group-label">Upgrading</div><a href="#upgrading-the-script">Upgrading the script</a><a href="#upgrading-to-1-60">Upgrading to 1.60</a><a href="#upgrading-the-database-to-1-51-audit-log">Upgrading the database to 1.51 (audit log)</a><a href="#upgrading-the-database-to-1-50">Upgrading the database to 1.50</a><a href="#new-configuration-keys-in-1-50">New configuration keys in 1.50</a></div>
+<div class="nav-group"><div class="nav-group-label">Upgrading</div><a href="#upgrading-the-script">Upgrading the script</a><a href="#upgrading-to-1-61">Upgrading to 1.61</a><a href="#upgrading-to-1-60">Upgrading to 1.60</a><a href="#upgrading-the-database-to-1-51-audit-log">Upgrading the database to 1.51 (audit log)</a><a href="#upgrading-the-database-to-1-50">Upgrading the database to 1.50</a><a href="#new-configuration-keys-in-1-50">New configuration keys in 1.50</a></div>
 <div class="nav-group"><div class="nav-group-label">Verification and troubleshooting</div><a href="#checklist">Checklist</a><a href="#common-problems">Common problems</a></div>
 <div class="nav-group"><a href="#running-the-test-suite">Running the test suite</a></div>
     </nav>
@@ -532,7 +532,7 @@
         must also exceed BACKUP_TIMEOUT.</p>
       </div>
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">1.60</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">1.61</span><span class="label">version</span></div>
         <div class="hero-stat"><span class="num">Perl CGI</span><span class="label">single file</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
@@ -544,7 +544,7 @@
 <section id="contents">
 <div class="section-kicker">01</div>
 <h2>Contents</h2>
-<ul><li><a href="#part-1-before-you-start">Part 1 -- Before you start</a></li><li><a href="#what-is-in-the-package">What is in the package</a></li><li><a href="#requirements">Requirements</a></li><li><a href="#perl-modules">Perl modules</a></li><li><a href="#planning-the-layout">Planning the layout</a></li><li><a href="#part-2-fresh-installation">Part 2 -- Fresh installation</a></li><li><a href="#step-1-install-the-perl-modules">Step 1 -- Install the Perl modules</a></li><li><a href="#step-2-create-the-user-database">Step 2 -- Create the user database</a></li><li><a href="#step-3-write-the-configuration-file">Step 3 -- Write the configuration file</a></li><li><a href="#step-4-install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</a></li><li><a href="#step-5-directories-and-permissions">Step 5 -- Directories and permissions</a></li><li><a href="#step-6-backup-now-and-sudo">Step 6 -- Backup Now and sudo</a></li><li><a href="#step-7-serve-over-https">Step 7 -- Serve over HTTPS</a></li><li><a href="#step-7a-running-under-mod-fcgid-optional">Step 7a -- Running under mod_fcgid (optional)</a></li><li><a href="#step-8-first-login">Step 8 -- First login</a></li><li><a href="#part-3-upgrading">Part 3 -- Upgrading</a></li><li><a href="#upgrading-the-script">Upgrading the script</a></li><li><a href="#upgrading-to-1-60">Upgrading to 1.60</a></li><li><a href="#upgrading-the-database-to-1-51-audit-log">Upgrading the database to 1.51 (audit log)</a></li><li><a href="#upgrading-the-database-to-1-50">Upgrading the database to 1.50</a></li><li><a href="#new-configuration-keys-in-1-50">New configuration keys in 1.50</a></li><li><a href="#part-4-verification-and-troubleshooting">Part 4 -- Verification and troubleshooting</a></li><li><a href="#checklist">Checklist</a></li><li><a href="#common-problems">Common problems</a></li><li><a href="#running-the-test-suite">Running the test suite</a></li></ul>
+<ul><li><a href="#part-1-before-you-start">Part 1 -- Before you start</a></li><li><a href="#what-is-in-the-package">What is in the package</a></li><li><a href="#requirements">Requirements</a></li><li><a href="#perl-modules">Perl modules</a></li><li><a href="#planning-the-layout">Planning the layout</a></li><li><a href="#part-2-fresh-installation">Part 2 -- Fresh installation</a></li><li><a href="#step-1-install-the-perl-modules">Step 1 -- Install the Perl modules</a></li><li><a href="#step-2-create-the-user-database">Step 2 -- Create the user database</a></li><li><a href="#step-3-write-the-configuration-file">Step 3 -- Write the configuration file</a></li><li><a href="#step-4-install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</a></li><li><a href="#step-5-directories-and-permissions">Step 5 -- Directories and permissions</a></li><li><a href="#step-6-backup-now-and-sudo">Step 6 -- Backup Now and sudo</a></li><li><a href="#step-7-serve-over-https">Step 7 -- Serve over HTTPS</a></li><li><a href="#step-7a-running-under-mod-fcgid-optional">Step 7a -- Running under mod_fcgid (optional)</a></li><li><a href="#step-8-first-login">Step 8 -- First login</a></li><li><a href="#part-3-upgrading">Part 3 -- Upgrading</a></li><li><a href="#upgrading-the-script">Upgrading the script</a></li><li><a href="#upgrading-to-1-61">Upgrading to 1.61</a></li><li><a href="#upgrading-to-1-60">Upgrading to 1.60</a></li><li><a href="#upgrading-the-database-to-1-51-audit-log">Upgrading the database to 1.51 (audit log)</a></li><li><a href="#upgrading-the-database-to-1-50">Upgrading the database to 1.50</a></li><li><a href="#new-configuration-keys-in-1-50">New configuration keys in 1.50</a></li><li><a href="#part-4-verification-and-troubleshooting">Part 4 -- Verification and troubleshooting</a></li><li><a href="#checklist">Checklist</a></li><li><a href="#common-problems">Common problems</a></li><li><a href="#running-the-test-suite">Running the test suite</a></li></ul>
 </section>
 <section id="part-1-before-you-start">
 <div class="section-kicker">02</div>
@@ -630,6 +630,16 @@ TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-templat
 <span class="c"># --- accounts ---</span>
 PROTECTED_USER          = admin
 MIN_PASSWORD_LENGTH     = 8
+MAX_PASSWORD_LENGTH     = 64
+<span class="c"># Optional password composition rules (0 = off). PASSWORD_MIN_CLASSES is the</span>
+<span class="c"># number of the four character classes (upper, lower, digit, special) that must</span>
+<span class="c"># be present. A new password must also differ from DEFAULT_PASSWORD and the</span>
+<span class="c"># username.</span>
+PASSWORD_MIN_UPPER      = 0
+PASSWORD_MIN_LOWER      = 0
+PASSWORD_MIN_DIGIT      = 0
+PASSWORD_MIN_SPECIAL    = 0
+PASSWORD_MIN_CLASSES    = 0
 DEFAULT_PASSWORD        = fetchconfig
 
 <span class="c"># --- email / password reset (optional) ---</span>
@@ -645,6 +655,11 @@ EMAIL_AUTH              = 0
 <span class="c">#SMTP_USER              = fetchconfig-web</span>
 <span class="c">#SMTP_PASS              = secret</span>
 EMAIL_FROM              = fetchconfig-web@example.com
+<span class="c"># Public base URL (scheme + host[:port], no path) used to build the reset link.</span>
+<span class="c"># REQUIRED when EMAIL = 1: the link is never derived from the request&#x27;s Host</span>
+<span class="c"># header (that would let an attacker redirect reset links to their own server),</span>
+<span class="c"># so without SITE_URL no reset email is sent.</span>
+SITE_URL                = https://fetchconfig.example.com
 
 <span class="c"># --- misc ---</span>
 HTTPS_ENABLED           = 0
@@ -663,6 +678,10 @@ COPYRIGHT               = 2026 (c) Your Organisation</code></pre>
 <pre><code>chown root:&lt;webgroup&gt; /etc/fetchconfig-web.cfg
 chmod 640 /etc/fetchconfig-web.cfg</code></pre>
 <p>The web-server user must be able to read it (hence the group), nobody else. Every key is documented in the Configuration section of <code>README.md</code>.</p>
+<p><strong>Protect the configuration file.</strong> It contains <code>DBpass</code> and <code>SMTP_PASS</code> in cleartext. It must be readable by the web-server user only (the application shows a warning on every page until it is):</p>
+<span class="file-label">shell</span>
+<pre><code>chown nobody /etc/fetchconfig-web.cfg      # the httpd run-time user (User directive)
+chmod 0600   /etc/fetchconfig-web.cfg</code></pre>
 <h3 id="step-4-install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</h3>
 <p>Copy the script into your CGI directory and make it executable:</p>
 <span class="file-label">shell</span>
@@ -812,6 +831,17 @@ Alias /cgi-bin/fetchconfig-fcgi/ &quot;/www/cgi-bin/fetchconfig-fcgi/&quot;
 <span class="file-label">shell</span>
 <pre><code>ps -ef | grep &#x27;[f]etchconfig-web.cgi&#x27;</code></pre>
 <p>Plain CGI needs none of this -- every request is a fresh process, so a new script file takes effect on the next request.</p>
+<p><strong>Hardening the web server.</strong> With <code>HTTPS_ENABLED = 1</code> the application sends a <code>Strict-Transport-Security</code> header itself. Also:</p>
+<span class="file-label">Apache config</span>
+<pre><code><span class="c"># Do not advertise exact component versions.</span>
+ServerTokens Prod
+ServerSignature Off
+
+<span class="c"># Password-reset links carry a one-time token in the query string; keep it out</span>
+<span class="c"># of the access log (it would otherwise be readable by anyone who can read the</span>
+<span class="c"># log, for up to 30 minutes).</span>
+SetEnvIf Request_URI &quot;action=reset_token&quot; dontlog
+CustomLog logs/access_log combined env=!dontlog</code></pre>
 <h3 id="step-8-first-login">Step 8 -- First login</h3>
 <p>Browse to <code>https://yourhost/cgi-bin/fetchconfig-web.cgi</code> and log in as <code>admin</code> with the password <code>fetchconfig</code> (or the one you set in Step 2).</p>
 <p>Immediately:</p>
@@ -832,6 +862,8 @@ cp fetchconfig-web-documentation.html INSTALL.html \
    LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html /www/pub/fetchconfig-web/</code></pre>
 <p>Then hard-reload the browser (Ctrl-F5) so cached JavaScript and CSS are refreshed -- several 1.50 changes are client-side, and a stale cache is the usual reason a fix &quot;does not appear&quot;.</p>
 <p><strong>Running under FastCGI?</strong> Copying the new script is not enough -- the long-lived <code>mod_fcgid</code> workers keep running the old code until recycled, and <code>touch</code> does not trigger a reload. Run <code>apachectl graceful</code> after the copy (see <em>Step 7a -- Running under mod_fcgid</em>). Plain CGI needs no such step.</p>
+<h3 id="upgrading-to-1-61">Upgrading to 1.61</h3>
+<ul><li><code>chmod 0600 /etc/fetchconfig-web.cfg</code> (owned by the web-server user); the application warns on every page until the mode is correct.</li><li>If you use the email password reset (<code>EMAIL = 1</code>): add <code>SITE_URL</code> to the config file. Reset links are no longer built from the request&#x27;s <code>Host</code> header; without <code>SITE_URL</code> no reset email is sent.</li><li>Reset tokens are now stored as SHA-256; any token issued before the upgrade becomes invalid (they expire within 30 minutes anyway).</li><li>Add the access-log exclusion and <code>ServerTokens Prod</code> from Step 7.</li><li>No database change.</li></ul>
 <h3 id="upgrading-to-1-60">Upgrading to 1.60</h3>
 <ul><li><strong>Remove <code>REPOSITORY</code></strong> from <code>/etc/fetchconfig-web.cfg</code>. The repository now always comes from the device table (device <code>repository=</code> or the model&#x27;s <code>default:</code> line), exactly as for <code>fetchconfig.pl</code> itself. A leftover <code>REPOSITORY</code> line is ignored and shown as <code>invalid</code> in <em>Tools -&gt; Show fetchconfig-web.cfg</em>.</li><li>If the device table sets no <code>repository=</code> at all, every page shows <code>FATAL ERROR: No repository found ...</code> -- add a <code>default:</code> line with <code>repository=</code> for each model.</li><li>Before 1.60, <em>Backup Now</em> stored backups of devices whose repository comes from a model <code>default:</code> line in <code>REPOSITORY</code> instead, if the two differed. Check <code>REPOSITORY</code> for such device directories and move them into the device&#x27;s real repository.</li><li><strong>Run the database upgrade</strong> (adds <code>users.email</code>, <code>login_attempts</code> and <code>password_resets</code>). It is idempotent and PostgreSQL 8.2-compatible:</li></ul>
 <span class="file-label">shell</span>

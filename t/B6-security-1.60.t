@@ -107,7 +107,7 @@ SKIP: {
     like($src, qr/\[ 'EMAIL',/,     'config registry has EMAIL');
     like($src, qr/\[ 'SMTP_PASS',/, 'config registry has SMTP_PASS');
     ok(main::cfg_key_is_secret('SMTP_PASS', 1), 'SMTP_PASS is masked in the viewer');
-    ok(!main::cfg_key_is_secret('DEFAULT_PASSWORD', 1), 'DEFAULT_PASSWORD not masked (as agreed)');
+    ok(main::cfg_key_is_secret('DEFAULT_PASSWORD', 1), 'DEFAULT_PASSWORD masked in the viewer (1.61)');
 }
 
 # --- Change-your-email: self-service wiring ----------------------------------

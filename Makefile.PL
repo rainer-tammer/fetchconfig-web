@@ -81,7 +81,7 @@ HINT
 
 WriteMakefile(
     NAME          => 'fetchconfig_web',
-    VERSION       => '1.60',
+    VERSION       => '1.61',
     AUTHOR        => 'Rainer Tammer',
     ABSTRACT      => 'Web front-end for the fetchconfig network device configuration backup tool',
     LICENSE       => 'gpl_3',

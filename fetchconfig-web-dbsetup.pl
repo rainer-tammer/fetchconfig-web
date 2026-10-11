@@ -607,6 +607,36 @@ PROTECTED_USER          = admin
 MIN_PASSWORD_LENGTH     = 8
 DEFAULT_PASSWORD        = fetchconfig
 
+# --- password rules ---
+# Composition rules for new passwords; 0 = off. PASSWORD_MIN_CLASSES is how
+# many of the four character classes (upper, lower, digit, special) must be
+# present. A new password must also differ from DEFAULT_PASSWORD and from the
+# username.
+MAX_PASSWORD_LENGTH     = 64
+PASSWORD_MIN_UPPER      = 0
+PASSWORD_MIN_LOWER      = 0
+PASSWORD_MIN_DIGIT      = 0
+PASSWORD_MIN_SPECIAL    = 0
+PASSWORD_MIN_CLASSES    = 0
+
+# --- email / password reset ---
+# EMAIL = 1 enables the self-service "Forgot password?" flow (needs Net::SMTP
+# and the SMTP_* settings). With EMAIL = 0 (default) the link only tells users
+# to contact the administrator. SMTP_SECURITY: starttls (default), ssl or none.
+# SMTP AUTH is used only when EMAIL_AUTH = 1.
+EMAIL                   = 0
+SMTP_HOST               = mail.example.com
+SMTP_PORT               = 587
+SMTP_SECURITY           = starttls
+EMAIL_AUTH              = 0
+#SMTP_USER              = fetchconfig-web
+#SMTP_PASS              = secret
+EMAIL_FROM              = fetchconfig-web\@example.com
+# Public base URL (scheme + host[:port], no path) used to build the reset link.
+# REQUIRED when EMAIL = 1 -- the link is never derived from the request's Host
+# header; without SITE_URL no reset email is sent.
+SITE_URL                = https://fetchconfig.example.com
+
 # --- misc ---
 # Set to 1 when fetchconfig-web is served over HTTPS: the session cookie then
 # gets the "Secure" flag so the browser never sends it over plain HTTP. Leave 0
@@ -617,6 +647,10 @@ HTTPS_ENABLED           = 0
 # log and template-list "load time" lines, plus the device-table editor render
 # time). Default 0.
 SHOW_RENDER_TIME        = 0
+# Syntax highlighting for template-backed ("generic") devices whose template
+# does not declare a syntax_style: auto = detect from content (default),
+# none = plain text, or a scheme name (cisco-ios, json, xml, generic, ...).
+GENERIC_SYNTAX          = auto
 # Help documents: HELP_DIR is the filesystem directory that holds help.html and
 # the sibling docs (fetchconfig-web-documentation.html, fetchconfig-
 # documentation.html, LICENSE.html, LICENSE-ADDITIONS.html, PRIVACY.html); it is

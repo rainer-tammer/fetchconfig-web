@@ -22,4 +22,16 @@ use FCWebTest qw(load_cgi make_config);
     load_cgi($cfg); main::read_config();
     is(main::help_file_path(), '/srv/docs/help.html', 'HELP_DIR overrides; basename kept');
 }
+# Every registered config key is mentioned in README.md and in the config that
+# fetchconfig-web-dbsetup.pl generates, so no setting ships undocumented.
+{
+    my $root = "$FindBin::Bin/..";
+    my $cgi  = do { open(my $f,'<',"$root/fetchconfig-web.cgi") or die $!; local $/; <$f> };
+    my %reg; $reg{$1}=1 while $cgi =~ /^\s*\[ '([A-Z_]+)',/mg;
+    my $readme = do { open(my $f,'<',"$root/README.md") or die $!; local $/; <$f> };
+    my @undoc = grep { $readme !~ /\b\Q$_\E\b/ } sort keys %reg;
+    is_deeply(\@undoc, [], 'every config key is documented in README.md')
+        or diag("undocumented in README: @undoc");
+}
+
 done_testing();

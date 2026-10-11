@@ -1,3 +1,46 @@
+1.61
+====
+Security fixes from the 1.60 audit. No database change. If EMAIL = 1, add
+SITE_URL to the config file (see INSTALL). chmod 0600 the config file.
+
+* Password reset: the reset link is now built only from the new SITE_URL config
+  setting, never from the request's Host header (which an attacker controls and
+  could use to redirect reset links to their own server). Without SITE_URL no
+  reset email is sent. Reset tokens are stored as SHA-256; the reset pages send
+  Referrer-Policy: no-referrer.
+* Forgot-password: every request counts against the per-IP throttle (not only
+  requests for existing accounts, which was an account-enumeration oracle), and
+  the request takes a fixed minimum 0.5 s so timing reveals nothing.
+* Login: the 2-5 s sleep on a failed login is gone (under FastCGI it let a few
+  concurrent bad logins hold every worker); the DB throttle is the rate limit.
+  A nonexistent username now costs the same bcrypt check as a wrong password.
+* Headers: Cache-Control no-store on all responses; Strict-Transport-Security
+  when HTTPS_ENABLED = 1.
+* The configuration file must be mode 0600 (it holds DBpass and SMTP_PASS); a
+  warning is shown on every page until it is. DEFAULT_PASSWORD is masked in the
+  config viewer.
+* login_attempts update is transactional with a retry, so concurrent first
+  failures can no longer lose a count.
+* Footer warnings are now shown on their own line(s) above the copyright line;
+  security warnings (e.g. the config-file mode) in red, operational warnings
+  (audit write failed, tripwire disabled) in amber.
+* fetchconfig-web-dbsetup.pl: the generated config file now includes the
+  password-rules section, the email / password-reset section (incl. SITE_URL)
+  and GENERIC_SYNTAX, so a fresh install's config covers every setting the
+  application knows (a test keeps the generator and the config viewer in sync).
+* Docs: README's annotated configuration section now covers every setting,
+  including the 1.60/1.61 additions (password rules, email / password reset,
+  SITE_URL, GENERIC_SYNTAX, HELP_DIR); a test keeps README in sync with the
+  config-key registry.
+* Tools -> Login failures (admin): a viewer for the login_attempts throttle
+  table, in the audit-log look and with the same controls -- a filter bar (Type
+  IP/Account, From/To date), First/Prev/Next/Last paging top and bottom (100 per
+  page, fetched by AJAX), a Reload button, the floating Top/Bottom nav, and a
+  "Clear all" button guarded by the standard confirmation dialog. Rows show the
+  key (client IP or account), failure count, last-failure time and age, with
+  keys in cooldown highlighted.
+* Version 1.61.
+
 1.60
 ====
 Requires fetchconfig 9.67+. New run-time dependency: FCGI (optional, for
@@ -25,6 +68,11 @@ Security
   Referrer-Policy); json_string() escapes </script> breakouts; read-error
   messages no longer leak the raw errno (logged to the audit log instead).
 * Single highest-priority header banner shown instead of stacking several.
+* Password policy: configurable complexity rules -- MIN/MAX length and minimum
+  counts of uppercase/lowercase/digit/special characters, or N-of-4 character
+  classes (PASSWORD_MIN_*); a new password must also differ from the username
+  and DEFAULT_PASSWORD. All default off (length only), enforced at every
+  password-set point, shown on the change-password and reset forms.
 
 Email / password reset
 * Optional per-user email address (self-service "Change your email", admin edit
@@ -49,7 +97,7 @@ Database / tooling
 * Migration scripts renamed to a per-version series:
   fetchconfig-web-dbupdate-1.50.sql, -1.51.sql, -1.60.sql. The 1.60 script adds
   users.email, login_attempts and password_resets (PostgreSQL 8.2-compatible,
-  idempotent); dbsetup.pl creates them on a fresh install.
+  idempotent); fetchconfig-web-dbsetup.pl creates them on a fresh install.
 * New fetchconfig-web-clean-resets.pl prunes spent reset tokens and stale
   throttle rows.
 
@@ -109,7 +157,7 @@ Fixes
   filters (user/action/object/text/date range) and CSV export.
 * New standalone PostgreSQL 8.2-compatible script fetchconfig-web-audit.sql to
   add the audit tables to an existing database (also folded into
-  fetchconfig-web-dbupdate.sql); fresh installs get them via dbsetup.
+  fetchconfig-web-dbupdate.sql); fresh installs get them via fetchconfig-web-dbsetup.pl.
 * Fixed: audit entries for actions that did not pass an explicit user (e.g.
   empty/orphan cleanup, backup_now) logged the session id instead of the
   username -- current_user() returned the session id (current_session's first
@@ -334,7 +382,7 @@ Fixes
   Fixed: collapsing a previously-expanded device left the row blank -- the
   summary line (ID/Model/Site/Comment) now stays and the card is hidden below it.
 * New config key HTTPS_ENABLED (0|1, default 0, in the misc section of
-  /etc/fetchconfig-web.cfg and the dbsetup template): set to 1 to add the Secure
+  /etc/fetchconfig-web.cfg and the fetchconfig-web-dbsetup.pl template): set to 1 to add the Secure
   flag to the session cookie when served over HTTPS, instead of editing the
   source. Documented in README.
 * The HTML documentation sidebar is now built from the actual document

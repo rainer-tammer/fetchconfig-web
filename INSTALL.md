@@ -30,6 +30,7 @@ fetchconfig's device table and repository.
   - [Step 8 -- First login](#step-8----first-login)
 - [Part 3 -- Upgrading](#part-3----upgrading)
   - [Upgrading the script](#upgrading-the-script)
+  - [Upgrading to 1.61](#upgrading-to-1.61)
   - [Upgrading to 1.60](#upgrading-to-1.60)
   - [Upgrading the database to 1.51 (audit log)](#upgrading-the-database-to-1.51-audit-log)
   - [Upgrading the database to 1.50](#upgrading-the-database-to-1.50)
@@ -253,6 +254,16 @@ TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-templat
 # --- accounts ---
 PROTECTED_USER          = admin
 MIN_PASSWORD_LENGTH     = 8
+MAX_PASSWORD_LENGTH     = 64
+# Optional password composition rules (0 = off). PASSWORD_MIN_CLASSES is the
+# number of the four character classes (upper, lower, digit, special) that must
+# be present. A new password must also differ from DEFAULT_PASSWORD and the
+# username.
+PASSWORD_MIN_UPPER      = 0
+PASSWORD_MIN_LOWER      = 0
+PASSWORD_MIN_DIGIT      = 0
+PASSWORD_MIN_SPECIAL    = 0
+PASSWORD_MIN_CLASSES    = 0
 DEFAULT_PASSWORD        = fetchconfig
 
 # --- email / password reset (optional) ---
@@ -268,6 +279,11 @@ EMAIL_AUTH              = 0
 #SMTP_USER              = fetchconfig-web
 #SMTP_PASS              = secret
 EMAIL_FROM              = fetchconfig-web@example.com
+# Public base URL (scheme + host[:port], no path) used to build the reset link.
+# REQUIRED when EMAIL = 1: the link is never derived from the request's Host
+# header (that would let an attacker redirect reset links to their own server),
+# so without SITE_URL no reset email is sent.
+SITE_URL                = https://fetchconfig.example.com
 
 # --- misc ---
 HTTPS_ENABLED           = 0
@@ -292,6 +308,15 @@ chmod 640 /etc/fetchconfig-web.cfg
 
 The web-server user must be able to read it (hence the group), nobody else.
 Every key is documented in the Configuration section of `README.md`.
+
+**Protect the configuration file.** It contains `DBpass` and `SMTP_PASS` in
+cleartext. It must be readable by the web-server user only (the application
+shows a warning on every page until it is):
+
+```sh
+chown nobody /etc/fetchconfig-web.cfg      # the httpd run-time user (User directive)
+chmod 0600   /etc/fetchconfig-web.cfg
+```
 
 ### Step 4 -- Install the CGI and static files
 
@@ -622,6 +647,21 @@ ps -ef | grep '[f]etchconfig-web.cgi'
 Plain CGI needs none of this -- every request is a fresh process, so a new
 script file takes effect on the next request.
 
+**Hardening the web server.** With `HTTPS_ENABLED = 1` the application
+sends a `Strict-Transport-Security` header itself. Also:
+
+```apache
+# Do not advertise exact component versions.
+ServerTokens Prod
+ServerSignature Off
+
+# Password-reset links carry a one-time token in the query string; keep it out
+# of the access log (it would otherwise be readable by anyone who can read the
+# log, for up to 30 minutes).
+SetEnvIf Request_URI "action=reset_token" dontlog
+CustomLog logs/access_log combined env=!dontlog
+```
+
 ### Step 8 -- First login
 
 Browse to `https://yourhost/cgi-bin/fetchconfig-web.cgi` and log in as
@@ -666,6 +706,18 @@ usual reason a fix "does not appear".
 long-lived `mod_fcgid` workers keep running the old code until recycled, and
 `touch` does not trigger a reload. Run `apachectl graceful` after the copy
 (see *Step 7a -- Running under mod_fcgid*). Plain CGI needs no such step.
+
+### Upgrading to 1.61
+
+- `chmod 0600 /etc/fetchconfig-web.cfg` (owned by the web-server user); the
+  application warns on every page until the mode is correct.
+- If you use the email password reset (`EMAIL = 1`): add `SITE_URL` to the
+  config file. Reset links are no longer built from the request's `Host`
+  header; without `SITE_URL` no reset email is sent.
+- Reset tokens are now stored as SHA-256; any token issued before the upgrade
+  becomes invalid (they expire within 30 minutes anyway).
+- Add the access-log exclusion and `ServerTokens Prod` from Step 7.
+- No database change.
 
 ### Upgrading to 1.60
 
