@@ -108,7 +108,7 @@ my $src = do { open(my $fh, '<', cgi_path()) or die $!; local $/; <$fh> };
 }
 
 # --- version ----------------------------------------------------------------
-like($src, qr/use constant APP_VERSION => '1\.61';/, 'version bumped to 1.61');
+like($src, qr/use constant APP_VERSION => '1\.62';/, 'version bumped to 1.62');
 
 
 # --- fetchconfig-web-dbsetup.pl's generated config covers every registered key -------------------

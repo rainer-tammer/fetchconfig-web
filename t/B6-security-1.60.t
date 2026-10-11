@@ -201,6 +201,56 @@ SKIP: {
     cmp_ok(scalar @generic, '>=', 4, 'read-error sites show generic text (template x2, session, log)');
 }
 
+# 1.62 UI polish: styled alert for the config-download no-selection case, and a
+# labelled compare column.
+{
+    open(my $fh, '<', cgi_path()) or die $!;
+    my $cgisrc = do { local $/; <$fh> }; close($fh);
+    like($cgisrc, qr/window\.fcAlert = function/, 'fcAlert helper defined');
+    like($cgisrc, qr/opts\.alertOnly/,            'fcConfirm supports alertOnly (single button)');
+    like($cgisrc, qr/fcAlert\('Select a configuration to download/, 'download error uses the styled alert');
+    like($cgisrc, qr/>CMP<\/th>/,                 'compare column has a CMP header');
+}
+
+# Selected-backup download must branch by model: raw passthrough for a text
+# config, uudecode only for a binary web-GUI model (regression: the Download
+# button had sent text configs through the uudecoder and failed).
+{
+    no warnings 'redefine';
+    local *main::allow_full_config  = sub { 1 };
+    local *main::audit              = sub { };
+    local *main::get_backup_content = sub { ("hostname rtr01\n!\nend\n", undef) };
+    local *main::device_model       = sub { 'cisco-ios' };
+    local *main::is_web_binary_model = sub { 0 };
+    local *CGI::param = sub { my($s,$k)=@_; return 'rtr01' if $k eq 'dev'; return 1 if $k eq 'idx'; return; };
+    my $o=''; { open(my $fh,'>',\$o); my $sv=select($fh); main::download_tplink_config('admin','rtr01',1); select($sv); }
+    like($o, qr/hostname rtr01/, 'text config: raw passthrough');
+    unlike($o, qr/Could not decode/, 'text config: not uudecoded');
+}
+# Binary (web-GUI) model: the same handler uudecodes and serves the per-model
+# filename. A valid uuencoded blob decodes without error.
+{
+    no warnings 'redefine';
+    local *main::allow_full_config  = sub { 1 };
+    local *main::audit              = sub { };
+    # "begin 644 x\\n(content)\\n`\\nend" -- a minimal valid uuencode of "Cat".
+    local *main::get_backup_content = sub { ("begin 644 x\n#0V%T\n\x60\nend\n", undef) };
+    local *main::device_model       = sub { 'tplink' };
+    local *main::is_web_binary_model = sub { 1 };
+    local *main::web_config_filename = sub { 'sw1-config.cfg' };
+    local *CGI::param = sub { my($s,$k)=@_; return 'sw1' if $k eq 'dev'; return 1 if $k eq 'idx'; return; };
+    my $o=''; { open(my $fh,'>',\$o); my $sv=select($fh); main::download_tplink_config('admin','sw1',1); select($sv); }
+    unlike($o, qr/Could not decode/, 'binary config: uudecode path, no error');
+}
+# The backups-list download UI is offered for binary devices too (no is_tplink
+# exclusion on show_dl); compare stays text-only.
+{
+    open(my $fh, '<', cgi_path()) or die $!;
+    my $src = do { local $/; <$fh> }; close($fh);
+    like($src, qr/my \$show_dl = \$show_table && \$dl_full;/, 'download UI not gated by is_tplink');
+    like($src, qr/\$show_compare = \$show_table && !\$is_tplink/, 'compare still text-only');
+}
+
 done_testing();
 
 # ---- mock DBHs --------------------------------------------------------------

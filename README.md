@@ -410,7 +410,7 @@ Format and loading:
   old config files to the two-key form; the old single-key form is no longer
   accepted.)
 - **`BACKUP_TIMEOUT`** (seconds, default `120`, `0` = no limit) is the
-  wall-clock limit for one *Backup Now* run and for the *Empty Backup Cleanup*
+  wall-clock limit for one *Backup Now* run and for the *Empty backup cleanup*
   scan. On expiry the `fetchconfig.pl` child is terminated and the output
   captured so far is shown. It must be higher than the longest backup run of
   any device; thanks to the 10 s keepalive it may exceed the web server
@@ -970,6 +970,29 @@ only Edit device table), **Tools** (admin only, each tool on its own page), **Us
 for everyone; Users list, Add user and Sites for admins), and **Help**. The
 post-login page is the device list.
 
+### Device notes
+
+Every device can carry one free-text **note**. A paper-note icon
+(appearing filled when a note exists) sits in a **Note** column on the device
+list and after the device-id on the **Backups for &lt;device&gt;** page; clicking
+it opens a small modal that loads the note (AJAX), lets you edit it and a
+**Keep** flag, and saves it. Notes are available to **all logged-in users**, but
+**honour site access** -- a site-limited user can only see and edit notes for
+devices in their sites.
+
+**Device -> Notes** lists all notes the user may see (device-id, the first 60
+characters, the icon to open the full note, the Keep flag and the last-updated
+time), with the usual filters (device-id, Keep, date range), paging and a
+per-row delete. The note body is never written to the audit log (only
+"note set/cleared/deleted").
+
+**Tools -> Orphaned notes cleanup** (admin) removes notes whose device-id is no
+longer in the device table, **unless** the note's **Keep** flag is set -- so a
+note you want to preserve across a device's removal survives the cleanup.
+
+The notes live in the `device_notes` table (one row per device-id); run
+`fetchconfig-web-dbupdate-1.62.sql` on an existing install to create it.
+
 ### Reports
 
 The **Reports** page (Devices menu -> Backup reports; all logged-in users)
@@ -1417,7 +1440,7 @@ The check is a read-only GET; the delete is a POST + CSRF state-changing
 action and, like Backup Now, runs `fetchconfig.pl` through `sudo` when
 `USE_SUDO_FOR_BACKUP_NOW` is set (it writes into the repository).
 
-#### Empty Directory Cleanup
+#### Empty directory cleanup
 
 Empty directories are the date (`YYYYMM`/`YYYYMMDD`) or per-device directories
 left in the repository with no files in them. A normal aged-config delete run
@@ -1526,11 +1549,11 @@ config files found"), or `error`. The device IDs to scan are emitted into
 the page from `read_device_ids()`, and the endpoint validates `dev` against
 `^[\w.\-]+$`.
 
-#### Empty Backup Cleanup
+#### Empty backup cleanup
 
 Finds and removes **empty** (zero-byte) backup files -- a fetch that connected
 but saved nothing -- for devices still in the device table. Modelled on the
-Empty Directory Cleanup tool, it has two actions that scan every device at once:
+Empty directory cleanup tool, it has two actions that scan every device at once:
 
 - **Check for empty backups** (`?action=empty_bk_check`, read-only) runs
   `fetchconfig.pl -Z` and lists the zero-byte backups.
@@ -1814,6 +1837,15 @@ device is visible to a user only if its `site=` is one of their codes.
 * **Reports**: the report is parsed and only the sections for the user's devices
   are shown. Downloading the full (unfiltered) HTML file requires the per-user
   **"download full report"** right.
+* **Unmasked config**: the on-screen config view is **always masked** (secrets
+  like `pass=`/`enable=`/`community=` are shown as `***`), for every user and
+  model, and carries a header banner so the masked text is never mistaken for a
+  working config. Downloading a device config, and the **"Copy unmasked"**
+  button, require the per-user **`download_full_config`** right (unrestricted
+  users always have it); the unmasked content is fetched server-side and never
+  placed in the page DOM. Without the right, the view and its **"Copy"** button
+  are masked and there is no Download button. Unmasked copy and download are
+  audited. The **Download** button requires selecting which backup to download.
 
 **Saving (merge).** When a site-limited user saves, their edits are **merged
 into the full device table on the server**: every device and section they

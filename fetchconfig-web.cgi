@@ -62,12 +62,12 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.61';
+use constant APP_VERSION => '1.62';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '1.61';
+use constant APP_VERSION_INTERNAL => '1.62';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -78,7 +78,7 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 use constant MIN_FETCHCONFIG_VERSION => '9.67';
 
 # Seconds between keepalive writes to the client while a long external command
-# runs (Backup Now, Empty Backup Cleanup; see run_command_capture). Keeps the
+# runs (Backup Now, Empty backup cleanup; see run_command_capture). Keeps the
 # web server's inactivity timeout (Apache Timeout, FcgidIOTimeout) from firing,
 # so BACKUP_TIMEOUT may exceed it. Must stay well below those timeouts.
 # A package variable (not a constant) only so the tests can shorten it.
@@ -1090,7 +1090,7 @@ sub handle_request {
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
 my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password change_email test_my_email verify_email clear_login_failures reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report set_email reset_do upload_logo delete_logo);
+    qw(login logout change_password change_email test_my_email verify_email clear_login_failures reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report set_download_full_config set_email note_save note_delete notes_orphan_delete reset_do upload_logo delete_logo);
 
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
@@ -1218,6 +1218,8 @@ sub main {
             do_set_user_sites($user);
         } elsif ($action eq 'set_download_full_report') {
             do_set_download_full_report($user);
+        } elsif ($action eq 'set_download_full_config') {
+            do_set_download_full_config($user);
         } elsif ($action eq 'set_email') {
             do_set_email($user);
         } elsif ($action eq 'add_user') {
@@ -1273,6 +1275,20 @@ sub main {
             show_login_failures_data($user);
         } elsif ($action eq 'clear_login_failures') {
             do_clear_login_failures($user);
+        } elsif ($action eq 'note_get') {
+            show_note_get($user);
+        } elsif ($action eq 'note_save') {
+            do_note_save($user);
+        } elsif ($action eq 'note_delete') {
+            do_note_delete($user);
+        } elsif ($action eq 'notes_data') {
+            show_notes_data($user);
+        } elsif ($action eq 'tool_notes') {
+            show_notes($user);
+        } elsif ($action eq 'tool_notes_orphans') {
+            show_notes_orphans($user);
+        } elsif ($action eq 'notes_orphan_delete') {
+            do_notes_orphan_delete($user);
         } elsif ($action eq 'audit_data') {
             show_audit_data($user);
         } elsif ($action eq 'audit_csv') {
@@ -1347,6 +1363,8 @@ sub main {
             download_tplink_config($user, scalar $cgi->param('dev'), scalar $cgi->param('idx'));
         } elsif ($action eq 'download_latest') {
             download_latest_config($user, scalar $cgi->param('dev'));
+        } elsif ($action eq 'config_raw') {
+            serve_config_raw($user, scalar $cgi->param('dev'), scalar $cgi->param('idx'));
         } else {
             my $dev = $cgi->param('dev');
             my $idx = $cgi->param('idx');
@@ -1629,7 +1647,7 @@ sub db_get_user {
     my ($dbh, $username) = @_;
     my $row = $dbh->selectrow_hashref(
         'SELECT username, pass_hash, edit_device_table, admin_function, '
-      . 'download_full_report, email FROM users WHERE username = ?',
+      . 'download_full_report, download_full_config, email FROM users WHERE username = ?',
         undef, $username);
     return $row;
 }
@@ -1717,6 +1735,81 @@ sub login_record_failure {
 }
 
 # Clear the counters for an account and an IP after a successful login.
+# --- device notes --------------------------------------------------------
+# One free-text note per device-id (device_notes.device_id is UNIQUE). The
+# "keep" flag protects a note from the orphaned-notes cleanup.
+
+# Fetch a device's note. Returns a hashref {note, keep, updated} or undef.
+sub db_note_get {
+    my ($dbh, $dev) = @_;
+    return undef unless $dbh && defined $dev && $dev ne '';
+    my $row = eval {
+        $dbh->selectrow_hashref(
+            "SELECT note, keep, to_char(updated,'YYYY-MM-DD HH24:MI:SS') AS updated "
+          . "  FROM device_notes WHERE device_id = ?", undef, $dev);
+    };
+    return $row;
+}
+
+# Upsert a device's note (text + keep). An empty note with keep off deletes the
+# row (no point keeping a blank, unflagged note). Returns 1/0. UPSERT without
+# 8.2 ON CONFLICT: UPDATE, else INSERT; INSERT race falls back to UPDATE.
+sub db_note_save {
+    my ($dbh, $dev, $note, $keep) = @_;
+    return 0 unless $dbh && defined $dev && $dev ne '';
+    $note = '' unless defined $note;
+    $keep = $keep ? 1 : 0;
+    if ($note eq '' && !$keep) {
+        eval { $dbh->do('DELETE FROM device_notes WHERE device_id = ?', undef, $dev); };
+        return 1;
+    }
+    # UPSERT without 8.2 ON CONFLICT: UPDATE; if it matched no row, INSERT; on a
+    # concurrent-first-insert race, fall back to UPDATE. Returns the true DB
+    # outcome, and (in list context) the DB error string on failure, so callers
+    # can report WHY a save failed (e.g. a missing grant) rather than a generic
+    # "save failed".
+    my $upd = $dbh->do(
+        'UPDATE device_notes SET note = ?, keep = ?, updated = now() WHERE device_id = ?',
+        undef, $note, $keep, $dev);
+    if (defined $upd && $upd ne '0E0' && $upd > 0) {
+        return wantarray ? (1, undef) : 1;          # updated an existing row
+    }
+    if (!defined $upd) {                            # UPDATE itself errored
+        return wantarray ? (0, $dbh->errstr) : 0;
+    }
+    # No row updated -> insert.
+    my $ins = $dbh->do('INSERT INTO device_notes (device_id, note, keep) VALUES (?, ?, ?)',
+                       undef, $dev, $note, $keep);
+    if (defined $ins) {
+        return wantarray ? (1, undef) : 1;
+    }
+    # INSERT failed: a race means the row now exists -> one more UPDATE.
+    my $err = $dbh->errstr;
+    my $upd2 = $dbh->do(
+        'UPDATE device_notes SET note = ?, keep = ?, updated = now() WHERE device_id = ?',
+        undef, $note, $keep, $dev);
+    return wantarray ? ((defined $upd2 && $upd2 ne '0E0') ? (1, undef) : (0, $err))
+                     : ((defined $upd2 && $upd2 ne '0E0') ? 1 : 0);
+}
+
+# Delete one device's note outright. Returns 1/0.
+sub db_note_delete {
+    my ($dbh, $dev) = @_;
+    return 0 unless $dbh && defined $dev && $dev ne '';
+    my $ok = eval { $dbh->do('DELETE FROM device_notes WHERE device_id = ?', undef, $dev); };
+    return $ok ? 1 : 0;
+}
+
+# Set of device-ids that currently have a (non-empty) note, for the filled/outline
+# icon state. Returns a hashref { device_id => 1 }.
+sub db_notes_present {
+    my ($dbh) = @_;
+    return {} unless $dbh;
+    my $rows = eval { $dbh->selectcol_arrayref("SELECT device_id FROM device_notes WHERE note <> ''"); };
+    return {} unless $rows;
+    return { map { $_ => 1 } @$rows };
+}
+
 sub login_clear {
     my ($dbh, $username, $ip) = @_;
     return unless $dbh;
@@ -1898,7 +1991,7 @@ sub db_all_users {
     my ($dbh) = @_;
     my $rows = $dbh->selectall_arrayref(
         'SELECT username, pass_hash, edit_device_table, admin_function, '
-      . 'download_full_report, email FROM users ORDER BY username',
+      . 'download_full_report, download_full_config, email FROM users ORDER BY username',
         { Slice => {} });
     return $rows || [];
 }
@@ -2174,6 +2267,17 @@ sub user_may_download_full_report {
     return ($u && $u->{download_full_report}) ? 1 : 0;
 }
 
+# May this user see UNMASKED device configs -- i.e. download a backup or copy a
+# config unmasked to the clipboard? Unrestricted users always may; a restricted
+# user needs the download_full_config right. The masked on-screen view is shown
+# to everyone regardless; this gates only the unmasked content.
+sub user_may_download_full_config {
+    my ($dbh, $username) = @_;
+    return 1 if user_is_unrestricted($dbh, $username);
+    my $u = db_get_user($dbh, $username);
+    return ($u && $u->{download_full_config}) ? 1 : 0;
+}
+
 # The site code stored on a device record (its site= option), or the reserved
 # "all sites" sentinel when none is set (an untagged device belongs to site 0).
 sub device_site_code {
@@ -2416,6 +2520,13 @@ sub md5_crypt {
 # the time. Kept modest so a login on the 32-bit AIX Perl stays well under a
 # second.
 use constant BCRYPT_COST => 12;
+
+# Banner prepended to the on-screen (masked) config view and thus to the masked
+# copy, so masked output can never be mistaken for a working configuration.
+use constant CONFIG_MASK_BANNER =>
+      "# ------------------------------------------------------------#\n"
+    . "# Note: Unencrypted secrets are masked on a best effort base. #\n"
+    . "# ------------------------------------------------------------#\n";
 
 # Hash a new/changed password for storage. Prefers bcrypt ($2b$) when
 # Crypt::Bcrypt is available, else falls back to the legacy Apache MD5 ($apr1$).
@@ -3295,7 +3406,11 @@ sub show_device_list {
             . qq{<th class="sortable" data-key="dev">Device-ID<span class="sort-ind"></span></th>}
             . qq{<th class="sortable" data-key="host">Hostname<span class="sort-ind"></span></th>}
             . qq{<th>Comment</th>}
+            . qq{<th>Note</th>}
             . qq{</tr>\n};
+        my $_ndbh = db_connect();
+        my $notes_present = $_ndbh ? db_notes_present($_ndbh) : {};
+        $_ndbh->disconnect if $_ndbh;
         for my $d (@$devices) {
             my $link = script_url() . '?dev=' . CGI::escape($d->{id});
             my $site = defined $d->{site} ? $d->{site} : '';
@@ -3313,6 +3428,7 @@ sub show_device_list {
                 . qq{<td><a href="} . esc($link) . qq{">} . esc($d->{id}) . qq{</a></td>}
                 . qq{<td>} . esc($d->{host}) . qq{</td>}
                 . qq{<td>} . esc($d->{comment}) . qq{</td>}
+                . qq{<td class="note-cell">} . note_icon_button($d->{id}, $notes_present->{$d->{id}}) . qq{</td>}
                 . qq{</tr>\n};
         }
         print qq{</table>\n};
@@ -3844,7 +3960,14 @@ sub show_backup_list {
     # the row checkboxes) are hidden for them.
     my $model = device_model($dev);
     my $is_tplink = is_web_binary_model($model);
-    my $show_compare = $show_table && !$is_tplink;
+    my $show_compare = $show_table && !$is_tplink;   # binary configs can't be text-diffed
+    # May this user download the config? The selection-based Download works for
+    # both text and binary models -- the download handler uudecodes binary
+    # (web-GUI) configs and passes text configs through raw.
+    my $dl_full = do { my $d = db_connect();
+        my $m = $d ? user_may_download_full_config($d, $user) : 0;
+        $d->disconnect if $d; $m; };
+    my $show_dl = $show_table && $dl_full;
 
     print page_head("Backups: $dev", $user, 'full');
     # Breadcrumb: return to the Status page when we arrived from there
@@ -3855,7 +3978,10 @@ sub show_backup_list {
         : (script_url(),                    '&larr; Devices');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc($crumb_url) . qq{">$crumb_label</a></p>\n};
-    print qq{<h1>Backups for } . esc($dev) . qq{</h1>\n};
+    my $_bn = do { my $d = db_connect(); my $n = $d ? db_note_get($d, $dev) : undef; $d->disconnect if $d;
+                   $n && defined $n->{note} && $n->{note} ne '' ? 1 : 0; };
+    print qq{<h1>Backups for } . esc($dev) . qq{ }
+        . note_icon_button($dev, $_bn) . qq{</h1>\n};
 
     print qq{<div class="action-row">\n};
     print $cgi->start_form(-method => 'POST', -action => script_url(),
@@ -3881,9 +4007,14 @@ sub show_backup_list {
             . qq{">Check for empty backups</a>\n};
         # (The per-device backup-suffix check was removed; the Tools tool
         # "Check devices for consistent backup suffixes" covers all devices.)
-        # Download the newest backup's configuration as a file.
-        print qq{<a class="btn" href="} . esc(script_url() . '?action=download_latest&dev=' . CGI::escape($dev))
-            . qq{">Download latest configuration</a>\n};
+        # Download a SELECTED backup's configuration as a file. Only for a user
+        # who may see the unmasked config; the button reads the backup selected
+        # in the table below (radio) and errors if none is selected.
+        if ($show_dl) {
+            print qq{<button type="button" class="btn" id="dl-config-btn" }
+                . qq{data-url="} . esc(script_url() . '?action=download_config&dev=' . CGI::escape($dev))
+                . qq{">Download</button>\n};
+        }
     }
     print qq{</div>\n};
 
@@ -3903,13 +4034,16 @@ sub show_backup_list {
                 -enctype => 'application/x-www-form-urlencoded', -id => 'compare-form');
             print qq{<input type="hidden" name="dev" value="} . esc($dev) . qq{">\n};
         }
-        my $chk_th = $show_compare ? qq{<th></th>} : '';
-        print qq{<table class="list">\n<tr>$chk_th<th>#</th><th>Date</th><th>Time</th><th>Size</th><th>Path</th></tr>\n};
+        my $chk_th = $show_compare ? qq{<th title="Select up to two to compare">CMP</th>} : '';
+        my $dl_th  = $show_dl ? qq{<th title="Select to download">DL</th>} : '';
+        print qq{<table class="list">\n<tr>$chk_th$dl_th<th>#</th><th>Date</th><th>Time</th><th>Size</th><th>Path</th></tr>\n};
         for my $b (@$backups) {
             my $link = script_url() . '?dev=' . CGI::escape($dev) . '&idx=' . CGI::escape($b->{idx});
             print qq{<tr>};
             print qq{<td><input type="checkbox" class="cmp-sel" name="sel" value="}
                 . esc($b->{idx}) . qq{"></td>} if $show_compare;
+            print qq{<td><input type="radio" class="dl-sel" name="dl_idx" value="}
+                . esc($b->{idx}) . qq{"></td>} if $show_dl;
             print qq{<td><a href="} . esc($link) . qq{">}
                 . esc($b->{idx}) . qq{</a></td>};
             print qq{<td>} . esc($b->{date}) . qq{</td>};
@@ -3927,6 +4061,21 @@ document.addEventListener('change', function (e) {
     var checked = document.querySelectorAll('.cmp-sel:checked');
     if (checked.length > 2) { e.target.checked = false; }
 });
+</script>
+JS
+        }
+        if ($show_dl) {
+            print <<'JS';
+<script>
+(function () {
+    var btn = document.getElementById('dl-config-btn');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+        var sel = document.querySelector('.dl-sel:checked');
+        if (!sel) { if (window.fcAlert) { window.fcAlert('Select a configuration to download.'); } else { window.alert('Select a configuration to download.'); } return; }
+        window.location = btn.getAttribute('data-url') + '&idx=' + encodeURIComponent(sel.value);
+    });
+})();
 </script>
 JS
         }
@@ -5173,30 +5322,42 @@ sub show_backup_content {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
     } else {
         my $model = device_model($dev);
+        # Does this user have the right to the UNMASKED config (download + copy)?
+        my $may_full = do { my $d = db_connect(); my $m = $d ? user_may_download_full_config($d, $user) : 0; $d->disconnect if $d; $m; };
         if (is_web_binary_model($model)) {
             # These web-GUI switches store opaque binary config files
             # (uuencoded); there's nothing useful to show as text. Offer a
-            # download that transparently uudecodes to the real binary.
-            my $dl = script_url() . '?action=download_config&dev=' . CGI::escape($dev)
-                   . '&idx=' . CGI::escape($idx);
+            # download that transparently uudecodes to the real binary -- but
+            # only to a user who may see the unmasked config.
             print qq{<p class="muted">This is a web-managed switch with no CLI. }
                 . qq{Its backup is an opaque binary configuration file (stored }
                 . qq{uuencoded), not text &mdash; so there's nothing to display }
-                . qq{here. Download the decoded file below; it is what the }
-                . qq{switch's config-restore page expects.</p>\n};
-            print qq{<p><a class="btn btn-green" href="} . esc($dl) . qq{">}
-                . qq{Download } . esc(web_config_filename($model, $dev)) . qq{</a></p>\n};
+                . qq{here.</p>\n};
+            if ($may_full) {
+                my $dl = script_url() . '?action=download_config&dev=' . CGI::escape($dev)
+                       . '&idx=' . CGI::escape($idx);
+                print qq{<p>Download the decoded file below; it is what the }
+                    . qq{switch's config-restore page expects.</p>\n};
+                print qq{<p><a class="btn btn-green" href="} . esc($dl) . qq{">}
+                    . qq{Download } . esc(web_config_filename($model, $dev)) . qq{</a></p>\n};
+            } else {
+                print qq{<p class="muted">You do not have the right to download device }
+                    . qq{configurations.</p>\n};
+            }
         } else {
-            # Syntax-highlight the config if a highlighter is registered for
-            # this device's model; otherwise show the plain escaped text. The
-            # highlighter output is already HTML-escaped (and secret-masked).
+            # The on-screen view is ALWAYS masked, for every user and every
+            # model, and carries a banner so the masked text can never be
+            # mistaken for a working config. Unmasked content is delivered only
+            # to an authorized user, and only via the audited config_raw
+            # endpoint (copy) or the download -- never placed in the DOM.
+            my $shown = CONFIG_MASK_BANNER . mask_secrets($content);
             my $scheme;
-            my $highlighted = highlight_config($model, $content, $dev, \$scheme);
-            my $body = defined $highlighted ? $highlighted : esc($content);
+            my $highlighted = highlight_config($model, $shown, $dev, \$scheme);
+            my $body = defined $highlighted ? $highlighted : esc($shown);
             my $hl_class = defined $highlighted ? ' hl' : '';
 
             print qq{<div class="config-wrap">\n};
-            print copy_button_html();
+            print copy_button_html($may_full, $dev, $idx);
             print qq{<pre class="config$hl_class" id="config-content">} . $body . qq{</pre>\n};
             print qq{</div>\n};
             # Diagnostic (SHOW_RENDER_TIME=1): which highlighting scheme was
@@ -5209,7 +5370,7 @@ sub show_backup_content {
                 print qq{ &middot; template: } . esc($tpl) if defined $tpl && $tpl ne '';
                 print qq{</p>\n};
             }
-            print copy_button_script();
+            print copy_button_script($may_full, $dev, $idx);
             print top_bottom_nav();
         }
     }
@@ -5221,6 +5382,49 @@ sub show_backup_content {
 # uses their per-model name; for normal text models it serves the raw config
 # named "<dev>-YYMMDD-HHMMSS.cfg" (date/time from the backup file's own
 # timestamp). The newest backup is index 1 (list_backups is newest-first).
+# Shared gate for unmasked-config access (download + raw copy): the device must
+# be visible to the user (site scope) AND the user must hold download_full_config
+# (unrestricted users always do). Returns 1 if allowed; otherwise emits a 403
+# text response and returns 0.
+sub allow_full_config {
+    my ($user, $dev) = @_;
+    my $dbh = db_connect();
+    my $ok = 0;
+    if ($dbh) {
+        $ok = (device_accessible($user, $dev) && user_may_download_full_config($dbh, $user)) ? 1 : 0;
+        $dbh->disconnect;
+    }
+    unless ($ok) {
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+    }
+    return $ok;
+}
+
+# config_raw: serve the UNMASKED config for one backup as text/plain, for the
+# authorized "Copy unmasked" button. Gated and audited. Never linked for an
+# unauthorized user, and refuses with 403 if called directly without the right.
+sub serve_config_raw {
+    my ($user, $dev, $idx) = @_;
+    unless (valid_id($dev) && defined $idx && $idx =~ /^\d+$/) {
+        print std_header(-type => 'text/plain', -status => '400 Bad Request');
+        print "Invalid device id or backup index.\n";
+        return;
+    }
+    return unless allow_full_config($user, $dev);
+    my ($content, $err) = get_backup_content($dev, $idx);
+    if ($err || !defined $content) {
+        print std_header(-type => 'text/plain', -status => '502 Bad Gateway');
+        print "Could not retrieve backup: " . ($err // 'unknown error') . "\n";
+        return;
+    }
+    audit(action => 'copy_unmasked', object_type => 'config', object_id => $dev,
+          detail => "copied unmasked config (backup #$idx) to clipboard");
+    print std_header(-type => 'text/plain', -charset => 'UTF-8',
+                     -Content_Length => length($content));
+    print $content;
+}
+
 sub download_latest_config {
     my ($user, $dev) = @_;
 
@@ -5229,6 +5433,7 @@ sub download_latest_config {
         print "Invalid device id.\n";
         return;
     }
+    return unless allow_full_config($user, $dev);
 
     my ($backups, $lerr) = list_backups($dev);
     if ($lerr) {
@@ -5330,6 +5535,7 @@ sub download_tplink_config {
         print "Invalid device id or backup index.\n";
         return;
     }
+    return unless allow_full_config($user, $dev);
 
     my ($content, $err) = get_backup_content($dev, $idx);
     if ($err || !defined $content) {
@@ -5337,7 +5543,25 @@ sub download_tplink_config {
         print "Could not retrieve backup: " . ($err // 'unknown error') . "\n";
         return;
     }
+    audit(action => 'download_config', object_type => 'config', object_id => $dev,
+          detail => "downloaded config (backup #$idx)");
 
+    my $model = device_model($dev);
+    unless (is_web_binary_model($model)) {
+        # Normal text config: serve the raw backup as-is (do NOT uudecode -- that
+        # path is only for the opaque binary web-GUI switches). This is the
+        # selected-backup equivalent of download_latest_config's text branch.
+        print std_header(
+            -type           => 'text/plain',
+            -charset        => 'UTF-8',
+            -attachment     => "$dev.cfg",
+            -Content_Length => length($content),
+        );
+        print $content;
+        return;
+    }
+
+    # Binary web-GUI config (TP-Link / ProCurve 1700): uudecode to the real file.
     my ($bytes, $derr) = uudecode_content($content);
     if ($derr) {
         print std_header(-type => 'text/plain', -status => '500 Internal Server Error');
@@ -5347,7 +5571,7 @@ sub download_tplink_config {
 
     # Filename is per-model (ProCurve 1700 -> "-switch.cfg", TP-Link ->
     # "-config.cfg"). $dev matches ^[\w.\-]+$ so it's safe in the header.
-    my $fname = web_config_filename(device_model($dev), $dev);
+    my $fname = web_config_filename($model, $dev);
     print std_header(
         -type                  => 'application/octet-stream',
         -attachment            => $fname,
@@ -5384,28 +5608,40 @@ sub uudecode_content {
 
 # Copy-to-clipboard button markup. Must be paired with a
 # <pre id="config-content"> immediately after it, and copy_button_script()
-# printed once later in the same page.
+# printed once later in the same page. $may_full: when true the user may copy
+# the UNMASKED config, so the button is labelled "Copy unmasked" and the script
+# fetches the raw config server-side; otherwise it copies the masked DOM.
 sub copy_button_html {
+    my ($may_full) = @_;
+    my $label = $may_full ? 'Copy unmasked' : 'Copy';
     return qq{<button type="button" class="copy-btn" id="copy-btn" }
         . qq{title="Copy to clipboard" aria-label="Copy to clipboard">}
         . qq{<svg viewBox="0 0 24 24" aria-hidden="true"><path }
         . qq{d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11}
         . qq{a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>}
-        . qq{<span id="copy-label">Copy</span></button>\n};
+        . qq{<span id="copy-label">} . esc($label) . qq{</span></button>\n};
 }
 
 sub copy_button_script {
-    return <<'JS';
+    my ($may_full, $dev, $idx) = @_;
+    my $raw_url = ($may_full && defined $dev)
+        ? json_string(script_url() . '?action=config_raw&dev=' . CGI::escape($dev)
+                      . '&idx=' . CGI::escape(defined $idx ? $idx : ''))
+        : 'null';
+    my $deflabel = json_string($may_full ? 'Copy unmasked' : 'Copy');
+    return <<"JS";
 <script>
 (function () {
     var btn = document.getElementById('copy-btn');
     var label = document.getElementById('copy-label');
     var pre = document.getElementById('config-content');
     if (!btn || !pre) return;
+    var RAW_URL = $raw_url;          // non-null => fetch unmasked config
+    var DEF_LABEL = $deflabel;
 
     function done(ok) {
         label.textContent = ok ? 'Copied!' : 'Copy failed';
-        setTimeout(function () { label.textContent = 'Copy'; }, 1500);
+        setTimeout(function () { label.textContent = DEF_LABEL; }, 1500);
     }
 
     function fallbackCopy(text) {
@@ -5439,8 +5675,7 @@ sub copy_button_script {
         done(ok);
     }
 
-    btn.addEventListener('click', function () {
-        var text = pre.textContent;
+    function copyText(text) {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(text).then(
                 function () { done(true); },
@@ -5448,6 +5683,23 @@ sub copy_button_script {
             );
         } else {
             fallbackCopy(text);
+        }
+    }
+
+    btn.addEventListener('click', function () {
+        if (RAW_URL) {
+            // Authorized: fetch the UNMASKED config from the server (it is never
+            // in the DOM) and copy that. The endpoint enforces the right and
+            // audits the copy.
+            label.textContent = '...';
+            fetch(RAW_URL, { credentials: 'same-origin' }).then(function (r) {
+                if (!r.ok) throw new Error('forbidden');
+                return r.text();
+            }).then(function (t) { copyText(t); })
+              .catch(function () { done(false); });
+        } else {
+            // Unauthorized: copy the masked text shown on the page.
+            copyText(pre.textContent);
         }
     });
 })();
@@ -5916,11 +6168,11 @@ sub user_may_use_tools {
 # read-only GET; "Delete orphaned backups" is a POST (destructive) with a
 # JS confirm() prompt and a CSRF token.
 my %TOOL_TITLE = (
-    orphan     => 'Orphaned Backup Cleanup',
-    empty_dir  => 'Empty Directory Cleanup',
+    orphan     => 'Orphaned backup cleanup',
+    empty_dir  => 'Empty directory cleanup',
     restore    => 'Restore device table',
     nobackup   => 'Devices without backups',
-    empty_bk   => 'Empty Backup Cleanup',
+    empty_bk   => 'Empty backup cleanup',
     suffix     => 'Check devices for consistent backup suffixes',
     logo       => 'Upload report logo',
     diskspace  => 'Disk space',
@@ -5959,7 +6211,7 @@ sub show_tools {
     if ($only eq 'orphan') {
     # Each tool group lives in its own titled box.
     print qq{<div class="tool-section" id="orphan-cleanup">\n};
-    print qq{<h2 class="tool-section-title">Orphaned Backup Cleanup</h2>\n};
+    print qq{<h2 class="tool-section-title">Orphaned backup cleanup</h2>\n};
     print qq{<p class="muted">Orphaned backups are backed-up configurations }
         . qq{on disk whose device is no longer in the device table (for example, }
         . qq{a device that was decommissioned or renamed). These tools run }
@@ -5980,13 +6232,13 @@ sub show_tools {
     print csrf_field();
     print qq{<p><button type="submit" class="btn btn-danger">Delete orphaned backups</button></p>\n};
     print $cgi->end_form;
-    print qq{</div>\n};   # .tool-section (Orphaned Backup Cleanup)
+    print qq{</div>\n};   # .tool-section (Orphaned backup cleanup)
     }
 
-    # --- Empty Directory Cleanup ----------------------------------------
+    # --- Empty directory cleanup ----------------------------------------
     if (!$only || $only eq 'empty_dir') {
     print qq{<div class="tool-section" id="empty-cleanup">\n};
-    print qq{<h2 class="tool-section-title">Empty Directory Cleanup</h2>\n};
+    print qq{<h2 class="tool-section-title">Empty directory cleanup</h2>\n};
     print qq{<p class="muted">Empty directories are date }
         . qq{(<code>YYYYMM</code>/<code>YYYYMMDD</code>) or per-device directories }
         . qq{left in the repository with no files in them. A normal aged-config }
@@ -6010,7 +6262,7 @@ sub show_tools {
     print csrf_field();
     print qq{<p><button type="submit" class="btn btn-danger">Delete empty directories</button></p>\n};
     print $cgi->end_form;
-    print qq{</div>\n};   # .tool-section (Empty Directory Cleanup)
+    print qq{</div>\n};   # .tool-section (Empty directory cleanup)
     }
 
     # --- Restore device table -------------------------------------------
@@ -6172,10 +6424,10 @@ JS
     );
     }
 
-    # --- Empty Backup Cleanup -------------------------------------------
+    # --- Empty backup cleanup -------------------------------------------
     if (!$only || $only eq 'empty_bk') {
     print qq{<div class="tool-section" id="empty-backup-cleanup">\n};
-    print qq{<h2 class="tool-section-title">Empty Backup Cleanup</h2>\n};
+    print qq{<h2 class="tool-section-title">Empty backup cleanup</h2>\n};
     print qq{<p class="muted">Empty backups are <strong>zero-byte</strong> }
         . qq{configuration files in the repository for devices still in the }
         . qq{device table &mdash; a fetch that connected but saved nothing. These }
@@ -6225,7 +6477,7 @@ JS
 })();
 </script>
 EBKJS
-    print qq{</div>\n};   # .tool-section (Empty Backup Cleanup)
+    print qq{</div>\n};   # .tool-section (Empty backup cleanup)
     }
 
     # --- Check devices for consistent backup suffixes -------------------
@@ -6792,6 +7044,354 @@ sub show_login_failures_data {
 # Login-failures viewer (?action=tool_login_failures, admin only). Same look
 # and paging as the audit viewer: a filter bar, First/Prev/Next/Last pagers top
 # and bottom, and the rows fetched by AJAX from show_login_failures_data().
+# ===========================================================================
+# Device notes
+# ===========================================================================
+# Any logged-in user may read/edit a per-device note, but only for a device
+# they can see (site scope). The note icon opens an AJAX modal that uses
+# note_get / note_save; the Notes viewer lists all visible notes; the admin
+# orphan-cleanup removes notes whose device-id is gone from the table (unless
+# the keep flag is set).
+
+# Paper-note icon (U+1F4DD) button for a device. $has => filled vs. outline.
+sub note_icon_button {
+    my ($dev, $has) = @_;
+    my $cls = $has ? 'note-icon has-note' : 'note-icon';
+    my $title = $has ? 'Edit note' : 'Add note';
+    return qq{<button type="button" class="$cls" data-note-dev="} . esc($dev) . qq{" }
+         . qq{title="} . esc($title) . qq{" aria-label="} . esc($title) . qq{">}
+         . qq{&#x1F4DD;</button>};
+}
+
+# note_get (?action=note_get&dev=...): JSON {note,keep,updated} for a device the
+# user may see; 403 otherwise.
+sub show_note_get {
+    my ($user) = @_;
+    my $dev = $cgi->param('dev') // '';
+    unless (valid_id($dev)) {
+        print std_header(-type => 'application/json', -status => '400 Bad Request');
+        print '{"error":"bad device"}'; return;
+    }
+    my $dbh = db_connect();
+    # An admin may view any note (including one for a device removed from the
+    # table -- the orphaned-notes cleanup links here); a non-admin is limited to
+    # devices in their sites.
+    my $allowed = $dbh && (user_is_admin($dbh, $user) || device_accessible($user, $dev));
+    unless ($allowed) {
+        $dbh->disconnect if $dbh;
+        print std_header(-type => 'application/json', -status => '403 Forbidden');
+        print '{"error":"forbidden"}'; return;
+    }
+    my $n = $dbh ? db_note_get($dbh, $dev) : undef;
+    $dbh->disconnect if $dbh;
+    print std_header(-type => 'application/json', -charset => 'UTF-8');
+    print '{'
+        . json_string('note')    . ':' . json_string($n ? $n->{note} : '') . ','
+        . json_string('keep')    . ':' . (($n && $n->{keep}) ? 'true' : 'false') . ','
+        . json_string('updated') . ':' . json_string($n ? ($n->{updated} // '') : '')
+        . '}';
+}
+
+# note_save (POST+CSRF): upsert the note; site-checked; audited without the body.
+sub do_note_save {
+    my ($user) = @_;
+    my $dev  = $cgi->param('dev') // '';
+    my $note = $cgi->param('note'); $note = '' unless defined $note;
+    my $keep = $cgi->param('keep') ? 1 : 0;
+    unless (valid_id($dev)) {
+        print std_header(-type => 'application/json', -status => '400 Bad Request');
+        print '{"error":"bad device"}'; return;
+    }
+    unless (device_accessible($user, $dev)) {
+        print std_header(-type => 'application/json', -status => '403 Forbidden');
+        print '{"error":"forbidden"}'; return;
+    }
+    my $dbh = db_connect();
+    my ($ok, $dberr) = $dbh ? db_note_save($dbh, $dev, $note, $keep)
+                            : (0, 'cannot reach the database');
+    $dbh->disconnect if $dbh;
+    # Audit the action, never the note body (free text, possibly sensitive).
+    # On failure record the DB reason so the cause (e.g. a missing grant) is
+    # visible in the audit log.
+    audit(action => 'note_save', object_type => 'device', object_id => $dev,
+          detail => $ok
+              ? (($note ne '' ? 'note set/updated' : 'note cleared') . ($keep ? ' (keep)' : ''))
+              : ('note save FAILED: ' . ($dberr // 'unknown error')));
+    print std_header(-type => 'application/json', -charset => 'UTF-8');
+    print $ok ? '{"ok":true}' : '{"error":' . json_string($dberr // 'save failed') . '}';
+}
+
+# note_delete (POST+CSRF): delete one device's note (from the viewer). Site-checked.
+sub do_note_delete {
+    my ($user) = @_;
+    my $dev = $cgi->param('dev') // '';
+    unless (valid_id($dev) && device_accessible($user, $dev)) {
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n"; return;
+    }
+    my $dbh = db_connect();
+    db_note_delete($dbh, $dev) if $dbh;
+    $dbh->disconnect if $dbh;
+    audit(action => 'note_delete', object_type => 'device', object_id => $dev,
+          detail => 'deleted device note');
+    print std_header(-location => script_url() . '?action=tool_notes&msg='
+                     . CGI::escape('Note deleted.'), -status => '302 Found');
+}
+
+# Notes viewer data endpoint (?action=notes_data): one page of notes the user
+# may see (site-scoped), newest-updated first, with the usual filters.
+sub show_notes_data {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh) {
+        print std_header(-type => 'application/json', -status => '500 Internal Server Error');
+        print '{"error":"db"}'; return;
+    }
+    my $offset = $cgi->param('offset') // 0; $offset = 0 unless $offset =~ /^\d+$/;
+    my $limit = AUDIT_PAGE_SIZE;
+    my @w; my @b;
+    my $p = sub { my $v = $cgi->param($_[0]); return (defined $v && $v ne '') ? $v : undef; };
+    if (defined(my $d = $p->('f_dev')))  { push @w, 'device_id ILIKE ?'; push @b, '%' . $d . '%'; }
+    if (defined(my $k = $p->('f_keep'))) {
+        push @w, ($k eq 'yes' ? 'keep = TRUE' : 'keep = FALSE') if $k eq 'yes' || $k eq 'no';
+    }
+    if (defined(my $f = $p->('f_from'))) { push @w, 'updated >= ?';            push @b, $f; }
+    if (defined(my $t = $p->('f_to')))   { push @w, 'updated <  (?::date + 1)'; push @b, $t; }
+    my $where = @w ? (' WHERE ' . join(' AND ', @w)) : '';
+
+    # Fetch (filtered) then apply site scope in Perl, so a restricted user never
+    # sees notes for devices outside their sites.
+    my $rows = eval {
+        $dbh->selectall_arrayref(
+            "SELECT device_id, note, keep, "
+          . "       to_char(updated,'YYYY-MM-DD HH24:MI:SS') AS updated "
+          . "  FROM device_notes$where ORDER BY updated DESC", { Slice => {} }, @b);
+    } || [];
+    $dbh->disconnect;
+    # Keep only notes for devices this user may see. Resolve site access ONCE
+    # (and parse the device table once) rather than calling device_accessible()
+    # per row -- that would re-connect and re-parse the table for every note.
+    my @vis;
+    {
+        my $adbh = db_connect();
+        my $acc  = $adbh ? user_site_access($adbh, $user) : { unrestricted => 1 };
+        $adbh->disconnect if $adbh;
+        if ($acc->{unrestricted}) {
+            @vis = @$rows;                       # admin / unrestricted: all notes
+        } else {
+            my %site_of;                         # device-id -> record, parsed once
+            my ($content, $derr) = slurp_device_table();
+            if (!$derr && defined $content) {
+                for my $r (@{ parse_device_table($content) }) {
+                    $site_of{ $r->{id} } = $r if $r->{kind} eq 'device' && defined $r->{id};
+                }
+            }
+            @vis = grep {
+                my $r = $site_of{ $_->{device_id} };
+                $r && device_visible_to_acc($acc, $r);
+            } @$rows;
+        }
+    }
+    my $total = scalar @vis;
+    my @page = @vis[$offset .. ($offset + $limit - 1 < $#vis ? $offset + $limit - 1 : $#vis)];
+    @page = () if $offset > $#vis;
+
+    my @items;
+    for my $r (@page) {
+        (my $snip = $r->{note}) =~ s/\s+/ /g;
+        $snip = substr($snip, 0, 60);
+        push @items, '{'
+            . json_string('dev')     . ':' . json_string($r->{device_id}) . ','
+            . json_string('snippet') . ':' . json_string($snip) . ','
+            . json_string('keep')    . ':' . ($r->{keep} ? 'true' : 'false') . ','
+            . json_string('updated') . ':' . json_string($r->{updated} // '')
+            . '}';
+    }
+    print std_header(-type => 'application/json', -charset => 'UTF-8');
+    print '{"total":' . ($total+0) . ',"offset":' . ($offset+0)
+        . ',"limit":' . $limit . ',"rows":[' . join(',', @items) . ']}';
+}
+
+# Device -> Notes viewer page (any logged-in user; site-scoped). Audit-log look.
+sub show_notes {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Notes', $user, 'full');
+    print qq{<div class="tool-section" id="notes-section">\n};
+    print qq{<h2 class="tool-section-title">Device notes</h2>\n};
+    my $msg = $cgi->param('msg');
+    print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
+    print qq{<p class="muted">Notes for devices you can see, newest first, }
+        . AUDIT_PAGE_SIZE . qq{ per page. Click the &#x1F4DD;}
+        . qq{ icon to view or edit a note.</p>\n};
+    print <<"HTML";
+<div class="audit-filters">
+  <label>Device-ID <input type="text" id="nt-dev"></label>
+  <label>Keep
+    <select id="nt-keep"><option value="">any</option><option value="yes">yes</option><option value="no">no</option></select>
+  </label>
+  <label>From <input type="date" id="nt-from"></label>
+  <label>To <input type="date" id="nt-to"></label>
+  <button type="button" class="btn btn-small" id="nt-apply">Filter</button>
+  <button type="button" class="btn btn-small" id="nt-clear">Clear</button>
+  <button type="button" class="btn btn-small" id="nt-reload">Reload</button>
+</div>
+<div class="audit-pager">
+  <button type="button" class="btn btn-small ap-first">&laquo; First</button>
+  <button type="button" class="btn btn-small ap-prev">&larr; Prev</button>
+  <span class="ap-info pageinfo"></span>
+  <button type="button" class="btn btn-small ap-next">Next &rarr;</button>
+  <button type="button" class="btn btn-small ap-last">Last &raquo;</button>
+</div>
+<div class="audit-scroll">
+<table class="list audit-list" id="nt-table">
+  <thead><tr><th>Device-ID</th><th>Note</th><th>View</th><th>Keep</th><th>Updated</th><th></th></tr></thead>
+  <tbody id="nt-body"></tbody>
+</table>
+</div>
+<p id="nt-empty" class="muted" style="display:none;">No matching notes.</p>
+<div class="audit-pager audit-pager-bottom">
+  <button type="button" class="btn btn-small ap-first">&laquo; First</button>
+  <button type="button" class="btn btn-small ap-prev">&larr; Prev</button>
+  <span class="ap-info pageinfo"></span>
+  <button type="button" class="btn btn-small ap-next">Next &rarr;</button>
+  <button type="button" class="btn btn-small ap-last">Last &raquo;</button>
+</div>
+<script>
+(function () {
+  var url = "@{[ script_url() ]}";
+  var PAGE = @{[ AUDIT_PAGE_SIZE ]};
+  var offset = 0, total = 0;
+  function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];}); }
+  function qs(){ var p=[];
+    function add(id,n){ var v=document.getElementById(id).value; if(v!=='') p.push(n+'='+encodeURIComponent(v)); }
+    add('nt-dev','f_dev'); add('nt-keep','f_keep'); add('nt-from','f_from'); add('nt-to','f_to'); return p.join('&'); }
+  function render(d){ total=d.total; offset=d.offset;
+    var b=document.getElementById('nt-body'); b.innerHTML='';
+    for(var i=0;i<d.rows.length;i++){ var r=d.rows[i];
+      var tr=document.createElement('tr');
+      tr.innerHTML='<td>'+esc(r.dev)+'</td><td>'+esc(r.snippet)+'</td>'
+        +'<td class="note-cell"><button type="button" class="note-icon has-note" data-note-dev="'+esc(r.dev)+'" title="View note">&#x1F4DD;</button></td>'
+        +'<td>'+(r.keep?'yes':'')+'</td><td>'+esc(r.updated)+'</td>'
+        +'<td><form method="POST" action="'+url+'" data-confirm="Delete the note for '+esc(r.dev)+'?" data-confirm-danger="y" style="margin:0;">'
+        +'<input type="hidden" name="action" value="note_delete"><input type="hidden" name="dev" value="'+esc(r.dev)+'">'
+        +'<input type="hidden" name="csrf" value="@{[ csrf_token() ]}"><button type="submit" class="btn btn-small btn-danger">Delete</button></form></td>';
+      b.appendChild(tr);
+    }
+    document.getElementById('nt-empty').style.display=(total===0?'':'none');
+    var from=total?offset+1:0, to=Math.min(offset+PAGE,total);
+    var info=total?(from+'\\u2013'+to+' of '+total):'0 of 0';
+    function all(sel,fn){ var e=document.querySelectorAll(sel); for(var i=0;i<e.length;i++) fn(e[i]); }
+    all('.ap-info',function(e){e.textContent=info;});
+    all('.ap-first',function(e){e.disabled=offset<=0;}); all('.ap-prev',function(e){e.disabled=offset<=0;});
+    all('.ap-next',function(e){e.disabled=offset+PAGE>=total;}); all('.ap-last',function(e){e.disabled=offset+PAGE>=total;});
+  }
+  function load(){ fetch(url+'?action=notes_data&offset='+offset+(qs()?'&'+qs():''),{credentials:'same-origin'})
+    .then(function(r){return r.json();}).then(render)
+    .catch(function(){ var e=document.querySelectorAll('.ap-info'); for(var i=0;i<e.length;i++) e[i].textContent='(load failed)'; }); }
+  function bind(sel,h){ var e=document.querySelectorAll(sel); for(var i=0;i<e.length;i++) e[i].addEventListener('click',h); }
+  document.getElementById('nt-apply').addEventListener('click',function(){offset=0;load();});
+  document.getElementById('nt-reload').addEventListener('click',function(){load();});
+  document.getElementById('nt-clear').addEventListener('click',function(){
+    document.getElementById('nt-dev').value=''; document.getElementById('nt-keep').value='';
+    document.getElementById('nt-from').value=''; document.getElementById('nt-to').value=''; offset=0; load(); });
+  bind('.ap-first',function(){offset=0;load();});
+  bind('.ap-prev',function(){offset=Math.max(0,offset-PAGE);load();});
+  bind('.ap-next',function(){if(offset+PAGE<total){offset+=PAGE;load();}});
+  bind('.ap-last',function(){offset=Math.max(0,Math.floor((total-1)/PAGE)*PAGE);load();});
+  load();
+})();
+</script>
+HTML
+    print qq{</div>\n};   # .tool-section
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# Tools -> Orphaned notes cleanup (admin): notes whose device-id is no longer in
+# the device table AND keep = FALSE.
+sub notes_orphans {
+    my ($dbh) = @_;
+    return [] unless $dbh;
+    my $rows = eval {
+        $dbh->selectall_arrayref(
+            "SELECT device_id, to_char(updated,'YYYY-MM-DD HH24:MI:SS') AS updated "
+          . "  FROM device_notes WHERE keep = FALSE ORDER BY updated DESC", { Slice => {} });
+    } || [];
+    # Keep only those whose device-id is absent from the current device table.
+    my ($content, $err) = slurp_device_table();
+    my %present;
+    if (!$err && defined $content) {
+        for my $r (@{ parse_device_table($content) }) {
+            $present{ $r->{id} } = 1 if $r->{kind} eq 'device';
+        }
+    }
+    return [ grep { !$present{ $_->{device_id} } } @$rows ];
+}
+
+sub show_notes_orphans {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
+    unless ($is_admin) {
+        $dbh->disconnect if $dbh;
+        print page_head('Error', $user);
+        print qq{<p class="error">Orphaned notes cleanup is available to administrators only.</p>\n};
+        print page_foot();
+        return;
+    }
+    my $orphans = notes_orphans($dbh);
+    $dbh->disconnect if $dbh;
+    print page_head('Orphaned notes cleanup', $user, 'full');
+    print qq{<div class="tool-section" id="notes-orphans-section">\n};
+    print qq{<h2 class="tool-section-title">Orphaned notes cleanup</h2>\n};
+    my $msg = $cgi->param('msg');
+    print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
+    print qq{<p class="muted">Notes whose device-id is no longer in the device table }
+        . qq{and whose <em>keep</em> flag is not set. Notes with <em>keep</em> are never }
+        . qq{listed or deleted here.</p>\n};
+    if (!@$orphans) {
+        print qq{<p class="muted">No orphaned notes.</p>\n};
+        print qq{</div>\n}; print page_foot(); return;
+    }
+    print qq{<form method="POST" action="} . esc(script_url()) . qq{" style="margin:0 0 0.8em;" }
+        . qq{data-confirm="Delete all } . scalar(@$orphans) . qq{ orphaned notes? This cannot be undone." }
+        . qq{data-confirm-danger="y">\n};
+    print qq{<input type="hidden" name="action" value="notes_orphan_delete">\n};
+    print csrf_field();
+    print qq{<button type="submit" class="btn btn-danger">Delete orphaned notes</button>\n};
+    print qq{</form>\n};
+    print qq{<table class="list"><tr><th>Device-ID</th><th>View</th><th>Updated</th></tr>\n};
+    for my $o (@$orphans) {
+        print qq{<tr><td>} . esc($o->{device_id}) . qq{</td>}
+            . qq{<td class="note-cell">} . note_icon_button($o->{device_id}, 1) . qq{</td>}
+            . qq{<td>} . esc($o->{updated}) . qq{</td></tr>\n};
+    }
+    print qq{</table>\n</div>\n};
+    print page_foot();
+}
+
+sub do_notes_orphan_delete {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) {
+        $dbh->disconnect if $dbh;
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n"; return;
+    }
+    my $orphans = notes_orphans($dbh);
+    my $n = 0;
+    for my $o (@$orphans) {
+        $n++ if db_note_delete($dbh, $o->{device_id});
+    }
+    $dbh->disconnect;
+    audit(action => 'notes_orphan_delete', object_type => 'device_notes',
+          detail => "deleted $n orphaned note(s)");
+    print std_header(-location => script_url() . '?action=tool_notes_orphans&msg='
+                     . CGI::escape("Deleted $n orphaned note(s)."), -status => '302 Found');
+}
+
 sub show_login_failures {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -8878,7 +9478,7 @@ sub show_orphan_check {
 
     print page_head('Check for orphaned backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned Backup Cleanup</a></p>\n};
+        . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned backup cleanup</a></p>\n};
     print qq{<h1>Check for orphaned backups</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -o</code>. Nothing }
         . qq{is deleted.</p>\n};
@@ -8897,11 +9497,11 @@ sub show_orphan_check {
         print copy_button_script();
     } elsif (defined $status && $status == 1) {
         # Exit 1 from -o means "orphaned backups were found" -- expected, not
-        # an error. Use "Delete orphaned backups" in the Orphaned Backup Cleanup tool to
+        # an error. Use "Delete orphaned backups" in the Orphaned backup cleanup tool to
         # remove them.
         print qq{<p class="success">Orphaned backups were found (listed below). }
             . qq{Use <strong>Delete orphaned backups</strong> in the }
-            . qq{<strong>Orphaned Backup Cleanup</strong> tool to remove them.</p>\n};
+            . qq{<strong>Orphaned backup cleanup</strong> tool to remove them.</p>\n};
         print qq{<div class="config-wrap">\n};
         print copy_button_html();
         print qq{<pre class="config" id="config-content">} . esc($output) . qq{</pre>\n};
@@ -8934,7 +9534,7 @@ sub do_orphan_delete {
 
     print page_head('Delete orphaned backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned Backup Cleanup</a></p>\n};
+        . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned backup cleanup</a></p>\n};
     print qq{<h1>Delete orphaned backups</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -o -D</code>.</p>\n};
 
@@ -8989,7 +9589,7 @@ sub show_empty_check {
 
     print page_head('Check for empty directories', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty Directory Cleanup</a></p>\n};
+        . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty directory cleanup</a></p>\n};
     print qq{<h1>Check for empty directories</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -e</code>. Nothing }
         . qq{is deleted.</p>\n};
@@ -9008,11 +9608,11 @@ sub show_empty_check {
         print copy_button_script();
     } elsif (defined $status && $status == 1) {
         # Exit 1 from -e means "empty directories were found" -- expected, not
-        # an error. Use "Delete empty directories" in the Empty Directory Cleanup tool to remove
+        # an error. Use "Delete empty directories" in the Empty directory cleanup tool to remove
         # them.
         print qq{<p class="success">Empty directories were found (listed below). }
             . qq{Use <strong>Delete empty directories</strong> in the }
-            . qq{<strong>Empty Directory Cleanup</strong> tool to remove them.</p>\n};
+            . qq{<strong>Empty directory cleanup</strong> tool to remove them.</p>\n};
         print qq{<div class="config-wrap">\n};
         print copy_button_html();
         print qq{<pre class="config" id="config-content">} . esc($output) . qq{</pre>\n};
@@ -9044,7 +9644,7 @@ sub do_empty_delete {
 
     print page_head('Delete empty directories', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty Directory Cleanup</a></p>\n};
+        . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty directory cleanup</a></p>\n};
     print qq{<h1>Delete empty directories</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -e -D</code>.</p>\n};
 
@@ -9083,7 +9683,7 @@ sub do_empty_delete {
     print page_foot();
 }
 
-# "Empty Backup Cleanup" CHECK: fetchconfig.pl -Z over all devices (read-only).
+# "Empty backup cleanup" CHECK: fetchconfig.pl -Z over all devices (read-only).
 # fetchconfig exits 1 when zero-byte backups ARE found and 0 when none, so the
 # count is taken from the summary line, not the exit status.
 sub show_empty_bk_check {
@@ -9097,7 +9697,7 @@ sub show_empty_bk_check {
     }
     print page_head('Check for empty backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty Backup Cleanup</a></p>\n};
+        . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty backup cleanup</a></p>\n};
     print qq{<h1>Check for empty backups</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -Z</code>. Nothing is deleted.</p>\n};
     # Render a spinner immediately, then fetch the (slow) scan result so the
@@ -9108,7 +9708,7 @@ sub show_empty_bk_check {
     print page_foot();
 }
 
-# "Empty Backup Cleanup" DELETE: fetchconfig.pl -Z -D (POST + CSRF). Audited.
+# "Empty backup cleanup" DELETE: fetchconfig.pl -Z -D (POST + CSRF). Audited.
 sub do_empty_bk_delete {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9120,7 +9720,7 @@ sub do_empty_bk_delete {
     }
     print page_head('Delete empty backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty Backup Cleanup</a></p>\n};
+        . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty backup cleanup</a></p>\n};
     print qq{<h1>Delete empty backups</h1>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -Z -D</code>.</p>\n};
     print empty_bk_result_shell('empty_bk_delete_data');
@@ -9550,6 +10150,9 @@ sub show_user_sites_form {
     my $dfr = $trow->{download_full_report} ? ' checked' : '';
     print qq{<p><label><input type="checkbox" name="download_full_report" value="1"$dfr> }
         . qq{May download the full (unfiltered) report</label></p>\n};
+    my $dfc = $trow->{download_full_config} ? ' checked' : '';
+    print qq{<p><label><input type="checkbox" name="download_full_config" value="1"$dfc> }
+        . qq{May download a device config and copy it unmasked</label></p>\n};
     print qq{<p><button type="submit" class="btn btn-green">Save</button> }
         . qq{<a class="btn" href="} . esc(script_url().'?action=user_list') . qq{">Cancel</a></p>\n};
     print $cgi->end_form;
@@ -9620,8 +10223,10 @@ sub do_set_user_sites {
         return @c ? join(', ', @c) : '(none)';
     };
     my $dfr = $cgi->param('download_full_report') ? 1 : 0;
+    my $dfc = $cgi->param('download_full_config') ? 1 : 0;
     db_set_user_sites($dbh, $target, \@ids);
     $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $dfr, $target);
+    $dbh->do('UPDATE users SET download_full_config = ? WHERE username = ?', undef, $dfc, $target);
     $dbh->disconnect;
     # What actually changed, by code.
     my %o = map { $_ => 1 } @old_ids;
@@ -9653,6 +10258,22 @@ sub do_set_download_full_report {
           field=>'download_full_report', new_value=>($val?'yes':'no'),
           detail=>($val ? 'granted report-download right' : 'revoked report-download right'));
     redirect_to_user_page(action=>"user_list", msg=>"Updated report-download right for $target.");
+}
+
+sub do_set_download_full_config {
+    my ($admin) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $admin)) { $dbh->disconnect if $dbh;
+        print std_header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
+    my $target = $cgi->param('username') // '';
+    my $val = $cgi->param('value') ? 1 : 0;
+    $dbh->do('UPDATE users SET download_full_config = ? WHERE username = ?', undef, $val, $target)
+        if $target ne '';
+    $dbh->disconnect;
+    audit(action=>'set_download_full_config', object_type=>'user', object_id=>$target,
+          field=>'download_full_config', new_value=>($val?'yes':'no'),
+          detail=>($val ? 'granted config-download right' : 'revoked config-download right'));
+    redirect_to_user_page(action=>"user_list", msg=>"Updated config-download right for $target.");
 }
 
 sub do_set_email {
@@ -9798,7 +10419,7 @@ sub show_user_page {
             } else {
                 print qq{<table class="list">\n}
                     . qq{<tr><th>Username</th><th>Email</th><th>Admin functions</th>}
-                    . qq{<th>Edit device</th><th>Full Report</th><th>Sites</th><th></th></tr>\n};
+                    . qq{<th>Edit device</th><th>Full Report</th><th>Full config</th><th>Sites</th><th></th></tr>\n};
                 # Preload all site codes by id for the display.
                 my %site_code; $site_code{$_->{id}} = $_->{code} for @{ db_all_sites($admin_dbh) };
                 for my $row (@$users) {
@@ -9853,6 +10474,17 @@ sub show_user_page {
                     } else {
                         print _right_toggle_form('set_download_full_report', $u,
                             $row->{download_full_report} ? 1 : 0);
+                    }
+                    print qq{</td>};
+
+                    # Full config (unmasked download / copy): unrestricted users
+                    # always may; a site-limited user gets a grant/revoke toggle.
+                    print qq{<td>};
+                    if ($u_unrestricted) {
+                        print qq{<span class="muted">always</span>};
+                    } else {
+                        print _right_toggle_form('set_download_full_config', $u,
+                            $row->{download_full_config} ? 1 : 0);
                     }
                     print qq{</td>};
 
@@ -10111,6 +10743,7 @@ sub _right_toggle_form {
     my $new = $has ? 0 : 1;
     my $field = ($action eq 'set_admin_right')          ? 'admin'
               : ($action eq 'set_download_full_report') ? 'value'
+              : ($action eq 'set_download_full_config') ? 'value'
               :                                           'edit';
     my $h = $cgi->start_form(-method => 'POST', -action => script_url());
     $h .= qq{<input type="hidden" name="action" value="} . esc($action) . qq{">\n};
@@ -15803,11 +16436,39 @@ sub mask_secrets {
     # separated by commas, e.g. "user=admin,pass=X,enable=Y").
     $text =~ s/\b(pass\w*=)[^\s,;]+/$1?***?/gi;
     $text =~ s/\b(enable\w*=)[^\s,;]+/$1?***?/gi;
-    # SNMP read-WRITE community (procurve-snmp): the option form "community=".
-    # Only the "=" form (device-table option) is masked; the space form in a
-    # switch config ("snmp-server community public") is left as the config
-    # shows it, like other space-form secrets.
+    # SNMP community, device-table option form "community=".
     $text =~ s/\b(community=)[^\s,;]+/$1?***?/gi;
+    # SNMP community in a switch config, space form. The community string is the
+    # token after "community", optionally quoted, and may be followed by an
+    # access level (operator/manager/unrestricted/ro/rw). Mask only the string,
+    # keeping the keyword and any trailing access level. Covers e.g.
+    #   snmp-server community "public" operator      (ProCurve)
+    #   snmp-server community private RW             (Cisco/Comware)
+    #   set snmp community public                    (other CLIs)
+    # Scope to an "snmp-server community ..." (or "set snmp community ...")
+    # COMMAND, not the word "community" appearing in a description/name/comment.
+    $text =~ s/^(\s*(?:snmp-server|set\s+snmp)\s+community\s+)"[^"]*"/$1"***"/gim;      # quoted
+    $text =~ s/^(\s*(?:snmp-server|set\s+snmp)\s+community\s+)(?!")(\S+)/$1?***?/gim;   # bare
+    # RADIUS/TACACS shared secret: the "key <value>" token, but ONLY on a
+    # radius-/tacacs-server line (so "crypto key generate", "ip ssh host-key"
+    # etc. are not touched). Mask the key value (quoted or bare), keeping "key".
+    #   radius-server host 1.2.3.4 key "secret"       (ProCurve, quoted)
+    #   tacacs-server host 1.2.3.4 key secret          (bare)
+    $text =~ s/^((?:radius|tacacs)[-\w]*server\b.*?\bkey\s+)"[^"]*"/$1"***"/gim;
+    $text =~ s/^((?:radius|tacacs)[-\w]*server\b.*?\bkey\s+)(?!")([^\s,;]+)/$1?***?/gim;
+    # WPA/WPA2 pre-shared key (Aruba CX etc.): "wpa-passphrase <value>" (the
+    # value may be a long hex/ASCII string with no quotes).
+    $text =~ s/\b(wpa-passphrase\s+)(\S+)/$1?***?/gi;
+    # Aruba CX virtual-controller shared key: "virtual-controller-key <value>".
+    $text =~ s/\b(virtual-controller-key\s+)(\S+)/$1?***?/gi;
+    # Aruba CX auth-server key: an indented "key <value>" line inside a
+    #   wlan auth-server <name>
+    #     key <secret>
+    # block. The generic RADIUS/TACACS rule above only matches "...server ... key"
+    # on one line, so handle this leading-whitespace "key <value>" line too.
+    # Scoped to a line whose only content is "key <value>" to avoid touching
+    # other "key ..." commands.
+    $text =~ s/^(\s+key\s+)(\S+)\s*$/$1?***?/gim;
     return $text;
 }
 
@@ -15976,7 +16637,8 @@ sub page_head {
         my $devices_menu = $group->('Devices',
             $su->('Device list',    script_url()),
             $su->('Backup status',  '?action=status'),
-            $su->('Backup reports', '?action=report'));
+            $su->('Backup reports', '?action=report'),
+            $su->('Notes',          '?action=tool_notes'));
 
         # Setup devices (only if allowed to edit). Admin/unrestricted: full set;
         # a site-limited editor: only "Edit device table".
@@ -16001,9 +16663,10 @@ sub page_head {
                 $su->('Check site assignment',                        '?action=check_site_assignment'),
                 $su->('Devices without backups',                      '?action=tool_nobackup'),
                 $su->('Disk space',                                   '?action=tool_diskspace'),
-                $su->('Empty Backup Cleanup',                         '?action=tool_empty_bk'),
-                $su->('Empty Directory Cleanup',                      '?action=tool_empty_dir'),
-                $su->('Orphaned Backup Cleanup',               '?action=tool_orphan'),
+                $su->('Empty backup cleanup',                         '?action=tool_empty_bk'),
+                $su->('Empty directory cleanup',                      '?action=tool_empty_dir'),
+                $su->('Orphaned backup cleanup',               '?action=tool_orphan'),
+                $su->('Orphaned notes cleanup',                       '?action=tool_notes_orphans'),
                 $su->('Restore device table',                         '?action=tool_restore'),
                 $su->('Show fetchconfig-web.cfg',                     '?action=tool_show_cfg'),
                 $su->('Verify email setup',                          '?action=tool_verify_email'),
@@ -16375,6 +17038,27 @@ $backdrop_css
   /* Custom confirmation dialog -- same look as the spinner box. */
   .fc-modal { position: fixed; inset: 0; z-index: 300; background: rgba(20,30,40,0.6);
               display: flex; align-items: center; justify-content: center; }
+  /* Device-note paper icon: outline by default, slightly brighter when a note
+     exists (has-note). It is a bare button so it sits inline in tables/headings. */
+  /* The paper-note emoji has its own baseline offset, so an inline button sits
+     low and off-centre. Make the button a flex box centred on both axes, and
+     size it to a square so the glyph lands dead-centre in the Note column. */
+  .note-icon { display: inline-flex; align-items: center; justify-content: center;
+               width: 1.6em; height: 1.6em; background: none; border: none;
+               cursor: pointer; font-size: 1.05em; line-height: 1; padding: 0;
+               opacity: 0.45; vertical-align: middle; }
+  .note-icon:hover { opacity: 0.9; }
+  .note-icon.has-note { opacity: 1; }
+  td.note-cell { text-align: center; width: 2.2em; }
+  /* In the "Backups for <device>" heading the icon follows the h1 text; nudge
+     it onto the text's optical centre. */
+  h1 .note-icon { vertical-align: 0.05em; }
+  .fc-note-box { width: 32em; max-width: 92vw; text-align: left; }
+  .fc-note-title { margin: 0 0 0.2em; }
+  .fc-note-dev { margin: 0 0 0.6em; font-family: monospace; }
+  .fc-note-text { width: 100%; box-sizing: border-box; font-family: monospace; font-size: 0.9em; }
+  .fc-note-keep { display: block; margin: 0.5em 0; font-size: 0.9em; }
+  .fc-note-status { min-height: 1.2em; margin: 0.2em 0 0.6em; font-size: 0.85em; }
   .fc-modal-box { background: #fff; border-radius: 10px; padding: 1.8em 2em 1.5em;
                   box-shadow: 0 8px 30px rgba(0,0,0,0.3); max-width: min(90vw, 440px); text-align: left; }
   .fc-modal-msg { margin: 0; font-size: 1.05em; color: #16232e; line-height: 1.5; }
@@ -16833,6 +17517,7 @@ sub page_foot {
     my $cr = esc($COPYRIGHT ne '' ? $COPYRIGHT : DEFAULT_COPYRIGHT);
     my $confirm_html = confirm_modal_html();
     my $about_html   = about_modal_html();
+    my $note_html    = note_modal_html();
     # Fail-open audit warning: if an audit INSERT failed during this request,
     # the action still completed -- flag it here (yellow warning) after the
     # copyright so it is noticed without blocking anything.
@@ -16846,7 +17531,7 @@ sub page_foot {
     if (defined $AUDIT_WARNING && $AUDIT_WARNING ne '') {
         $warn .= qq{<div class="footer-warn audit-warn">&#9888; } . esc($AUDIT_WARNING) . qq{</div>\n};
     }
-    return qq{</main>\n<footer class="app-footer">$warn<div class="footer-line">$name_ver &mdash; $cr</div></footer>\n$confirm_html$about_html</body>\n</html>\n};
+    return qq{</main>\n<footer class="app-footer">$warn<div class="footer-line">$name_ver &mdash; $cr</div></footer>\n$confirm_html$about_html$note_html</body>\n</html>\n};
 }
 
 # About dialog: reached from the title-bar program icon. Shows the internal
@@ -16922,6 +17607,81 @@ HTML
 # button (destructive actions), opts.confirmLabel overrides the button text.
 # Forms carrying data-confirm="..." (and optional data-confirm-danger) are
 # handled automatically: submit is deferred until the user confirms.
+sub note_modal_html {
+    my $save_url = script_url();
+    my $csrf = csrf_token();
+    return <<"HTML";
+<div id="fc-note" class="fc-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="fc-note-title">
+  <div class="fc-modal-box fc-note-box">
+    <h3 id="fc-note-title" class="fc-note-title">Note</h3>
+    <p class="fc-note-dev muted" id="fc-note-dev"></p>
+    <textarea id="fc-note-text" class="fc-note-text" rows="10"></textarea>
+    <label class="fc-note-keep"><input type="checkbox" id="fc-note-keep"> Keep this note (survives orphaned-notes cleanup)</label>
+    <p class="fc-note-status muted" id="fc-note-status"></p>
+    <div class="fc-modal-actions">
+      <button type="button" id="fc-note-cancel" class="btn fc-btn-cancel">Cancel</button>
+      <button type="button" id="fc-note-save" class="btn">Save</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var url = "$save_url", CSRF = "$csrf";
+  var modal = document.getElementById('fc-note');
+  if (!modal) return;
+  var devEl = document.getElementById('fc-note-dev'), txt = document.getElementById('fc-note-text'),
+      keep = document.getElementById('fc-note-keep'), status = document.getElementById('fc-note-status'),
+      saveB = document.getElementById('fc-note-save'), cancelB = document.getElementById('fc-note-cancel');
+  var current = null, openerBtn = null, baseNote = '', baseKeep = false;
+  function open(){ modal.style.display='flex'; }
+  function close(){ modal.style.display='none'; current=null; openerBtn=null; }
+  function isDirty(){ return current && (txt.value !== baseNote || keep.checked !== baseKeep); }
+  function tryClose(){
+    if (isDirty() && typeof window.fcConfirm === 'function') {
+      window.fcConfirm('Discard unsaved changes to this note?', function(){ close(); }, { danger: true });
+    } else if (isDirty()) {
+      if (window.confirm('Discard unsaved changes to this note?')) close();
+    } else {
+      close();
+    }
+  }
+  function load(dev){
+    current=dev; devEl.textContent=dev; txt.value=''; keep.checked=false; status.textContent='Loading...';
+    txt.disabled=true; saveB.disabled=true;
+    fetch(url+'?action=note_get&dev='+encodeURIComponent(dev),{credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) throw new Error('forbidden'); return r.json(); })
+      .then(function(d){ txt.value=d.note||''; keep.checked=!!d.keep; baseNote=txt.value; baseKeep=keep.checked;
+        status.textContent=d.updated?('Last updated '+d.updated):''; txt.disabled=false; saveB.disabled=false; txt.focus(); })
+      .catch(function(){ status.textContent='Could not load this note.'; });
+  }
+  document.addEventListener('click', function(e){
+    var b = e.target.closest ? e.target.closest('[data-note-dev]') : null;
+    if (!b) return;
+    e.preventDefault(); openerBtn=b; load(b.getAttribute('data-note-dev')); open();
+  });
+  cancelB.addEventListener('click', tryClose);
+  modal.addEventListener('click', function(e){ if(e.target===modal) tryClose(); });
+  saveB.addEventListener('click', function(){
+    if(!current) return;
+    status.textContent='Saving...'; saveB.disabled=true;
+    var body='action=note_save&csrf='+encodeURIComponent(CSRF)
+      +'&dev='+encodeURIComponent(current)+'&keep='+(keep.checked?'1':'')
+      +'&note='+encodeURIComponent(txt.value);
+    fetch(url,{method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+      .then(function(r){ return r.json(); })
+      .then(function(d){ if(d && d.ok){
+          // reflect filled/outline on the icon that opened it
+          if(openerBtn){ var has=(txt.value!==''); openerBtn.classList.toggle('has-note',has); }
+          close();
+        } else { status.textContent='Save failed.'; saveB.disabled=false; } })
+      .catch(function(){ status.textContent='Save failed.'; saveB.disabled=false; });
+  });
+})();
+</script>
+HTML
+}
+
 sub confirm_modal_html {
     return <<'HTML';
 <div id="fc-confirm" class="fc-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="fc-confirm-msg">
@@ -16977,14 +17737,22 @@ sub confirm_modal_html {
     opts = opts || {};
     lastFocus = document.activeElement;
     msgEl.textContent = message;
-    okBtn.textContent = opts.confirmLabel || 'Confirm';
+    okBtn.textContent = opts.confirmLabel || (opts.alertOnly ? 'OK' : 'Confirm');
     okBtn.classList.toggle('btn-danger', !!opts.danger);
     ov.classList.toggle('fc-danger', !!opts.danger);   // CSS shows the right icon
+    // alertOnly: a single-button acknowledgement (no Cancel), used in place of
+    // window.alert() so notices use the styled dialog too.
+    cxlBtn.style.display = opts.alertOnly ? 'none' : '';
     current = onConfirm;
     ov.style.display = 'flex';
     document.addEventListener('keydown', onKey, true);
-    // Focus Cancel for destructive actions (safer default), else Confirm.
-    (opts.danger ? cxlBtn : okBtn).focus();
+    // Focus Cancel for destructive actions (safer default), else the OK button.
+    ((opts.danger && !opts.alertOnly) ? cxlBtn : okBtn).focus();
+  };
+
+  // Styled replacement for window.alert(): one OK button, no action.
+  window.fcAlert = function (message) {
+    window.fcConfirm(message, function () {}, { alertOnly: true });
   };
 
   // Forms with data-confirm="..." defer submission until confirmed. Using

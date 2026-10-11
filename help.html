@@ -86,15 +86,15 @@
   <strong>Log out</strong> link sit on the right. The menus are:</p>
   <ul>
     <li><strong>Devices</strong> &mdash; Device list (the home page after
-        login), Backup status, Backup reports.</li>
+        login), Backup status, Backup reports, Notes.</li>
     <li><strong>Setup devices</strong> (only if you may edit the device table)
         &mdash; Show device table, Edit device table, Bulk edit. A site-limited
         user sees only Edit device table.</li>
     <li><strong>Tools</strong> (administrators only) &mdash; each tool on its
         own page: Audit log, Check devices for consistent backup suffixes,
         Check site assignment, Devices without backups, Disk space,
-        Empty Backup Cleanup, Empty Directory Cleanup, Orphaned Backup Cleanup, Restore device table,
-        Show fetchconfig-web.cfg, Verify email setup, Login failures, Template viewer, Upload report logo, View fetchconfig log.</li>
+        Empty backup cleanup, Empty directory cleanup, Orphaned backup cleanup, Restore device table,
+        Show fetchconfig-web.cfg, Verify email setup, Login failures, Orphaned notes cleanup, Template viewer, Upload report logo, View fetchconfig log.</li>
     <li><strong>User</strong> &mdash; Change your password (everyone); Users
         list, Add user and Sites (administrators only).</li>
     <li><strong>Help</strong> &mdash; this page.</li>
@@ -464,7 +464,7 @@
   finishes the devices that have <em>no</em> backups yet (never backed up)
   are listed &mdash; a quick way to spot devices that still need an initial
   <strong>Backup now</strong>.</p>
-  <p><strong>Empty Backup Cleanup</strong> &mdash; scans every device at once
+  <p><strong>Empty backup cleanup</strong> &mdash; scans every device at once
   (<code>fetchconfig.pl -Z</code>) for <em>empty</em> (zero-byte) backup files
   &mdash; a fetch that connected but saved nothing. <strong>Check for empty
   backups</strong> lists them without changing anything; <strong>Delete empty

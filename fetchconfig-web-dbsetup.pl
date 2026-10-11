@@ -312,6 +312,7 @@ if ($table_exists) {
             edit_device_table    BOOLEAN  NOT NULL DEFAULT FALSE,
             admin_function       BOOLEAN  NOT NULL DEFAULT FALSE,
             download_full_report BOOLEAN  NOT NULL DEFAULT FALSE,
+            download_full_config BOOLEAN  NOT NULL DEFAULT FALSE,
             email                TEXT
         )
     }) or die_clean("CREATE TABLE failed: " . $dbh->errstr);
@@ -452,6 +453,24 @@ if ($appstate_exists) {
     $dbh->do(q{CREATE INDEX password_resets_user_idx ON password_resets (username)});
     $dbh->do(q{CREATE INDEX password_resets_exp_idx  ON password_resets (expires)});
     print "Created table \"password_resets\".\n";
+
+    # --- v1.62: per-device notes -----------------------------------------
+    $dbh->do(q{CREATE SEQUENCE device_notes_id_seq START WITH 1 MINVALUE 1})
+        or die_clean("CREATE SEQUENCE device_notes_id_seq failed: " . $dbh->errstr);
+    $dbh->do(q{
+        CREATE TABLE device_notes (
+            note_id    INTEGER     NOT NULL PRIMARY KEY
+                       DEFAULT nextval('device_notes_id_seq'),
+            device_id  TEXT        NOT NULL,
+            note       TEXT        NOT NULL DEFAULT '',
+            keep       BOOLEAN     NOT NULL DEFAULT FALSE,
+            created    TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated    TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    }) or die_clean("CREATE TABLE device_notes failed: " . $dbh->errstr);
+    $dbh->do(q{CREATE UNIQUE INDEX device_notes_devid_idx   ON device_notes (device_id)});
+    $dbh->do(q{CREATE INDEX        device_notes_updated_idx ON device_notes (updated)});
+    print "Created table \"device_notes\".\n";
 }
 {
     my $q_user = $dbh->quote_identifier($app_user2);
@@ -465,6 +484,9 @@ if ($appstate_exists) {
         "GRANT SELECT, INSERT, UPDATE, DELETE ON login_attempts TO $q_user",
         # v1.60: reset tokens (create/look-up/mark-used; pruned by a DBA tool).
         "GRANT SELECT, INSERT, UPDATE ON password_resets TO $q_user",
+        # v1.62: device notes (created/edited/deleted at run time).
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON device_notes TO $q_user",
+        "GRANT USAGE, SELECT ON SEQUENCE device_notes_id_seq TO $q_user",
     ) {
         $dbh->do($stmt);   # best effort; ignore if already granted / owner
     }

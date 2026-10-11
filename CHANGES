@@ -1,3 +1,57 @@
+1.62
+====
+Requires the 1.62 database upgrade (fetchconfig-web-dbupdate-1.62.sql).
+
+* Unmasked config is now a per-user right. The config view is always masked (it
+  was unmasked for models without a highlighter) and carries a "secrets masked"
+  banner. With the new download_full_config right (like Full Report), the Copy
+  button becomes "Copy unmasked" (fetched server-side, never in the DOM) and a
+  Download button appears; without it, only the masked Copy and no download.
+  Download now requires selecting which backup. Unmasked copy and download are
+  audited.
+* Device notes: one free-text note per device, edited in an AJAX modal from a
+  paper-note icon on the device list and the backups page, with a Keep flag.
+  All users, honouring site access. Device -> Notes viewer (filters, paging) and
+  Tools -> Orphaned notes cleanup (admin; removes notes for deleted devices
+  unless Keep is set).
+* DB: fetchconfig-web-dbupdate-1.62.sql adds users.download_full_config and the
+  device_notes table; fetchconfig-web-dbsetup.pl creates them on a fresh install.
+* Notes modal: fixed the save (it posted the wrong CSRF field name, so every
+  save was rejected); note_save now reports the real database error on failure
+  instead of a generic "save failed"; Cancel warns before discarding unsaved
+  changes.
+* Tools menu: tool names use consistent sentence case ("Empty backup cleanup",
+  "Empty directory cleanup", "Orphaned backup cleanup").
+* Backups page: the "select a configuration to download" notice now uses the
+  styled dialog (new fcAlert), and the compare column has a "CMP" header.
+* Fixed: the selected-backup Download served a text config through the
+  uudecoder ("no uuencoded begin header found"); it now serves text configs raw
+  and only uudecodes the binary web-GUI (TP-Link / ProCurve 1700) models.
+* Cosmetic: the paper-note icon is now centred (both axes) in the device-list
+  Note column and aligned with the heading text on the backups page.
+* Binary web-GUI devices (TP-Link / ProCurve 1700) now get the same styled
+  selection-based Download on the backups page as text devices (they had none);
+  compare stays text-only.
+* Masking: SNMP community strings in a switch config ("snmp-server community
+  ..." quoted or bare, e.g. ProCurve) are now masked in the config view, like
+  the device-table community= option; the access level is kept. RADIUS/TACACS
+  shared keys on server lines ("radius-server ... key ...") and WPA passphrases
+  ("wpa-passphrase ...", Aruba CX) are masked too, as are the Aruba CX
+  "virtual-controller-key" and the indented "key" line under a "wlan
+  auth-server" block; unrelated "key" keywords (e.g. "crypto key generate",
+  "key-management", "key-exchange") are left alone. The SNMP community mask is
+  scoped to the "snmp-server/set snmp community" command, so the word
+  "community" in a description or hostname is no longer wrongly masked.
+* Notes viewer: resolve site access and parse the device table once per page
+  instead of once per note row (removes an N+1 of DB connects and table parses).
+* Notes viewer: the note icon is shown bright (has-note), not dimmed -- every
+  row in that table has a note by definition -- and centred like the device list.
+* Notes viewer: fixed two bugs where saved notes did not appear -- a mis-called
+  site-access helper filtered every row out, and csrf_field()'s trailing newline
+  embedded in the viewer's inline JavaScript broke the whole script (now uses an
+  inline csrf token). Orphaned notes cleanup gained a view icon, and note_get
+  lets an admin view a note for a device no longer in the table.
+
 1.61
 ====
 Security fixes from the 1.60 audit. No database change. If EMAIL = 1, add

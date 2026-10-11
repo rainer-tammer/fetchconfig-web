@@ -30,6 +30,7 @@ fetchconfig's device table and repository.
   - [Step 8 -- First login](#step-8----first-login)
 - [Part 3 -- Upgrading](#part-3----upgrading)
   - [Upgrading the script](#upgrading-the-script)
+  - [Upgrading to 1.62](#upgrading-to-1.62)
   - [Upgrading to 1.61](#upgrading-to-1.61)
   - [Upgrading to 1.60](#upgrading-to-1.60)
   - [Upgrading the database to 1.51 (audit log)](#upgrading-the-database-to-1.51-audit-log)
@@ -57,6 +58,7 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
 | `PRIVACY.md`, `PRIVACY.html` | GDPR data-privacy notes for the operator (data controller). |
 | `fetchconfig-web-dbupdate-1.50.sql` | Idempotent SQL that upgrades an existing database to the 1.50 schema (per-site access). |
 | `fetchconfig-web-dbupdate-1.60.sql` | Idempotent SQL that upgrades an existing database to the 1.60 schema (`users.email`, login throttle, password-reset tokens; PostgreSQL 8.2+). |
+| `fetchconfig-web-dbupdate-1.62.sql` | Idempotent SQL that upgrades an existing database to the 1.62 schema (`users.download_full_config`, the `device_notes` table; PostgreSQL 8.2+). |
 | `fetchconfig-web-clean-resets.pl` | Standalone script to prune spent password-reset tokens and stale login-throttle rows (`-h` for help, `-s` to print the role SQL). |
 | `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`, that installs an edited template file. |
 | `imageconvert.pl`, `README.imageconvert` | Optional helper for preparing the login backdrop image. |
@@ -706,6 +708,23 @@ usual reason a fix "does not appear".
 long-lived `mod_fcgid` workers keep running the old code until recycled, and
 `touch` does not trigger a reload. Run `apachectl graceful` after the copy
 (see *Step 7a -- Running under mod_fcgid*). Plain CGI needs no such step.
+
+### Upgrading to 1.62
+
+- **Run the database upgrade** (adds `users.download_full_config` and the
+  `device_notes` table). Idempotent, PostgreSQL 8.2-compatible:
+
+  ```sh
+  psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate-1.62.sql
+  ```
+
+- Grant the new **Full config** right (User -> Users) to any site-limited user
+  who should be able to download a device config or copy it unmasked;
+  unrestricted users always may. Without it the config view, and its Copy
+  button, are masked and there is no Download button.
+- Device notes need no configuration; all users can add them (honouring site
+  access) via the paper-note icon, Device -> Notes, and Tools -> Orphaned notes
+  cleanup.
 
 ### Upgrading to 1.61
 
