@@ -1,3 +1,27 @@
+1.63
+====
+User management redesign (no database change).
+
+* The user list is now a slim table (username, email, Admin, Reset password,
+  Delete); the username opens a per-user edit page with all settings grouped
+  (Identity, Permissions, Site access, Password) and Return / Cancel / Save.
+  Replaces the row of inline permission toggles. Permissions (and Add user) no
+  longer live in two places -- the sites editor and Add user forms dropped their
+  permission checkboxes; Add user creates the account and opens its edit page.
+* Save writes all fields in one request and logs one audit line per CHANGED
+  permission (reusing the set_* action names); unchanged fields are not logged.
+  Administrator greys out the rights it overrides; Cancel/Return/Edit-site-access
+  warn about unsaved changes.
+* Fixed an uninitialized-value warning when uudecoding a binary (web-GUI) config.
+* The device-table editor, bulk editor and the read-only device-table view now
+  use the standard green tool-section box (full width); the editors' amber
+  caution boxes are now plain info text, and the read-only view's heading is
+  "Device table".
+* Hardening: session ids, password-reset tokens and password salts now come
+  from a single /dev/urandom helper that loops on short reads and fails closed
+  (no weak rand() fallback). Reset-token creation returns "no link sent" if the
+  RNG is unavailable rather than issuing a guessable token.
+* Requires fetchconfig 9.68 or newer (MIN_FETCHCONFIG_VERSION bumped from 9.67).
 1.62
 ====
 Requires the 1.62 database upgrade (fetchconfig-web-dbupdate-1.62.sql).

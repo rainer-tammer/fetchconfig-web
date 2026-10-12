@@ -5,9 +5,9 @@ title bar and logo shown on every page, and a Devices / Status / User / Help
 menu (plus a Setup item for accounts with the edit or admin right) in the
 title bar's nav row:
 
-> **Requires fetchconfig 9.67 or newer.** fetchconfig-web reads the installed
+> **Requires fetchconfig 9.68 or newer.** fetchconfig-web reads the installed
 > version from `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and shows a
-> warning banner (on every page, after login) if it is older than 9.67 or
+> warning banner (on every page, after login) if it is older than 9.68 or
 > cannot be determined. The minimum is set by the `MIN_FETCHCONFIG_VERSION`
 > constant in `fetchconfig-web.cgi`.
 
@@ -197,7 +197,7 @@ each of these in turn.
 For an experienced operator, the shortest path to a running instance:
 
 1. **Install the prerequisites** -- Perl with DBI/DBD::Pg, CGI and
-   Algorithm::Diff; PostgreSQL; and fetchconfig 9.67+ (see
+   Algorithm::Diff; PostgreSQL; and fetchconfig 9.68+ (see
    [Requirements](#requirements)).
 2. **Create the user database** -- run `perl fetchconfig-web-dbsetup.pl`
    (see [The user database](#the-user-database)).
@@ -1884,29 +1884,34 @@ against the database, no shell access required.
   password (re-checked via `verify_password()` against the stored hash)
   plus a new password typed twice; the new hash is written with `UPDATE`.
 - **Add user** / **Delete user** -- shown only to admins, and enforced in
-  the request handler itself, not just hidden in the page. Add user has an
-  "Allow this user to view and edit the device table" checkbox
-  (`edit_device_table`) and a "Grant admin functions" checkbox
-  (`admin_function`).
-- **Reset another user's password** -- shown only to admins, via the
-  "Change password" button next to each non-`admin` user. Sets a new
-  password *without* the current one; refuses to target `admin` itself
-  (admin's own password only changes through "Change your password").
-- **Grant / Revoke admin functions** -- the "Admin functions" column has a
-  per-user toggle (`do_set_admin_right`). A user with `admin_function`
-  becomes a **full admin**, identical in capability to the built-in
-  `admin`: user management, Tools, and Setup/device-table editing. Any admin
-  can grant or revoke it (including revoking their own), and it can target
-  any account except the built-in `admin`.
-- **Grant / Revoke edit right** -- the "Can edit device table" column has a
-  per-user toggle (`do_set_edit_right`). A user with the right gains access
-  to the **Setup** page and the device-table editor.
-- The built-in **`admin`** account is special in only two ways: it can never
-  be deleted, and its `admin_function` and `edit_device_table` are locked on
-  (shown as "always (admin)", not toggleable). A user who merely *has*
-  `admin_function` is a full admin but is otherwise a normal account -- it
-  can be deleted, and its flags toggled, by any admin (including itself).
-  Because `admin` is always an admin, you can never lock every admin out.
+  the request handler itself, not just hidden in the page. Add user asks only
+  for username, password and an optional email; the new account is created
+  with no special permissions and you are taken straight to its edit page to
+  set permissions and site access.
+- **User list** -- a slim table: username (a link), email, an Admin yes/no
+  indicator, a **Reset password** button and a **Delete** button. All of a
+  user's settings and permissions are edited on a dedicated page reached by
+  clicking the username, rather than through a row of inline toggles.
+- **Edit user page** (`?action=user_edit`) -- one grouped form with
+  **Return** / **Cancel** / **Save changes**: Identity (email), Permissions
+  (Administrator, which supersedes and greys out the individual rights --
+  Edit device table, Download full report, Download/copy unmasked config),
+  a read-only **Site access** summary (wrapped to a bounded width) with a
+  button to the separate sites editor, and a Reset-password button. Cancel
+  and Return warn if there are unsaved changes.
+- **Saving** -- one `user_save` writes email and all permission fields in a
+  single `UPDATE`, and records **one audit line per changed field** (reusing
+  the `set_email` / `set_admin_right` / `set_edit_right` /
+  `set_download_full_report` / `set_download_full_config` action names); an
+  unchanged field produces no audit entry. The built-in `admin` account's
+  permissions are fixed (only its email is editable there).
+- **Reset another user's password** -- the **Reset password** button next to
+  each user. Sets a new password *without* the current one; refuses to target
+  `admin` itself (admin's own password only changes through "Change your
+  password").
+- The built-in **`admin`** account can never be deleted and is always a full
+  administrator. A user who merely *has* `admin_function` is a full admin but
+  an ordinary account: it can be deleted and edited by any admin.
 - New/changed passwords must be at least `$MIN_PASSWORD_LENGTH` (8)
   characters -- a web-UI-side check.
 - All of these actions redirect back to the User page with a short flash

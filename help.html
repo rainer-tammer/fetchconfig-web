@@ -284,28 +284,28 @@
         or any user granted <em>admin functions</em>), the User page also lets
         you manage other accounts:
       <ul>
+        <li>The <strong>User list</strong> shows username, email, an Admin
+            indicator, and <strong>Reset password</strong> / <strong>Delete</strong>
+            buttons. Click a username to open its edit page, where all of that
+            user's settings and permissions live.</li>
         <li><strong>Add user</strong> &mdash; create a new account with a
-            username and password. You can tick boxes to grant that user
-            <em>admin functions</em> (full admin rights) and/or the right to
-            view and edit the device table.</li>
+            username, password and optional email. The account starts with no
+            special permissions; you are taken straight to its edit page to set
+            them.</li>
+        <li><strong>Edit user</strong> (click a username) &mdash; one page to
+            set the email and permissions (Administrator, which overrides the
+            individual rights; edit device table; download full report;
+            download/copy unmasked config), view the assigned sites with a
+            button to the sites editor, and reset the password. Save writes
+            everything at once; Cancel/Return warn if you have unsaved changes.</li>
         <li><strong>Delete</strong> &mdash; remove an account (the button next
             to each user). The <code>admin</code> account itself can never be
             deleted.</li>
-        <li><strong>Change password</strong> (next to a user) &mdash; set a new
-            password for that user <em>without</em> needing their old one.
-            This is for resetting a colleague's forgotten password. It can't be
-            used on the <code>admin</code> account &mdash; admin's own password
-            is only changed the normal way, with the current password.</li>
-        <li><strong>Grant / Revoke</strong> in the <strong>Admin
-            functions</strong> column &mdash; give or take away full admin
-            rights. A user with admin functions can do everything the
-            <code>admin</code> account can (manage users, Tools, edit the
-            device table).</li>
-        <li><strong>Grant / Revoke</strong> in the <strong>Can edit device
-            table</strong> column &mdash; give or take away just the right to
-            view and edit the device table. The <code>admin</code> account and
-            any admin-functions user always have both rights (shown as
-            &ldquo;always (admin)&rdquo;).</li>
+        <li><strong>Reset password</strong> (next to a user, or on the edit
+            page) &mdash; set a new password for that user <em>without</em>
+            needing their old one. It can't be used on the <code>admin</code>
+            account &mdash; admin's own password is only changed the normal way,
+            with the current password.</li>
       </ul>
     </li>
   </ul>

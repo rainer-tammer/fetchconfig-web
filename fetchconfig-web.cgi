@@ -62,12 +62,12 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.62';
+use constant APP_VERSION => '1.63';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '1.62';
+use constant APP_VERSION_INTERNAL => '1.63';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -75,7 +75,7 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.67';
+use constant MIN_FETCHCONFIG_VERSION => '9.68';
 
 # Seconds between keepalive writes to the client while a long external command
 # runs (Backup Now, Empty backup cleanup; see run_command_capture). Keeps the
@@ -1090,7 +1090,7 @@ sub handle_request {
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
 my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password change_email test_my_email verify_email clear_login_failures reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report set_download_full_config set_email note_save note_delete notes_orphan_delete reset_do upload_logo delete_logo);
+    qw(login logout change_password change_email test_my_email verify_email clear_login_failures reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report set_download_full_config set_email user_save note_save note_delete notes_orphan_delete reset_do upload_logo delete_logo);
 
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
@@ -1186,6 +1186,10 @@ sub main {
             show_user_page($user, 'users');
         } elsif ($action eq 'user_add') {
             show_user_add($user);
+        } elsif ($action eq 'user_edit') {
+            show_user_edit($user);
+        } elsif ($action eq 'user_save') {
+            do_user_save($user);
         } elsif ($action eq 'change_password_form') {
             show_change_password_form($user);
         } elsif ($action eq 'change_password') {
@@ -1940,9 +1944,10 @@ sub _reset_token_hash { require Digest::SHA; return Digest::SHA::sha256_hex($_[0
 sub reset_token_create {
     my ($dbh, $username) = @_;
     return undef unless $dbh;
-    my $bytes;
-    if (open(my $rf, '<:raw', '/dev/urandom')) { read($rf, $bytes, 16); close($rf); }
-    else { $bytes = join('', map { chr(int(rand(256))) } 1 .. 16); }
+    # Fail closed: if the OS RNG is unavailable, issue no token rather than a
+    # weak one (the caller treats undef as "no reset link sent").
+    my $bytes = eval { secure_random_bytes(16) };
+    return undef unless defined $bytes;
     my $tok  = unpack('H*', $bytes);
     my $hash = _reset_token_hash($tok);
     my $ok = eval {
@@ -2528,6 +2533,26 @@ use constant CONFIG_MASK_BANNER =>
     . "# Note: Unencrypted secrets are masked on a best effort base. #\n"
     . "# ------------------------------------------------------------#\n";
 
+# Cryptographically secure random bytes from the OS RNG (/dev/urandom). Loops
+# until the full count is read (guards against a short read), and DIES rather
+# than fall back to a weak PRNG: /dev/urandom is always available on the
+# supported platforms (Linux, AIX), so a failure here means a broken system and
+# issuing a weak session id / token / salt would be worse than failing. Callers
+# that must not die (reset-token creation) wrap this in eval.
+sub secure_random_bytes {
+    my ($n) = @_;
+    die "secure_random_bytes: bad length" unless defined $n && $n =~ /^\d+$/ && $n > 0;
+    open(my $rf, '<:raw', '/dev/urandom') or die "cannot open /dev/urandom: $!";
+    my $buf = '';
+    while (length($buf) < $n) {
+        my $got = read($rf, my $chunk, $n - length($buf));
+        if (!defined $got || $got == 0) { close($rf); die "short read from /dev/urandom"; }
+        $buf .= $chunk;
+    }
+    close($rf);
+    return $buf;
+}
+
 # Hash a new/changed password for storage. Prefers bcrypt ($2b$) when
 # Crypt::Bcrypt is available, else falls back to the legacy Apache MD5 ($apr1$).
 # verify_password() reads either back. Used by every password set/change/add
@@ -2535,9 +2560,7 @@ use constant CONFIG_MASK_BANNER =>
 sub password_hash {
     my ($password) = @_;
     if (bcrypt_available()) {
-        my $salt;
-        if (open(my $rf, '<:raw', '/dev/urandom')) { read($rf, $salt, 16); close($rf); }
-        else { $salt = join('', map { chr(int(rand(256))) } 1 .. 16); }
+        my $salt = secure_random_bytes(16);
         return Crypt::Bcrypt::bcrypt($password, '2b', BCRYPT_COST, $salt);
     }
     return apr1_hash($password);
@@ -2635,28 +2658,14 @@ sub password_policy_hint {
 sub apr1_hash {
     my ($password) = @_;
     my @itoa64 = ('.', '/', 0 .. 9, 'A' .. 'Z', 'a' .. 'z');
-    my $bytes;
-    if (open(my $rf, '<:raw', '/dev/urandom')) {
-        read($rf, $bytes, 8);
-        close($rf);
-    } else {
-        $bytes = join('', map { chr(int(rand(256))) } 1 .. 8);
-    }
+    my $bytes = secure_random_bytes(8);
     my $salt = '';
     $salt .= $itoa64[ ord(substr($bytes, $_, 1)) & 0x3f ] for 0 .. 7;
     return md5_crypt($password, "\$apr1\$$salt\$", '$apr1$');
 }
 
 sub new_session_id {
-    my $bytes;
-    if (open(my $rf, '<:raw', '/dev/urandom')) {
-        read($rf, $bytes, 24);
-        close($rf);
-    } else {
-        # Fallback (should not happen on Linux/AIX)
-        $bytes = join('', map { chr(int(rand(256))) } 1 .. 24);
-    }
-    return unpack('H*', $bytes);
+    return unpack('H*', secure_random_bytes(24));
 }
 
 sub create_session {
@@ -5599,8 +5608,10 @@ sub uudecode_content {
         }
         last if $line =~ /^end\s*$/;
         next if $line eq '';
-        # A uuencoded data line; unpack("u") decodes one line at a time.
-        $data .= unpack('u', $line);
+        # A uuencoded data line; unpack("u") decodes one line at a time. A
+        # zero-length (backtick) terminator or a malformed line yields undef,
+        # so coalesce to '' rather than warn on concatenation.
+        $data .= (unpack('u', $line) // '');
     }
     return (undef, 'no uuencoded "begin" header found') unless $saw_begin;
     return ($data, undef);
@@ -9890,6 +9901,7 @@ sub redirect_to_user_page {
     my (%opts) = @_;
     my $act = $opts{action} || 'user';   # which User sub-page to return to
     my $url = script_url() . '?action=' . $act;
+    $url .= '&username=' . CGI::escape($opts{username}) if defined $opts{username} && $opts{username} ne '';
     $url .= '&msg=' . CGI::escape($opts{msg}) if defined $opts{msg} && $opts{msg} ne '';
     $url .= '&err=' . CGI::escape($opts{err}) if defined $opts{err} && $opts{err} ne '';
     my @hdr = (-location => $url, -status => '302 Found');
@@ -10146,13 +10158,8 @@ sub show_user_sites_form {
             . esc($label) . qq{</label>\n};
     }
     print qq{</div>\n};
-    # download full report toggle
-    my $dfr = $trow->{download_full_report} ? ' checked' : '';
-    print qq{<p><label><input type="checkbox" name="download_full_report" value="1"$dfr> }
-        . qq{May download the full (unfiltered) report</label></p>\n};
-    my $dfc = $trow->{download_full_config} ? ' checked' : '';
-    print qq{<p><label><input type="checkbox" name="download_full_config" value="1"$dfc> }
-        . qq{May download a device config and copy it unmasked</label></p>\n};
+    # Permissions (admin / edit / full report / full config) are set on the
+    # user edit page, not here -- this page edits site access only.
     print qq{<p><button type="submit" class="btn btn-green">Save</button> }
         . qq{<a class="btn" href="} . esc(script_url().'?action=user_list') . qq{">Cancel</a></p>\n};
     print $cgi->end_form;
@@ -10222,11 +10229,7 @@ sub do_set_user_sites {
         my @c = map { defined $code{$_} ? $code{$_} : "id$_" } sort { $a <=> $b } @_;
         return @c ? join(', ', @c) : '(none)';
     };
-    my $dfr = $cgi->param('download_full_report') ? 1 : 0;
-    my $dfc = $cgi->param('download_full_config') ? 1 : 0;
     db_set_user_sites($dbh, $target, \@ids);
-    $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $dfr, $target);
-    $dbh->do('UPDATE users SET download_full_config = ? WHERE username = ?', undef, $dfc, $target);
     $dbh->disconnect;
     # What actually changed, by code.
     my %o = map { $_ => 1 } @old_ids;
@@ -10417,119 +10420,47 @@ sub show_user_page {
             if (!@$users) {
                 print qq{<p>No users found.</p>\n};
             } else {
+                # Slim list: identity + the two quick actions. All permissions
+                # and site access are edited on the per-user edit page, reached
+                # by clicking the username.
+                print qq{<p class="muted">Click a username to edit its settings and permissions.</p>\n};
                 print qq{<table class="list">\n}
-                    . qq{<tr><th>Username</th><th>Email</th><th>Admin functions</th>}
-                    . qq{<th>Edit device</th><th>Full Report</th><th>Full config</th><th>Sites</th><th></th></tr>\n};
-                # Preload all site codes by id for the display.
-                my %site_code; $site_code{$_->{id}} = $_->{code} for @{ db_all_sites($admin_dbh) };
+                    . qq{<tr><th>Username</th><th>Email</th><th>Admin</th>}
+                    . qq{<th>Password</th><th></th></tr>\n};
                 for my $row (@$users) {
                     my $u = $row->{username};
-                    print qq{<tr><td>} . esc($u) . qq{</td>};
-
-                    # Email: shown with a small inline edit form (POST+CSRF).
-                    print qq{<td class="user-email-cell">};
-                    print $cgi->start_form(-method => 'POST', -action => script_url(), -class => 'inline-email-form');
-                    print qq{<input type="hidden" name="action" value="set_email">};
-                    print qq{<input type="hidden" name="username" value="} . esc($u) . qq{">};
-                    print csrf_field();
-                    print $cgi->textfield(-name => 'email', -value => ($row->{email} // ''),
-                                          -size => 22, -autocomplete => 'off');
-                    print qq{ <button type="submit" class="btn btn-small">Save</button>};
-                    print $cgi->end_form;
-                    print qq{</td>};
-
-                    # Admin-functions right. The built-in admin always has
-                    # it and can't be toggled; every other user gets a
-                    # grant/revoke toggle. A user WITH admin_function is a
-                    # full admin but is still a normal, toggleable account.
+                    my $edit_link = script_url() . '?action=user_edit&username=' . CGI::escape($u);
+                    print qq{<tr>};
+                    print qq{<td><a href="} . esc($edit_link) . qq{">} . esc($u) . qq{</a></td>};
+                    print qq{<td>} . esc($row->{email} // '') . qq{</td>};
+                    # Admin: read-only indicator (editable on the edit page).
+                    my $is_a = ($u eq $PROTECTED_USER || $row->{admin_function});
+                    print qq{<td>} . ($is_a ? 'yes' : '&mdash;') . qq{</td>};
+                    # Reset-password: quick action kept in the list.
                     print qq{<td>};
                     if ($u eq $PROTECTED_USER) {
-                        print qq{<span class="muted">always (admin)</span>};
-                    } else {
-                        print _right_toggle_form('set_admin_right', $u, $row->{admin_function} ? 1 : 0);
-                    }
-                    print qq{</td>};
-
-                    # Edit-device-table right. admin is always allowed and
-                    # can't be toggled off; a user with admin_function is
-                    # also always allowed (it implies edit access), so its
-                    # own flag is moot -- shown as "always (admin)" too.
-                    print qq{<td>};
-                    if ($u eq $PROTECTED_USER || $row->{admin_function}) {
-                        print qq{<span class="muted">always (admin)</span>};
-                    } else {
-                        print _right_toggle_form('set_edit_right', $u, $row->{edit_device_table} ? 1 : 0);
-                    }
-                    print qq{</td>};
-
-                    # Full-report download right. An unrestricted user always may
-                    # (the filtered view equals the full report), so it is shown
-                    # as "always"; a site-limited user gets a grant/revoke toggle.
-                    print qq{<td>};
-                    my @u_ids = ($u eq $PROTECTED_USER) ? (0) : @{ db_user_site_ids($admin_dbh, $u) };
-                    my $u_unrestricted = ($u eq $PROTECTED_USER || $row->{admin_function}
-                                          || grep { $_ == 0 } @u_ids) ? 1 : 0;
-                    if ($u_unrestricted) {
-                        print qq{<span class="muted">always</span>};
-                    } else {
-                        print _right_toggle_form('set_download_full_report', $u,
-                            $row->{download_full_report} ? 1 : 0);
-                    }
-                    print qq{</td>};
-
-                    # Full config (unmasked download / copy): unrestricted users
-                    # always may; a site-limited user gets a grant/revoke toggle.
-                    print qq{<td>};
-                    if ($u_unrestricted) {
-                        print qq{<span class="muted">always</span>};
-                    } else {
-                        print _right_toggle_form('set_download_full_config', $u,
-                            $row->{download_full_config} ? 1 : 0);
-                    }
-                    print qq{</td>};
-
-                    # Sites column: "All sites" if unrestricted, else the first
-                    # 10 codes comma-separated with a tooltip listing all.
-                    print qq{<td class="user-sites-cell">};
-                    if ($u eq $PROTECTED_USER || $row->{admin_function}) {
-                        print qq{<span class="muted">All sites</span>};
-                    } else {
-                        # Edit sites button first, then the assigned-sites text.
                         print qq{<a class="btn btn-small" href="}
-                            . esc(script_url() . '?action=user_sites_form&username=' . CGI::escape($u))
-                            . qq{">Edit sites</a> };
-                        my $ids = db_user_site_ids($admin_dbh, $u);
-                        if (grep { $_ == 0 } @$ids) {
-                            print qq{<span class="muted">All sites</span>};
-                        } elsif (!@$ids) {
-                            print qq{<span class="site-any">none</span>};
-                        } else {
-                            my @codes = sort map { $site_code{$_} // "#$_" } @$ids;
-                            my @first = @codes[0 .. ($#codes < 9 ? $#codes : 9)];
-                            my $shown = join(', ', map { esc($_) } @first);
-                            $shown .= ', &hellip;' if @codes > 10;
-                            print qq{<span title="} . esc(join(', ', @codes)) . qq{">$shown</span>};
-                        }
+                            . esc(script_url() . '?action=reset_password_form&username=' . CGI::escape($u))
+                            . qq{">Reset password</a>};
+                    } else {
+                        print qq{<a class="btn btn-small" href="}
+                            . esc(script_url() . '?action=reset_password_form&username=' . CGI::escape($u))
+                            . qq{">Reset password</a>};
                     }
                     print qq{</td>};
-
-                    # Change-password / delete actions.
+                    # Delete: quick action, protected account excepted.
                     print qq{<td>};
                     if ($u eq $PROTECTED_USER) {
                         print qq{<span class="muted">protected</span>};
                     } else {
-                        my $reset_link = script_url() . '?action=reset_password_form&username=' . CGI::escape($u);
-                        print qq{<div class="row-actions">\n};
-                        print qq{<a class="btn" href="} . esc($reset_link) . qq{">Change password</a>\n};
                         print $cgi->start_form(-method => 'POST', -action => script_url(),
-                            -data_confirm => 'Delete user ' . esc($u) . '?',
-                            -data_confirm_danger => 'y');
-                        print qq{<input type="hidden" name="action" value="delete_user">\n};
-                        print qq{<input type="hidden" name="username" value="} . esc($u) . qq{">\n};
+                            -data_confirm => 'Delete user ' . $u . '?',
+                            -data_confirm_danger => 'y', -style => 'margin:0;');
+                        print qq{<input type="hidden" name="action" value="delete_user">};
+                        print qq{<input type="hidden" name="username" value="} . esc($u) . qq{">};
                         print csrf_field();
-                        print qq{<button type="submit" class="btn btn-danger">Delete</button>\n};
+                        print qq{<button type="submit" class="btn btn-small btn-danger">Delete</button>};
                         print $cgi->end_form;
-                        print qq{</div>\n};
                     }
                     print qq{</td></tr>\n};
                 }
@@ -10558,10 +10489,8 @@ sub show_user_page {
         print qq{<label>Email <span class="muted">(optional; used for password reset)</span><br>};
         print $cgi->textfield(-name => 'email', -autocomplete => 'off');
         print qq{</label>\n};
-        print qq{<label class="checkbox-label nowrap"><input type="checkbox" name="admin" value="1"> }
-            . qq{Grant admin functions (full admin, like the admin account)</label>\n};
-        print qq{<label class="checkbox-label"><input type="checkbox" name="edit" value="1"> }
-            . qq{Allow this user to view and edit the device table</label>\n};
+        print qq{<p class="muted">The user is created with no special permissions; }
+            . qq{you will be taken to its edit page to set them.</p>\n};
         print qq{<p><button type="submit" class="btn">Add user</button></p>\n};
         print $cgi->end_form;
         print qq{</div>\n};
@@ -10570,6 +10499,266 @@ sub show_user_page {
     $admin_dbh->disconnect if $admin_dbh;
 
     print page_foot();
+}
+
+# Per-user edit page (?action=user_edit&username=..., admin only). All of a
+# user's settings in one grouped form with Return / Cancel / Save. Site access
+# is a read-only wrapped summary with a button to the separate sites editor.
+sub show_user_edit {
+    my ($user) = @_;
+    my $target = $cgi->param('username') // '';
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) {
+        $dbh->disconnect if $dbh;
+        print page_head('Error', $user);
+        print qq{<p class="error">User editing is available to administrators only.</p>\n};
+        print page_foot();
+        return;
+    }
+    my $row = valid_id($target) ? db_get_user($dbh, $target) : undef;
+    unless ($row) {
+        $dbh->disconnect;
+        print page_head('Error', $user);
+        print qq{<p class="error">User not found.</p>\n};
+        print qq{<p><a class="btn" href="} . esc(script_url() . '?action=user_list') . qq{">&larr; Return to users</a></p>\n};
+        print page_foot();
+        return;
+    }
+
+    my $is_protected = ($target eq $PROTECTED_USER);
+    my $is_admin_u   = ($is_protected || $row->{admin_function});
+    # Site access summary.
+    my @ids = $is_protected ? (0) : @{ db_user_site_ids($dbh, $target) };
+    my $unrestricted = ($is_protected || $row->{admin_function} || grep { $_ == 0 } @ids) ? 1 : 0;
+    my %site_code; $site_code{$_->{id}} = $_->{code} for @{ db_all_sites($dbh) };
+    $dbh->disconnect;
+
+    my $err = $cgi->param('err');
+    my $msg = $cgi->param('msg');
+
+    print page_head('Edit user', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=user_list') . qq{">&larr; Return</a></p>\n};
+    print qq{<div class="tool-section" id="user-edit-section">\n};
+    print qq{<h2 class="tool-section-title">Edit user: } . esc($target) . qq{</h2>\n};
+    print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
+    print qq{<p class="error">}   . esc($err) . qq{</p>\n} if defined $err && $err ne '';
+
+    print qq{<form method="POST" action="} . esc(script_url()) . qq{" id="user-edit-form" data-dirty-guard="1">\n};
+    print qq{<input type="hidden" name="action" value="user_save">\n};
+    print qq{<input type="hidden" name="username" value="} . esc($target) . qq{">\n};
+    print csrf_field();
+
+    # --- Identity ---
+    print qq{<fieldset class="ue-group"><legend>Identity</legend>\n};
+    print qq{<p><label class="ue-field"><span class="ue-label">Username</span> }
+        . qq{<span class="ue-ro">} . esc($target) . qq{</span></label></p>\n};
+    print qq{<p><label class="ue-field"><span class="ue-label">Email</span> }
+        . $cgi->textfield(-name => 'email', -value => ($row->{email} // ''), -size => 64, -autocomplete => 'off')
+        . qq{</label><br><span class="muted ue-hint">Used for password reset; leave blank to remove.</span></p>\n};
+    print qq{</fieldset>\n};
+
+    # --- Permissions ---
+    print qq{<fieldset class="ue-group"><legend>Permissions</legend>\n};
+    if ($is_protected) {
+        print qq{<p class="muted">The built-in <strong>} . esc($PROTECTED_USER)
+            . qq{</strong> account is always a full administrator; its permissions cannot be changed.</p>\n};
+    } else {
+        my $a = $row->{admin_function}     ? ' checked' : '';
+        my $e = $row->{edit_device_table}  ? ' checked' : '';
+        my $r = $row->{download_full_report} ? ' checked' : '';
+        my $c = $row->{download_full_config} ? ' checked' : '';
+        # Administrator: when on, it supersedes the individual rights below; JS
+        # greys them out. The server treats admin as granting everything anyway.
+        print qq{<p><label class="checkbox-label"><input type="checkbox" name="admin" value="1" id="ue-admin"$a> }
+            . qq{<strong>Administrator</strong> &mdash; full access; overrides the individual rights below.</label></p>\n};
+        print qq{<div id="ue-subrights">\n};
+        print qq{<p><label class="checkbox-label"><input type="checkbox" name="edit" value="1" class="ue-sub"$e> }
+            . qq{Edit device table</label></p>\n};
+        print qq{<p><label class="checkbox-label"><input type="checkbox" name="full_report" value="1" class="ue-sub"$r> }
+            . qq{Download full (unfiltered) report</label></p>\n};
+        print qq{<p><label class="checkbox-label"><input type="checkbox" name="full_config" value="1" class="ue-sub"$c> }
+            . qq{Download / copy unmasked device config</label></p>\n};
+        print qq{</div>\n};
+    }
+    print qq{</fieldset>\n};
+
+    # --- Site access (read-only summary + button to the separate editor) ---
+    print qq{<fieldset class="ue-group"><legend>Site access</legend>\n};
+    if ($is_admin_u) {
+        print qq{<p class="muted">Administrators have access to <strong>All sites</strong>.</p>\n};
+    } else {
+        print qq{<p class="ue-sites-wrap">};
+        if (!@ids) {
+            print qq{<span class="site-any">No sites assigned.</span>};
+        } else {
+            my @codes = sort map { $site_code{$_} // "#$_" } @ids;
+            my @first = @codes[0 .. ($#codes < 29 ? $#codes : 29)];
+            my $shown = join(', ', map { esc($_) } @first);
+            $shown .= qq{ &hellip; (+} . (@codes - 30) . qq{ more)} if @codes > 30;
+            print qq{<span class="ue-sites-cell">$shown</span>};
+        }
+        print qq{</p>\n};
+        print qq{<p><a class="btn" id="ue-edit-sites" href="}
+            . esc(script_url() . '?action=user_sites_form&username=' . CGI::escape($target))
+            . qq{">Edit site access &rarr;</a></p>\n};
+    }
+    print qq{</fieldset>\n};
+
+    # --- Password ---
+    print qq{<fieldset class="ue-group"><legend>Password</legend>\n};
+    print qq{<p><a class="btn" href="}
+        . esc(script_url() . '?action=reset_password_form&username=' . CGI::escape($target))
+        . qq{">Reset password &rarr;</a></p>\n};
+    print qq{</fieldset>\n};
+
+    # --- Actions ---
+    print qq{<div class="ue-actions">\n};
+    print qq{<a class="btn" href="} . esc(script_url() . '?action=user_list')
+        . qq{" id="ue-cancel">Cancel</a>\n};
+    print qq{<button type="submit" class="btn btn-green">Save changes</button>\n};
+    print qq{</div>\n};
+    print qq{</form>\n};
+
+    # Admin checkbox greys the sub-rights; Cancel/Return warn on unsaved changes.
+    print <<'JS';
+<script>
+(function () {
+  var adm = document.getElementById('ue-admin');
+  var subs = document.querySelectorAll('.ue-sub');
+  function syncSubs() {
+    if (!adm) return;
+    for (var i=0;i<subs.length;i++) { subs[i].disabled = adm.checked; }
+    var box = document.getElementById('ue-subrights');
+    if (box) box.style.opacity = adm.checked ? '0.5' : '';
+  }
+  if (adm) { adm.addEventListener('change', syncSubs); syncSubs(); }
+
+  // Unsaved-changes guard on Cancel/Return.
+  var form = document.getElementById('user-edit-form');
+  var dirty = false;
+  if (form) {
+    form.addEventListener('change', function(){ dirty = true; });
+    form.addEventListener('input',  function(){ dirty = true; });
+    form.addEventListener('submit', function(){ dirty = false; });  // saving
+  }
+  function guard(e, href) {
+    if (!dirty) return;
+    e.preventDefault();
+    if (window.fcConfirm) {
+      window.fcConfirm('Discard unsaved changes to this user?', function(){ dirty=false; window.location = href; }, { danger: true });
+    } else if (window.confirm('Discard unsaved changes to this user?')) {
+      dirty=false; window.location = href;
+    }
+  }
+  var cancel = document.getElementById('ue-cancel');
+  if (cancel) cancel.addEventListener('click', function(e){ guard(e, cancel.getAttribute('href')); });
+  var ret = document.querySelector('.breadcrumb a');
+  if (ret) ret.addEventListener('click', function(e){ guard(e, ret.getAttribute('href')); });
+
+  // Editing site access leaves this form; unsaved email/permission changes would
+  // be lost. Don't offer "discard" here -- tell the user to save first.
+  var sites = document.getElementById('ue-edit-sites');
+  if (sites) sites.addEventListener('click', function(e){
+    if (!dirty) return;
+    e.preventDefault();
+    var msg = 'Save your changes before editing site access, or they will be lost.';
+    if (window.fcAlert) { window.fcAlert(msg); }
+    else { window.alert(msg); }
+  });
+})();
+</script>
+JS
+    print qq{</div>\n};   # .tool-section (Edit user)
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# Single save for the user edit page (POST+CSRF, admin only). Writes email and
+# all permission fields in one UPDATE, and emits ONE audit line per CHANGED
+# field (reusing the existing set_* action names), so the audit log reflects
+# exactly what the admin changed -- no noise for unchanged fields.
+sub do_user_save {
+    my ($user) = @_;
+    my $target = $cgi->param('username') // '';
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) {
+        $dbh->disconnect if $dbh;
+        redirect_to_user_page(action=>"user_list", err=>'Only an admin can edit users.');
+        return;
+    }
+    unless (valid_id($target)) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_list", err=>'Invalid username.');
+        return;
+    }
+    my $old = db_get_user($dbh, $target);
+    unless ($old) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_list", err=>'User not found.');
+        return;
+    }
+
+    # The protected admin account: only email is editable; permissions are fixed.
+    my $is_protected = ($target eq $PROTECTED_USER);
+
+    # New email (validated).
+    my $email = normalize_email(scalar $cgi->param('email'));
+    if (!defined $email) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_edit", username=>$target, err=>'Invalid email address.');
+        return;
+    }
+
+    my %new = (
+        email                => $email,
+        admin_function       => $is_protected ? 1 : ($cgi->param('admin')       ? 1 : 0),
+        edit_device_table    => $is_protected ? 1 : ($cgi->param('edit')        ? 1 : 0),
+        download_full_report => $is_protected ? 1 : ($cgi->param('full_report') ? 1 : 0),
+        download_full_config => $is_protected ? 1 : ($cgi->param('full_config') ? 1 : 0),
+    );
+
+    # Write all fields in one statement.
+    my $ok = eval {
+        $dbh->do('UPDATE users SET email = ?, admin_function = ?, edit_device_table = ?, '
+               . 'download_full_report = ?, download_full_config = ? WHERE username = ?',
+               undef, $new{email}, $new{admin_function}, $new{edit_device_table},
+               $new{download_full_report}, $new{download_full_config}, $target);
+        1;
+    };
+    unless ($ok) {
+        my $derr = $dbh->errstr;
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_edit", username=>$target,
+            err=>'Could not save: ' . ($derr // 'database error'));
+        return;
+    }
+
+    # One audit line per CHANGED field, reusing the historical action names.
+    my @changes;
+    my $log = sub {
+        my ($field, $action, $oldv, $newv, $human) = @_;
+        return if (defined $oldv ? $oldv : '') eq (defined $newv ? $newv : '');
+        audit(action=>$action, object_type=>'user', object_id=>$target,
+              field=>$field, old_value=>$human->($oldv), new_value=>$human->($newv),
+              detail=>"$field: " . $human->($oldv) . " -> " . $human->($newv));
+        push @changes, $field;
+    };
+    my $yn = sub { $_[0] ? 'yes' : 'no' };
+    my $as_is = sub { defined $_[0] && $_[0] ne '' ? $_[0] : '(none)' };
+    # Email first, then the permission fields (skipped entirely for protected).
+    $log->('email', 'set_email', $old->{email}, $new{email}, $as_is);
+    unless ($is_protected) {
+        $log->('admin_function',       'set_admin_right',           $old->{admin_function},       $new{admin_function},       $yn);
+        $log->('edit_device_table',    'set_edit_right',            $old->{edit_device_table},    $new{edit_device_table},    $yn);
+        $log->('download_full_report', 'set_download_full_report',  $old->{download_full_report}, $new{download_full_report}, $yn);
+        $log->('download_full_config', 'set_download_full_config',  $old->{download_full_config}, $new{download_full_config}, $yn);
+    }
+    $dbh->disconnect;
+
+    my $summary = @changes ? ('Saved: ' . join(', ', @changes) . '.') : 'No changes.';
+    redirect_to_user_page(action=>"user_edit", username=>$target, msg=>$summary);
 }
 
 # Thin per-page handlers for the split User menu.
@@ -10973,8 +11162,6 @@ sub do_add_user {
     my $new_user = $cgi->param('username') // '';
     my $password = $cgi->param('password') // '';
     my $confirm  = $cgi->param('confirm_password') // '';
-    my $edit     = $cgi->param('edit') ? 1 : 0;
-    my $admin    = $cgi->param('admin') ? 1 : 0;
 
     my $dbh = db_connect();
     if (!$dbh) {
@@ -11014,7 +11201,9 @@ sub do_add_user {
         return;
     }
 
-    my ($ok, $err) = db_add_user($dbh, $new_user, password_hash($password), $edit, $admin);
+    # New users start with no special permissions; the admin sets them on the
+    # edit page we redirect to below.
+    my ($ok, $err) = db_add_user($dbh, $new_user, password_hash($password), 0, 0);
     if ($ok && $email ne '') { db_set_email($dbh, $new_user, $email); }
     $dbh->disconnect;
     if (!$ok) {
@@ -11022,11 +11211,10 @@ sub do_add_user {
         return;
     }
     audit(action=>'add_user', object_type=>'user', object_id=>$new_user,
-          detail=>"added user (edit device table: " . ($edit ? 'yes' : 'no')
-                . ", admin function: " . ($admin ? 'yes' : 'no')
-                . ($email ne '' ? ', email set' : '')
-                . "; site assignment set separately)");
-    redirect_to_user_page(action=>"user_list", msg => "User '$new_user' added.");
+          detail=>"added user" . ($email ne '' ? ' (email set)' : '')
+                . "; permissions and site access set separately");
+    redirect_to_user_page(action=>"user_edit", username=>$new_user,
+        msg => "User '$new_user' added. Set its permissions and site access below.");
 }
 
 # Delete a user. Restricted to $PROTECTED_USER, and $PROTECTED_USER itself
@@ -11243,8 +11431,9 @@ sub show_setup {
 
     my ($content, $err) = slurp_device_table();
 
-    print page_head('Setup', $user, 'wide');
-    print qq{<h1>Setup</h1>\n};
+    print page_head('Device table', $user, 'wide');
+    print qq{<div class="tool-section" id="device-table-section">\n};
+    print qq{<h2 class="tool-section-title">Device table</h2>\n};
     my $flash_msg = $cgi->param('msg');
     my $flash_err = $cgi->param('err');
     if (defined $flash_msg && $flash_msg ne '') { print qq{<p class="success">} . esc($flash_msg) . qq{</p>\n}; }
@@ -11264,8 +11453,9 @@ sub show_setup {
             . color_comment_lines($content) . qq{</pre>\n};
         print qq{</div>\n};
         print copy_button_script();
-        print top_bottom_nav();
     }
+    print qq{</div>\n};   # .tool-section (Device table)
+    print top_bottom_nav();
     print page_foot();
 }
 
@@ -12333,7 +12523,8 @@ sub show_edit_table {
     my $eerr = $cgi->param('err');
 
     print page_head('Edit device table', $user, 'wide');
-    print qq{<h1>Edit device table</h1>\n};
+    print qq{<div class="tool-section" id="edit-table-section">\n};
+    print qq{<h2 class="tool-section-title">Edit device table</h2>\n};
 
     # The generic model's template dropdowns depend on `fetchconfig -t`. If it
     # failed (missing template directory, or none found), show the same error
@@ -12383,10 +12574,10 @@ sub show_edit_table {
         print qq{</div>\n};
     }
 
-    print qq{<div class="edit-warning">Credentials are masked (}
+    print qq{<p class="muted">Credentials are masked (}
         . esc($SECRET_KEEP) . qq{ = unchanged). A timestamped backup of the current }
         . qq{table is saved before your changes are written. Edits take effect on the }
-        . qq{next backup run.</div>\n};
+        . qq{next backup run.</p>\n};
 
     print $cgi->start_form(-method => 'POST', -action => script_url(), -id => 'edit-form');
     print qq{<input type="hidden" name="table_mtime" value="} . esc($mtime) . qq{">\n};
@@ -12600,6 +12791,7 @@ sub show_edit_table {
 
     print model_opts_script();
     print edit_table_script();
+    print qq{</div>\n};   # .tool-section (Edit device table)
     print top_bottom_nav();
     print page_foot();
 }
@@ -13571,7 +13763,8 @@ sub show_bulk_edit {
     }
 
     print page_head('Bulk edit devices', $user, 'wide');
-    print qq{<h1>Bulk edit devices</h1>\n};
+    print qq{<div class="tool-section" id="bulk-edit-section">\n};
+    print qq{<h2 class="tool-section-title">Bulk edit devices</h2>\n};
 
     # Same directory checks as the graphical editor: if `-t` (templates) or
     # `--list-allowed-dirs` reports a missing directory, show the fetchconfig
@@ -13581,12 +13774,12 @@ sub show_bulk_edit {
     my $ad_err = allowed_dirs_error_html();
     if ($ad_err ne '') { print $ad_err; print page_foot(); return; }
 
-    print qq{<div class="edit-warning">This is the <strong>complete</strong> device }
+    print qq{<p class="muted">This is the <strong>complete</strong> device }
         . qq{list, one device per line as <code>model&nbsp;device-id&nbsp;host&nbsp;}
         . qq{[options]</code>. Saving <strong>replaces the entire device section</strong> }
         . qq{&mdash; any line you remove deletes that device, and an empty box removes all }
         . qq{devices. The <code>default:</code> and <code>email:</code> sections are not }
-        . qq{affected. Passwords are shown and saved in plain text.</div>\n};
+        . qq{affected. Passwords are shown and saved in plain text.</p>\n};
 
     if ($errors && @$errors) {
         print qq{<p class="error">Not saved &mdash; fix these and try again:<br>}
@@ -13640,6 +13833,7 @@ function fcBulkConfirm(ev) {
 }
 </script>
 JS
+    print qq{</div>\n};   # .tool-section (Bulk edit devices)
     print top_bottom_nav();
     print page_foot();
 }
@@ -17131,6 +17325,22 @@ $backdrop_css
   .breadcrumb { display: flex; align-items: center; gap: 0.5em; margin: 0 0 1em 0; }
   .breadcrumb .sep { color: #888; }
   main h2 { font-size: 1.1em; margin-top: 1.8em; }
+  /* User edit page: grouped fieldsets, a bounded wrapped site-access summary,
+     and a right-aligned action row. */
+  .ue-group { border: 1px solid #d0d7de; border-radius: 6px; margin: 0 0 1.1em;
+              padding: 0.6em 1em 0.9em; max-width: 640px; }
+  .ue-group legend { font-weight: 600; color: #24292f; padding: 0 0.4em; }
+  .ue-field { display: inline-flex; align-items: baseline; gap: 0.6em; }
+  .ue-label { display: inline-block; min-width: 6.5em; color: #57606a; }
+  .ue-ro { font-family: monospace; }
+  .ue-hint { font-size: 0.85em; }
+  .ue-sites-wrap { margin: 0.2em 0 0.6em; }
+  .ue-sites-cell { display: inline-block; max-width: 600px; padding: 0.4em 0.6em;
+                   border: 1px solid #d0d7de; border-radius: 4px; background: #f6f8fa;
+                   white-space: normal; word-break: break-word; line-height: 1.5; }
+  .ue-actions { display: flex; justify-content: flex-end; gap: 0.8em;
+                max-width: 640px; margin-top: 0.4em; }
+  #ue-subrights { margin-left: 1.6em; }
   .form-narrow { max-width: 360px; }
   .form-narrow label { display: block; margin: 0.8em 0 0.2em; font-size: 0.9em; }
   .form-narrow input[type=text], .form-narrow input[type=password] {
@@ -17289,8 +17499,6 @@ $backdrop_css
   .log-name-fail { color: #c00; }           /* [name] red (failed)   */
   .log-body { margin: 0.2em 0 0.4em 1.4em; }
   .log-preamble { margin: 0.2em 0 0.4em; }
-  .edit-warning { background: #fff8c5; border: 1px solid #e6d16b; color: #5c4d00;
-                  padding: 0.6em 0.85em; border-radius: 4px; font-size: 0.9em; margin: 0.6em 0 1em; }
   .tabbar { display: flex; gap: 0.3em; border-bottom: 1px solid #ddd; margin-bottom: 1em; }
   .tabbar .tab { border: 1px solid #ddd; border-bottom: none; background: #eef1f4;
                  border-radius: 5px 5px 0 0; padding: 0.45em 0.9em; font-size: 0.92em;
