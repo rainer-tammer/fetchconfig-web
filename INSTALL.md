@@ -63,6 +63,7 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
 | `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`, that installs an edited template file. |
 | `imageconvert.pl`, `README.imageconvert` | Optional helper for preparing the login backdrop image. |
 | `images/back.jpg` | Login-page backdrop image. |
+| `favicon.ico` | Browser tab/bookmark icon. Optional; copy to the web server's document root (see Step 4) when the application runs on its own vhost or dedicated server. |
 | `help.html` | The in-application Help page (served by the web server, path set by `HELP_FILE` / `HELP_BASE_URL`). |
 | `README.md`, `fetchconfig-web-documentation.html` | Full reference documentation (Markdown and rendered HTML). |
 | `INSTALL.md`, `INSTALL.html` | This guide (Markdown and rendered HTML). |
@@ -72,7 +73,7 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
 
 ### Requirements
 
-- **fetchconfig 9.68 or newer** already installed and working. fetchconfig-web
+- **fetchconfig 9.69 or newer** already installed and working. fetchconfig-web
   calls `fetchconfig.pl` and reads its device table, repository and template
   directories; it does not replace fetchconfig.
 - **Perl 5.10 or newer.** Tested on Linux and AIX.
@@ -348,7 +349,20 @@ cp LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html /www/pub/fetchconfig-web/
 ```
 
 The backdrop image is optional (the login page shows a plain background
-without it). The Help page is read from `HELP_FILE` on the filesystem and
+without it).
+
+**Favicon (optional).** `favicon.ico` is the icon browsers show on the tab and
+in bookmarks. Browsers request it from the **document root** of the host
+(`/favicon.ico`), so when fetchconfig-web runs on its own **vhost or a dedicated
+web server**, copy it there:
+
+```sh
+cp favicon.ico /www/virtual/fetchconfig/htdocs/   # the vhost's DocumentRoot
+```
+
+If the application is instead served from a sub-path of a shared server, place
+`favicon.ico` at that server's document root (or leave it out -- a missing
+favicon only means the browser shows its default tab icon). The Help page is read from `HELP_FILE` on the filesystem and
 also linked at `HELP_BASE_URL`; both must point at the same file. The Help
 menu lists each documentation/licence page only when its `.html` file exists
 in `HELP_DIR`, so a page you do not copy simply does not appear.
@@ -677,7 +691,7 @@ Immediately:
    `site=` tag before the device table can be saved, so define the site codes
    first.
 3. **Create users** and assign their sites and rights -- *User -> Add user*,
-   then *Users list -> Edit sites*. A user needs the *Edit device* right to use
+   then *Users -> Sites*, or *Users -> (click a user) -> Edit site access*. A user needs the *Edit device* right to use
    the editor and *Admin functions* for Tools, sites and user management.
 4. **Tag your devices** -- *Setup devices -> Edit device table*. Untagged
    devices are shown with a red site placeholder; *Tools -> Check site
@@ -833,14 +847,14 @@ Work through this after a fresh install or an upgrade:
 - [ ] You can log in as `admin` and the default-password warning disappears
       after you change it.
 - [ ] *Devices* lists your devices with the correct **Site** column.
-- [ ] *Devices -> Backup status* and *Backup reports* open.
+- [ ] *Devices -> Device backup status* and *Backup reports* open.
 - [ ] *Setup devices -> Edit device table* opens, a device expands on *Edit*,
       and *Save changes* writes a `.bak` into `BACKUP_DEVICE_TABLE`.
 - [ ] *Tools -> Check site assignment* reports no untagged devices (or lists
       the ones to fix).
 - [ ] *Backup Now* on one device completes and the new backup appears in the
       repository.
-- [ ] The footer shows the expected version: *fetchconfig-web v1.50 using
+- [ ] The footer shows the expected version: *fetchconfig-web v2.00 using
       fetchconfig v9.6x*.
 
 ### Common problems

@@ -52,6 +52,11 @@ my $src = do { open(my $fh, '<', cgi_path()) or die $!; local $/; <$fh> };
     load_cgi($c2); main::read_config();
     ok(!defined main::_reset_link('a' x 32), 'V1: no SITE_URL -> no link is built at all');
     like($src, qr/reset link NOT emailed: SITE_URL is not configured/, 'V1: refusal is audited');
+    # Every forgot-password outcome is audited, so "I got no email" is diagnosable.
+    like($src, qr/reset NOT sent: requests from .* are throttled/, 'throttled reset is audited');
+    like($src, qr/reset NOT sent: no account matches/,            'unknown-user reset is audited');
+    like($src, qr/reset NOT sent: no email address on file/,      'no-email reset is audited');
+    like($src, qr/reset NOT sent: could not create a reset token/, 'token-fail reset is audited');
 }
 
 # --- V2: every forgot-password request counts; fixed time floor ----------------
@@ -108,7 +113,7 @@ my $src = do { open(my $fh, '<', cgi_path()) or die $!; local $/; <$fh> };
 }
 
 # --- version ----------------------------------------------------------------
-like($src, qr/use constant APP_VERSION => '1\.63';/, 'version bumped to 1.63');
+like($src, qr/use constant APP_VERSION => '2\.00';/, 'version bumped to 2.00');
 
 
 # --- fetchconfig-web-dbsetup.pl's generated config covers every registered key -------------------

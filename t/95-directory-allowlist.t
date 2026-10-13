@@ -18,6 +18,7 @@ directory: repository $REPO1     /usr/local/fetchconfig/config
 directory: template   $TEMPLATE1 /usr/local/fetchconfig/templates
 directory: template   $TEMPLATE2 /usr/local/fetchconfig/templates_alt
 directory: fetch_run  $CMD1      /usr/local/fetchconfig/fetch_run
+directory: lock       $LOCKS     /var/run/fetchconfig-locks
 # directory allow list - must be directly edited on the server
 
 cisco-ios sw1 10.0.0.1 user=x,pass=y
@@ -35,6 +36,7 @@ print "1\trepository\t\$REPO1\t/usr/local/fetchconfig/config\n";
 print "2\ttemplate\t\$TEMPLATE1\t/usr/local/fetchconfig/templates\n";
 print "3\ttemplate\t\$TEMPLATE2\t/usr/local/fetchconfig/templates_alt\n";
 print "4\tfetch_run\t\$CMD1\t/usr/local/fetchconfig/fetch_run\n";
+print "5\tlock\t\$LOCKS\t/var/run/fetchconfig-locks\n";
 print "# found 4 allowed director(y/ies): 1 repository, 2 template, 1 fetch_run\n";
 exit 0;
 STUB
@@ -53,6 +55,16 @@ is($al->{fetch_run_disabled}, 0, 'fetch_run not disabled');
 
 is(main::resolve_allowed_path('template','$TEMPLATE2'), '/usr/local/fetchconfig/templates_alt', 'template alias resolves');
 is(main::resolve_allowed_path('fetch_run','$CMD1'), '/usr/local/fetchconfig/fetch_run', 'fetch_run alias resolves');
+is(main::resolve_allowed_path('lock','$LOCKS'), '/var/run/fetchconfig-locks', 'lock alias resolves (9.69)');
+is(main::alias_for_value('lock','/var/run/fetchconfig-locks'), '$LOCKS', 'lock path -> alias');
+is(main::resolve_allowed_path('template','$LOCKS'), undef, 'lock alias not valid under template');
+# The editor knows the 9.69 lock options with correct field types.
+is(main::option_spec('cisco-ios','lock')->{type},            'enum_onoff', 'lock -> on/off selector');
+is(main::option_spec('cisco-ios','lock_dir')->{type},        'path',        'lock_dir -> path');
+is(main::option_spec('cisco-ios','lock_retry')->{type},      'int',         'lock_retry -> int');
+is(main::option_spec('cisco-ios','lock_retry_time')->{type}, 'int',         'lock_retry_time -> int');
+ok(scalar(grep { $_ eq 'lock' } main::model_option_keys('cisco-ios')), 'lock in the add-option menu');
+
 is(main::resolve_allowed_path('repository','$TEMPLATE1'), undef, 'wrong kind rejected');
 is(main::alias_for_value('template','/usr/local/fetchconfig/templates_alt'), '$TEMPLATE2', 'path->alias');
 

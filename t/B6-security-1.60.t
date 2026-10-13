@@ -138,10 +138,28 @@ SKIP: {
     open(my $fh, '<', cgi_path()) or die $!;
     my $src = do { local $/; <$fh> }; close($fh);
     # The two fixed body texts the user asked for.
-    like($src, qr/Your fetchconfig-web email address setup was successful/,
-         'self-service test email body text');
-    like($src, qr/Email setup of fetchconfig-web successful/,
-         'admin verify-email body text');
+    like($src, qr/has been successfully configured for fetchconfig-web/,
+         'self-service test email body text (new wording)');
+    like($src, qr/sub test_email_bodies/, 'test email has plain + HTML bodies');
+    like($src, qr/multipart\/alternative/, 'send_mail builds multipart/alternative when html is given');
+    # Logo must be a CID image (Thunderbird/Outlook block data: URIs), wrapped in
+    # multipart/related.
+    like($src, qr/multipart\/related/,        'send_mail wraps in multipart/related for the inline logo');
+    like($src, qr/Content-ID: <fcwlogo>/,      'logo attached with a Content-ID');
+    like($src, qr/src="cid:fcwlogo"/,          'HTML references the logo by cid:, not a data: URI');
+    # The email shell must use cid:, not a data: URI (the login page may still use
+    # a data: URI -- that's a browser page, not email).
+    my ($shell) = $src =~ /sub email_html_shell \{(.*?)\n\}/s;
+    unlike($shell // '', qr/data:image/, 'email shell uses cid:, not a data: URI');
+    like($src, qr/email delivery to.*is working/s,
+         'admin verify-email body text (new wording)');
+    # All three notification emails share the styled HTML shell and send both
+    # a text and an HTML part.
+    like($src, qr/sub email_html_shell/,  'shared email HTML shell');
+    like($src, qr/sub reset_email_bodies/, 'reset email has plain + HTML bodies');
+    like($src, qr/sub verify_email_bodies/, 'verify email has plain + HTML bodies');
+    like($src, qr/reset_email_bodies\([^)]*\);\s*my \(\$sent/s, 'reset mail uses the new bodies + html');
+    like($src, qr/verify_email_bodies\(\$to\)/, 'verify mail uses the new bodies');
     # Wiring.
     like($src, qr/action eq 'test_my_email'/,     'test_my_email dispatched');
     like($src, qr/action eq 'tool_verify_email'/, 'tool_verify_email dispatched (GET page)');

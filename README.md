@@ -5,9 +5,9 @@ title bar and logo shown on every page, and a Devices / Status / User / Help
 menu (plus a Setup item for accounts with the edit or admin right) in the
 title bar's nav row:
 
-> **Requires fetchconfig 9.68 or newer.** fetchconfig-web reads the installed
+> **Requires fetchconfig 9.69 or newer.** fetchconfig-web reads the installed
 > version from `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and shows a
-> warning banner (on every page, after login) if it is older than 9.68 or
+> warning banner (on every page, after login) if it is older than 9.69 or
 > cannot be determined. The minimum is set by the `MIN_FETCHCONFIG_VERSION`
 > constant in `fetchconfig-web.cgi`.
 
@@ -197,7 +197,7 @@ each of these in turn.
 For an experienced operator, the shortest path to a running instance:
 
 1. **Install the prerequisites** -- Perl with DBI/DBD::Pg, CGI and
-   Algorithm::Diff; PostgreSQL; and fetchconfig 9.68+ (see
+   Algorithm::Diff; PostgreSQL; and fetchconfig 9.69+ (see
    [Requirements](#requirements)).
 2. **Create the user database** -- run `perl fetchconfig-web-dbsetup.pl`
    (see [The user database](#the-user-database)).
@@ -963,12 +963,12 @@ config, not the highlight markup.
 
 ### Navigation menus
 
-The title bar uses drop-down menus: **Devices** (Device list, Backup status,
-Backup reports), **Setup devices** (Show device table, Edit device table, Bulk
-edit -- shown only to users who may edit the table; a site-limited user sees
-only Edit device table), **Tools** (admin only, each tool on its own page), **User** (Change your password
-for everyone; Users list, Add user and Sites for admins), and **Help**. The
-post-login page is the device list.
+The title bar uses drop-down menus: **Devices** (Devices, Device backup status,
+Backup reports, Device notes), **Setup devices** (Device table, Edit device
+table, Bulk edit devices -- shown only to users who may edit the table; a
+site-limited user sees only Edit device table), **Tools** (admin only, each tool
+on its own page), **User** (Change your password for everyone; Users, Add user
+and Sites for admins), and **Help**. The post-login page is the device list.
 
 ### Device notes
 
@@ -1267,7 +1267,7 @@ stored model that is not present in the current directory is shown disabled
 
 If `-t` cannot run, reports a missing template directory (exit 2) or finds no
 templates at all (exit 1), the whole device-table editor shows the fetchconfig
-output instead (the same error as the template viewer).
+output instead (the same error as the Templates tool).
 
 `model=` may be set on a `default: generic` line so all generic devices
 sharing one template need not repeat it; a device line can still override it.
@@ -1297,13 +1297,13 @@ directory: template   $TEMPLATE2 /usr/local/fetchconfig/templates_alt
 ```
 
 Each line is `directory: <kind> <$ALIAS> <path>`, where `kind` is
-`repository`, `template`, `fetch_run` or `report`. fetchconfig expands the `$ALIAS` at run
+`repository`, `template`, `fetch_run`, `report` or `lock`. fetchconfig expands the `$ALIAS` at run
 time, so a device or default line may write either the full path or the alias
 (`repository=$REPO1`, `template_dir=$TEMPLATE2`).
 
 The allow-list is read via **`fetchconfig.pl --list-allowed-dirs`**, which also
 verifies the directories exist on disk: exit 0 = all present, exit 2 = one is
-missing (named in an error line). On exit 2 the template viewer and the
+missing (named in an error line). On exit 2 the Templates tool and the
 device-table editor show the fetchconfig output and refuse to proceed, exactly
 like a missing template directory.
 
@@ -1317,6 +1317,42 @@ gray) and a command-plus-options text field -- combined into
 `$CMD1/command -options` on save. A full path in the command is reduced to its
 alias on save, like the other directories. If no `fetch_run` line exists at all,
 `on_fetch_run` is unrestricted (free text).
+
+`lock` (fetchconfig 9.69+) restricts the `lock_dir=` device option to allowed
+directories, exactly as `template` restricts `template_dir=`. A
+`directory: lock $LOCKS /abs/path` line lets `lock_dir=$LOCKS` resolve; without
+a `lock` line, `lock_dir=` is unrestricted (apart from fetchconfig's
+system-directory rule).
+
+#### Device locking (`lock`, fetchconfig 9.69+)
+
+fetchconfig 9.69 can take an exclusive lock on a device before backing it up, so
+two runs never back up the same device at once (overlapping cron runs, or a
+**Backup Now** firing during a scheduled run). The following options are set on a
+device line or a `default:` line (type them as ordinary `key=value` options in
+the editor):
+
+- **`lock=on|off`** (default `off`) -- enable per-device locking. When `off`,
+  the other `lock_*` options have no effect.
+- **`lock_dir=<$ALIAS|/abs/path>`** (default: `<dir of fetchconfig.pl>/.lock`) --
+  directory holding the per-device lock files; an allow-list `$ALIAS` (see the
+  `lock` kind above) or an absolute path. It must be on a **local** filesystem
+  (`flock` over NFS is unreliable on AIX), and a system directory is refused.
+- **`lock_retry=<N>`** (default `5`) -- how many times to retry a locked device
+  before skipping it; `0` skips on the first contention.
+- **`lock_retry_time=<seconds>`** (default `10`, minimum `1`) -- wait between
+  retries. The most a device waits before being skipped is
+  `lock_retry * lock_retry_time` seconds (default 5 x 10 = 50 s).
+
+On contention fetchconfig records the device as **`skipped`** -- a normal,
+benign outcome meaning "already being backed up," **not** a failure. The backup
+status page and reports show it as `skipped`; the process exit code is not
+changed by a lock-skip. (If `lock=on` is requested but the lock directory cannot
+be created or used, fetchconfig exits 10.)
+
+Clean up stale lock files with **`fetchconfig.pl --clean-lock-dir [N]`** (remove
+lock files older than N days, default 30; a currently-held lock is never
+removed). Pass `-devices=` if a custom `lock_dir=` applies.
 
 `report` controls the HTML-report feature (fetchconfig writes a report into an
 allow-listed report directory). `directory: report none` disables reporting
@@ -1708,9 +1744,9 @@ where reports are written, so normally it already is). In the device-table
 editor the `report_logo` option then offers these files as a drop-down (the
 first 25, with a warning if there are more).
 
-#### Template viewer
+#### Templates
 
-The Tools menu has a **Template viewer** tool with a **Show templates**
+The menu has a **Templates** tool with a **Show templates**
 button that opens a list of the generic-model templates on its own page
 (`?action=view_templates`, admin only). The list comes from
 `fetchconfig.pl -devices=<table> -t`, whose tab-separated output gives the full
@@ -1801,9 +1837,12 @@ the real hardware.
 The editor toolbar also has a **Help templates** button that opens
 `<HELP_BASE_URL>/README.template_engine.html` (the template-engine manual) in a
 new browser tab. **`HELP_BASE_URL`** (default `/fetchconfig-web`) is the URL
-base under which that documentation is served; put `README.template_engine.html`
-there (e.g. alongside the other served assets). If the file is not installed the
-button simply leads to a 404.
+base under which that documentation and the Help-menu documents are served; put
+`README.template_engine.html` there (e.g. alongside the other served assets). If
+the file is not installed the button simply leads to a 404. When the application
+is served from the **site root of its own vhost**, set `HELP_BASE_URL = /`; a
+trailing slash (and the bare `/`) is normalised away so links resolve to
+`/<file>` rather than a broken `//<file>`.
 
 ### Per-site device access
 
@@ -2129,7 +2168,7 @@ below are grouped by concern.
   have its rights toggled, and cannot be targeted by `reset_password`.
 - `change_password` only ever targets the current session's own username (never
   a form field), so it cannot be used to change another user's password.
-- The "Show device table" view and the device-table editor are gated on
+- The "Device table" view and the device-table editor are gated on
   `user_may_edit_table()` (any admin, or a user with the edit-table right).
   Setup exposes the raw device table, which may contain credentials on
   `default:` lines, so it is restricted by design.

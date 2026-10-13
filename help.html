@@ -66,7 +66,7 @@
     <li><a href="#help-menu">The menu bar</a></li>
     <li><a href="#help-login">Logging in and out</a></li>
     <li><a href="#help-devices">Devices</a></li>
-    <li><a href="#help-status">Backup status</a></li>
+    <li><a href="#help-status">Device backup status</a></li>
     <li><a href="#help-backups">Backups for a device</a></li>
     <li><a href="#help-viewing">Viewing a backup</a></li>
     <li><a href="#help-comparing">Comparing two backups</a></li>
@@ -85,18 +85,18 @@
   menus; click a menu name to open it and pick a function. Your username and a
   <strong>Log out</strong> link sit on the right. The menus are:</p>
   <ul>
-    <li><strong>Devices</strong> &mdash; Device list (the home page after
-        login), Backup status, Backup reports, Notes.</li>
+    <li><strong>Devices</strong> &mdash; Devices (the home page after
+        login), Device backup status, Backup reports, Device notes.</li>
     <li><strong>Setup devices</strong> (only if you may edit the device table)
-        &mdash; Show device table, Edit device table, Bulk edit. A site-limited
+        &mdash; Device table, Edit device table, Bulk edit devices. A site-limited
         user sees only Edit device table.</li>
     <li><strong>Tools</strong> (administrators only) &mdash; each tool on its
         own page: Audit log, Check devices for consistent backup suffixes,
         Check site assignment, Devices without backups, Disk space,
         Empty backup cleanup, Empty directory cleanup, Orphaned backup cleanup, Restore device table,
-        Show fetchconfig-web.cfg, Verify email setup, Login failures, Orphaned notes cleanup, Template viewer, Upload report logo, View fetchconfig log.</li>
-    <li><strong>User</strong> &mdash; Change your password (everyone); Users
-        list, Add user and Sites (administrators only).</li>
+        Show fetchconfig-web.cfg, Verify email setup, Login failures, Orphaned notes cleanup, Templates, Upload report logo, View fetchconfig log.</li>
+    <li><strong>User</strong> &mdash; Change your password (everyone); Users,
+        Add user and Sites (administrators only).</li>
     <li><strong>Help</strong> &mdash; this page.</li>
     <li><strong>Program icon</strong> (far left) &mdash; click it to open an
         <strong>About</strong> dialog showing the program version(s), copyright,
@@ -317,10 +317,10 @@
   <ul>
     <li>The <strong>Setup devices</strong> menu appears for the
         <code>admin</code> account and for any user granted the device-table
-        edit right. Its <strong>Show device table</strong> item shows the raw
+        edit right. Its <strong>Device table</strong> item shows the raw
         fetchconfig device table exactly as the tool reads it, with a Copy
         button; <strong>Edit device table</strong> opens the graphical editor
-        and <strong>Bulk edit</strong> the raw editor.</li>
+        and <strong>Bulk edit devices</strong> the raw editor.</li>
     <li>Because the device table can contain device login credentials (on its
         <code>default:</code> lines), access is restricted this way and the
         page should be treated as sensitive.</li>
@@ -481,7 +481,7 @@
   name is green if it succeeded and red if it failed; failed sections open
   automatically so problems are easy to spot. Use <strong>Expand all</strong>
   / <strong>Collapse all</strong> to toggle everything at once.</p>
-  <p><strong>Template viewer</strong> &mdash; press <strong>Show templates</strong>
+  <p><strong>Templates</strong> &mdash; press <strong>Show templates</strong>
   to list the generic-model templates (<code>*.tmpl</code>) found in the
   template directories that <code>fetchconfig.pl -t</code> reports. Each file is
   listed once (the same template name may legitimately appear in more than one

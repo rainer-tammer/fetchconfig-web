@@ -49,6 +49,7 @@ ok($sok, 'save succeeds (direct write)');
 ok(-f "$tmpl.bak", 'single .bak created on save');
 ok(defined main::template_backup_path($tmpl), 'backup path detected (Revert button would show)');
 
+
 my ($rok) = main::revert_template($tmpl);
 ok($rok, 'revert succeeds');
 my $now = do { local $/; open(my $f,'<',$tmpl); <$f> };
@@ -91,6 +92,30 @@ unlike($now, qr/edited/, 'revert restored the pre-save content');
         ok(!main::template_path_ok($link), 'reported symlink path still refused (stat-level)');
         unlink($link);
     }
+}
+
+# The editor title shows the backup timestamp when a .bak exists.
+{
+    no warnings 'redefine', 'once';
+    local *main::user_may_edit_table = sub { 1 };
+    local *main::user_is_admin       = sub { 1 };
+    local *main::template_path_ok    = sub { 1 };
+    local *main::highlight_template  = sub { my $x = shift; $x =~ s/&/&amp;/g; $x =~ s/</&lt;/g; $x };
+    local *main::tpl_editor_script   = sub { '' };
+    local *main::page_head = sub { '' }; local *main::page_foot = sub { '' };
+    local *CGI::param = sub { my($s,$k)=@_; return $tmpl if $k eq 'path'; return 'z' if $k eq 'tpl'; return; };
+    { open(my $b,'>',"$tmpl.bak") or die $!; print $b "# backup\n"; close $b; }  # ensure a .bak
+    my $out=''; { open(my $fh,'>',\$out); my $sv=select($fh);
+        main::show_edit_template('admin', path=>$tmpl, name=>'z',
+            content=>'# x', preview=>'# x', saved=>1); select($sv); }
+    like($out, qr/Edit template:.*?- backup \d{4}-\d\d-\d\d \d\d-\d\d-\d\d/s,
+         'title shows backup timestamp when a .bak exists');
+    # And no backup suffix when the .bak is gone.
+    unlink "$tmpl.bak";
+    my $out2=''; { open(my $fh,'>',\$out2); my $sv=select($fh);
+        main::show_edit_template('admin', path=>$tmpl, name=>'z',
+            content=>'# x', preview=>'# x', saved=>1); select($sv); }
+    unlike($out2, qr/- backup \d{4}/, 'no backup suffix when .bak is absent');
 }
 
 done_testing();

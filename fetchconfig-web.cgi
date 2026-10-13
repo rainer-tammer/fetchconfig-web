@@ -62,12 +62,12 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
-use constant APP_VERSION => '1.63';
+use constant APP_VERSION => '2.00';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '1.63';
+use constant APP_VERSION_INTERNAL => '2.00';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -75,7 +75,7 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.68';
+use constant MIN_FETCHCONFIG_VERSION => '9.69';
 
 # Seconds between keepalive writes to the client while a long external command
 # runs (Backup Now, Empty backup cleanup; see run_command_capture). Keeps the
@@ -111,10 +111,17 @@ my ($DEVICE_TABLE, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFIG_BIN_FULL,
     $EMAIL, $SMTP_HOST, $SMTP_PORT, $SMTP_SECURITY, $EMAIL_AUTH, $GENERIC_SYNTAX,
     $SMTP_USER, $SMTP_PASS, $EMAIL_FROM, $SITE_URL);
 
+################################################################################
+# parse_config_file
+#
 # Parse $CONFIG_FILE (key = value, '#' comments and blank lines ignored,
 # optional surrounding quotes on the value) into a hashref, or (undef,
 # error). Only whole-line comments are stripped, so a '#' inside a value
 # survives. The first '=' splits key from value.
+#
+# Parameters:
+#   $path
+################################################################################
 sub parse_config_file {
     my ($path) = @_;
     open(my $fh, '<', $path) or return (undef, "cannot open $path: $!");
@@ -201,9 +208,17 @@ my %CFG_OBSOLETE = (
     REPOSITORY => 'obsolete since 1.60 -- remove it (the repository comes from the device table)',
 );
 
+################################################################################
+# cfg_value_problem
+#
 # Validate one value against its registry entry. Returns undef if valid, else
 # the reason (short text). An empty value means "use the default" for every
 # key that has one, as in read_config().
+#
+# Parameters:
+#   $ent
+#   $v
+################################################################################
 sub cfg_value_problem {
     my ($ent, $v) = @_;
     my ($key, $type, undef, $range, $min, $max) = @$ent;
@@ -235,14 +250,25 @@ sub cfg_value_problem {
     return undef;
 }
 
+################################################################################
+# cfg_key_is_secret
+#
 # Should this key's value be hidden in the view? DBpass, and any unknown key
 # that looks like a password (e.g. a mistyped DBpass).
+#
+# Parameters:
+#   $key
+#   $known
+################################################################################
 sub cfg_key_is_secret {
     my ($key, $known) = @_;
     return 1 if $key eq 'DBpass' || $key eq 'SMTP_PASS' || $key eq 'DEFAULT_PASSWORD';
     return (!$known && $key =~ /pass|secret/i) ? 1 : 0;
 }
 
+################################################################################
+# cfg_view_rows
+#
 # Build the rows of the config view from the config file at $path, in file
 # order. Returns (\@rows, $error). Rows:
 #   { type => 'group', title }
@@ -254,6 +280,10 @@ sub cfg_key_is_secret {
 # surrounding quotes stripped; the LAST occurrence of a key wins. After the
 # file's keys, every registry key absent from the file is listed (status
 # nonexistent) under the group "Not in config file".
+#
+# Parameters:
+#   $path
+################################################################################
 sub cfg_view_rows {
     my ($path) = @_;
     open(my $fh, '<', $path) or return (undef, "cannot open $path: $!");
@@ -338,11 +368,17 @@ sub cfg_view_rows {
     return (\@rows, undef);
 }
 
+################################################################################
+# read_config
+#
 # Load $CONFIG_FILE into the config lexicals above. Returns undef on
 # success or an error string on failure (missing file, or a missing
 # required key). Non-critical settings fall back to sensible defaults so an
 # older/short config file still works; the DB connection keys and the core
 # paths are required, since nothing works without them.
+#
+# Parameters: reads @_ directly
+################################################################################
 sub read_config {
     my ($kv, $err) = parse_config_file($CONFIG_FILE);
     return $err if $err;
@@ -517,8 +553,12 @@ sub read_config {
             return "$CONFIG_FILE: $k must be an absolute URL path containing only "
                  . "letters, digits, '.', '_', '~', '-' and '/' (got '$v')";
         }
+        # Strip trailing slash(es). A bare "/" (site root) becomes "" so that
+        # joining "$BASE/$file" yields "/file", not "//file" -- the latter is a
+        # protocol-relative URL the browser reads as "//host/path", turning the
+        # filename into a hostname (e.g. HELP_BASE_URL=/ gave //license.html ->
+        # https://license.html/). Empty base = served from the site root.
         $v =~ s{/+$}{};
-        $v = '/' if $v eq '';
         $url_val{$k} = $v;
     }
     $FONT_BASE_URL  = $url_val{FONT_BASE_URL};
@@ -1027,11 +1067,17 @@ our $_templates_t_cache;
 # set here on the Perl handle persists across requests.
 binmode(STDOUT);
 
+################################################################################
+# reset_request_state
+#
 # Per-request globals and in-memory caches. Under plain CGI the process handles
 # one request and exits, so this clears nothing that matters; under FastCGI the
 # process is persistent, so every one of these MUST be cleared at the start of
 # each request or data (and config) leaks from one request into the next.
 # Keep this in sync with every file-scoped request cache (grep for "our \$_").
+#
+# Parameters: none
+################################################################################
 sub reset_request_state {
     $AUDIT_WARNING          = undef;
     $SECURITY_WARNING       = undef;
@@ -1049,8 +1095,15 @@ sub reset_request_state {
     return read_config();
 }
 
+################################################################################
+# handle_request
+#
 # Handle exactly one request: $q is the CGI object for it. Called once under
 # plain CGI, and once per Accept() under FastCGI.
+#
+# Parameters:
+#   $q
+################################################################################
 sub handle_request {
     my ($q) = @_;
     $cgi = $q;
@@ -1092,12 +1145,18 @@ sub handle_request {
 my %STATE_CHANGING = map { $_ => 1 }
     qw(login logout change_password change_email test_my_email verify_email clear_login_failures reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report set_download_full_config set_email user_save note_save note_delete notes_orphan_delete reset_do upload_logo delete_logo);
 
+################################################################################
+# main
+#
 # The request is dispatched from main(), called at the very END of this
 # file -- after all the static data tables further down (the option
 # catalog, $SECRET_KEEP, etc.) have been assigned. If dispatch ran here at
 # the top instead, those `my ... = (...)` assignments (which execute in
 # source order) wouldn't have run yet, and the editor would see empty
 # catalogs.
+#
+# Parameters: none
+################################################################################
 sub main {
     my $action = $cgi->param('action') || '';
     my $method = $cgi->request_method() || 'GET';
@@ -1388,9 +1447,15 @@ sub main {
 # close it (or let process exit close it). Every query is parameterized.
 # =============================================================================
 
+################################################################################
+# db_connect
+#
 # Open a connection to the user database. Returns $dbh or undef on failure;
 # on failure the caller shows a "server misconfiguration" style message
 # rather than leaking connection details.
+#
+# Parameters: none
+################################################################################
 sub db_connect {
     my $dsn = "dbi:Pg:dbname=$DBinst;host=$DBhost";
     my $dbh = DBI->connect($dsn, $DBuser, $DBpass,
@@ -1420,19 +1485,39 @@ our $RUN_MODE = 'CGI';
 # the audit log (logged as "***" instead). Password changes for USERS never
 # reach audit() at all.
 my %AUDIT_SECRET_KEY = map { $_ => 1 } qw(pass enable snmp_community community);
+################################################################################
+# audit_is_secret
+#
+# Parameters:
+#   $k
+################################################################################
 sub audit_is_secret { my ($k) = @_; defined $k && $AUDIT_SECRET_KEY{lc $k} ? 1 : 0; }
+################################################################################
+# audit_redact
+#
+# Parameters:
+#   $field
+#   $val
+################################################################################
 sub audit_redact {
     my ($field, $val) = @_;
     return $val unless audit_is_secret($field);
     return (defined $val && $val ne '') ? '***' : $val;   # keep empty as empty
 }
 
+################################################################################
+# audit
+#
 # Append one row to the audit log. Fields: action (required) plus optional
 # object_type, object_id, field, old_value, new_value, detail, username, ip.
 # username/ip default to the current session user and REMOTE_ADDR. Secret
 # fields are redacted here as a backstop. Fail-open: never dies; on any error
 # (including the audit tables not existing) it sets $AUDIT_WARNING and returns.
 # A dbh may be passed; otherwise a short-lived one is opened.
+#
+# Parameters:
+#   %f
+################################################################################
 sub audit {
     my (%f) = @_;
     return unless defined $f{action} && $f{action} ne '';
@@ -1471,11 +1556,21 @@ sub audit {
     return $ok ? 1 : 0;
 }
 
+################################################################################
+# audit_device_table_changes
+#
 # Diff the device table before/after a save and write one audit row per change:
 # a device added, removed, or an option changed (field + old -> new, secrets
 # redacted). $action is 'save_table' or 'bulk_save'. $old/$new are the record
 # arrayrefs (parse_device_table / reconstructed). default: records are keyed by
 # "default:<model>"; devices by their id. Best-effort, fail-open via audit().
+#
+# Parameters:
+#   $action
+#   $old
+#   $new
+#   $user
+################################################################################
 sub audit_device_table_changes {
     my ($action, $old, $new, $user) = @_;
     my $dbh = db_connect();
@@ -1534,6 +1629,9 @@ sub audit_device_table_changes {
     $dbh->disconnect;
 }
 
+################################################################################
+# app_state_get
+#
 # app_state key/value helpers (mutable; used for the device-table change
 # tripwire token). Best-effort; return undef on any error.
 # app_state read/write. On a database error these return a failure indicator
@@ -1542,6 +1640,11 @@ sub audit_device_table_changes {
 # with no clue (e.g. if app_state is missing or not granted to the web user).
 # app_state_get returns (undef, 1) on success with no row, ($value, 1) with a
 # row, or (undef, 0) on error. app_state_set returns 1/0 for ok/error.
+#
+# Parameters:
+#   $dbh
+#   $key
+################################################################################
 sub app_state_get {
     my ($dbh, $key) = @_;
     return (undef, 0) unless $dbh;
@@ -1560,6 +1663,15 @@ sub app_state_get {
     $sth->finish;
     return ($r[0], 1);
 }
+################################################################################
+# app_state_set
+#
+# Parameters:
+#   $dbh
+#   $key
+#   $value
+#   $username
+################################################################################
 sub app_state_set {
     my ($dbh, $key, $value, $username) = @_;
     return 0 unless $dbh;
@@ -1582,6 +1694,9 @@ sub app_state_set {
     return 1;
 }
 
+################################################################################
+# _token_md5
+#
 # Device-table external-change tripwire. Compares the table's current staleness
 # token (device_table_mtime() = hires-mtime:size:md5) against the last token the
 # app itself recorded (in app_state). If the CONTENT hash differs, the file was
@@ -1591,8 +1706,19 @@ sub app_state_set {
 # mtime touch (same md5) is ignored. Called on login and when the editor opens.
 # audit_record_device_table_token() is called by the app's own writers so a
 # normal save never trips this.
+#
+# Parameters:
+#   $t
+################################################################################
 sub _token_md5 { my ($t) = @_; return (defined $t && $t =~ /:([0-9a-f]{32})$/) ? $1 : ''; }
 
+################################################################################
+# audit_record_device_table_token
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub audit_record_device_table_token {
     my ($dbh, $username) = @_;
     my $own = 0; if (!$dbh) { $dbh = db_connect(); $own = 1; }
@@ -1602,6 +1728,12 @@ sub audit_record_device_table_token {
     $dbh->disconnect if $own;
 }
 
+################################################################################
+# audit_check_device_table_change
+#
+# Parameters:
+#   $username
+################################################################################
 sub audit_check_device_table_change {
     my ($username) = @_;
     my $dbh = db_connect();
@@ -1644,9 +1776,17 @@ sub audit_check_device_table_change {
     $dbh->disconnect;
 }
 
+################################################################################
+# db_get_user
+#
 # Fetch one user's row as a hashref
 # { username, pass_hash, edit_device_table, admin_function } or undef if
 # not found / on error.
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub db_get_user {
     my ($dbh, $username) = @_;
     my $row = $dbh->selectrow_hashref(
@@ -1669,9 +1809,18 @@ use constant LOGIN_MAX_FAILURES => 5;      # failures within the window before t
 use constant LOGIN_WINDOW_SECS  => 900;    # 15 min: failures older than this don't count
 use constant LOGIN_COOLDOWN_SECS=> 900;    # 15 min: how long a tripped key stays throttled
 
+################################################################################
+# _login_fail_state
+#
 # Return the number of failures for ($kind,$key) within the window, and the
 # epoch of the most recent one, or (0, undef) on any error (fail-open on DB
 # trouble so a database hiccup never locks everyone out).
+#
+# Parameters:
+#   $dbh
+#   $kind
+#   $key
+################################################################################
 sub _login_fail_state {
     my ($dbh, $kind, $key) = @_;
     return (0, undef) unless $dbh;
@@ -1689,8 +1838,17 @@ sub _login_fail_state {
     return ($n || 0, $last);
 }
 
+################################################################################
+# login_is_throttled
+#
 # Is this ($kind,$key) currently throttled? True once failures have reached the
 # threshold and the cooldown since the last failure has not yet elapsed.
+#
+# Parameters:
+#   $dbh
+#   $kind
+#   $key
+################################################################################
 sub login_is_throttled {
     my ($dbh, $kind, $key) = @_;
     return 0 unless defined $key && $key ne '';
@@ -1699,8 +1857,17 @@ sub login_is_throttled {
     return (time() - $last) <= LOGIN_COOLDOWN_SECS ? 1 : 0;
 }
 
+################################################################################
+# login_record_failure
+#
 # Record one failed attempt for ($kind,$key): increment within the window, or
 # restart the count if the previous failure is outside the window. Best-effort.
+#
+# Parameters:
+#   $dbh
+#   $kind
+#   $key
+################################################################################
 sub login_record_failure {
     my ($dbh, $kind, $key) = @_;
     return unless $dbh && defined $key && $key ne '';
@@ -1743,7 +1910,15 @@ sub login_record_failure {
 # One free-text note per device-id (device_notes.device_id is UNIQUE). The
 # "keep" flag protects a note from the orphaned-notes cleanup.
 
+################################################################################
+# db_note_get
+#
 # Fetch a device's note. Returns a hashref {note, keep, updated} or undef.
+#
+# Parameters:
+#   $dbh
+#   $dev
+################################################################################
 sub db_note_get {
     my ($dbh, $dev) = @_;
     return undef unless $dbh && defined $dev && $dev ne '';
@@ -1755,9 +1930,19 @@ sub db_note_get {
     return $row;
 }
 
+################################################################################
+# db_note_save
+#
 # Upsert a device's note (text + keep). An empty note with keep off deletes the
 # row (no point keeping a blank, unflagged note). Returns 1/0. UPSERT without
 # 8.2 ON CONFLICT: UPDATE, else INSERT; INSERT race falls back to UPDATE.
+#
+# Parameters:
+#   $dbh
+#   $dev
+#   $note
+#   $keep
+################################################################################
 sub db_note_save {
     my ($dbh, $dev, $note, $keep) = @_;
     return 0 unless $dbh && defined $dev && $dev ne '';
@@ -1796,7 +1981,15 @@ sub db_note_save {
                      : ((defined $upd2 && $upd2 ne '0E0') ? 1 : 0);
 }
 
+################################################################################
+# db_note_delete
+#
 # Delete one device's note outright. Returns 1/0.
+#
+# Parameters:
+#   $dbh
+#   $dev
+################################################################################
 sub db_note_delete {
     my ($dbh, $dev) = @_;
     return 0 unless $dbh && defined $dev && $dev ne '';
@@ -1804,8 +1997,15 @@ sub db_note_delete {
     return $ok ? 1 : 0;
 }
 
+################################################################################
+# db_notes_present
+#
 # Set of device-ids that currently have a (non-empty) note, for the filled/outline
 # icon state. Returns a hashref { device_id => 1 }.
+#
+# Parameters:
+#   $dbh
+################################################################################
 sub db_notes_present {
     my ($dbh) = @_;
     return {} unless $dbh;
@@ -1814,6 +2014,14 @@ sub db_notes_present {
     return { map { $_ => 1 } @$rows };
 }
 
+################################################################################
+# login_clear
+#
+# Parameters:
+#   $dbh
+#   $username
+#   $ip
+################################################################################
 sub login_clear {
     my ($dbh, $username, $ip) = @_;
     return unless $dbh;
@@ -1824,9 +2032,16 @@ sub login_clear {
     };
 }
 
+################################################################################
+# db_login_attempts
+#
 # All current login_attempts rows, newest failure first, for the admin viewer.
 # Each row: kind ('ip'|'user'), keyval, failures, last_fail (formatted string),
 # age_secs (seconds since last_fail). Empty list on error.
+#
+# Parameters:
+#   $dbh
+################################################################################
 sub db_login_attempts {
     my ($dbh) = @_;
     return [] unless $dbh;
@@ -1841,7 +2056,14 @@ sub db_login_attempts {
     return $rows || [];
 }
 
+################################################################################
+# db_login_attempts_clear_all
+#
 # Remove every login_attempts row (admin "Clear all" in the viewer).
+#
+# Parameters:
+#   $dbh
+################################################################################
 sub db_login_attempts_clear_all {
     my ($dbh) = @_;
     return 0 unless $dbh;
@@ -1849,7 +2071,16 @@ sub db_login_attempts_clear_all {
     return $ok ? 1 : 0;
 }
 
+################################################################################
+# db_set_email
+#
 # --- C: set a user's email (nullable). Best-effort; returns 1/0. ------------
+#
+# Parameters:
+#   $dbh
+#   $username
+#   $email
+################################################################################
 sub db_set_email {
     my ($dbh, $username, $email) = @_;
     return 0 unless $dbh;
@@ -1859,8 +2090,16 @@ sub db_set_email {
     return $ok ? 1 : 0;
 }
 
+################################################################################
+# db_user_by_email
+#
 # Find a user by email (lowercased exact match), for the "forgot password"
 # lookup when the identifier is an address. Returns the username or undef.
+#
+# Parameters:
+#   $dbh
+#   $email
+################################################################################
 sub db_user_by_email {
     my ($dbh, $email) = @_;
     return undef unless $dbh && defined $email && $email ne '';
@@ -1871,6 +2110,9 @@ sub db_user_by_email {
     return $u;
 }
 
+################################################################################
+# send_mail
+#
 # --- D: email sending ------------------------------------------------------
 # Send one plain-text email via Net::SMTP. Honours the email config section:
 # SMTP_HOST/PORT, SMTP_SECURITY (starttls|ssl|none), and SMTP AUTH when
@@ -1878,6 +2120,10 @@ sub db_user_by_email {
 # (0, "reason") on failure. Never dies -- all errors are caught and returned
 # so a mail problem degrades gracefully. The caller decides what to tell the
 # user (and must NOT leak whether a given address exists).
+#
+# Parameters:
+#   %a
+################################################################################
 sub send_mail {
     my (%a) = @_;  # to, subject, body
     return (0, 'email is disabled')          unless $EMAIL;
@@ -1907,13 +2153,48 @@ sub send_mail {
         $smtp->to($a{to})                  or die "RCPT TO rejected\n";
         $smtp->data()                      or die "DATA rejected\n";
         my $subj = defined $a{subject} ? $a{subject} : '';
+        my $text = defined $a{body} ? $a{body} : '';
         $smtp->datasend("From: $EMAIL_FROM\r\n");
         $smtp->datasend("To: $a{to}\r\n");
         $smtp->datasend("Subject: $subj\r\n");
         $smtp->datasend("MIME-Version: 1.0\r\n");
-        $smtp->datasend("Content-Type: text/plain; charset=UTF-8\r\n");
-        $smtp->datasend("\r\n");
-        $smtp->datasend((defined $a{body} ? $a{body} : '') . "\r\n");
+        if (defined $a{html} && $a{html} ne '') {
+            # multipart/related wrapping a multipart/alternative (text + HTML)
+            # plus the logo as a CID-referenced image. Desktop clients
+            # (Thunderbird, Outlook) block data: URIs but DO show cid: images
+            # inline, so the HTML references <img src="cid:fcwlogo">.
+            my $rb = 'fcwR-' . unpack('H*', eval { secure_random_bytes(12) } || pack('N', time()));
+            my $ab = 'fcwA-' . unpack('H*', eval { secure_random_bytes(12) } || pack('N', time() + 1));
+            $smtp->datasend(qq{Content-Type: multipart/related; boundary="$rb"\r\n});
+            $smtp->datasend("\r\n");
+            # 1) the alternative (text + html)
+            $smtp->datasend("--$rb\r\n");
+            $smtp->datasend(qq{Content-Type: multipart/alternative; boundary="$ab"\r\n\r\n});
+            $smtp->datasend("--$ab\r\n");
+            $smtp->datasend("Content-Type: text/plain; charset=UTF-8\r\n");
+            $smtp->datasend("Content-Transfer-Encoding: 8bit\r\n\r\n");
+            $smtp->datasend($text . "\r\n");
+            $smtp->datasend("--$ab\r\n");
+            $smtp->datasend("Content-Type: text/html; charset=UTF-8\r\n");
+            $smtp->datasend("Content-Transfer-Encoding: 8bit\r\n\r\n");
+            $smtp->datasend($a{html} . "\r\n");
+            $smtp->datasend("--$ab--\r\n");
+            # 2) the inline logo (base64 PNG, Content-ID matches cid:fcwlogo)
+            $smtp->datasend("--$rb\r\n");
+            $smtp->datasend("Content-Type: image/png\r\n");
+            $smtp->datasend("Content-Transfer-Encoding: base64\r\n");
+            $smtp->datasend("Content-ID: <fcwlogo>\r\n");
+            $smtp->datasend("Content-Disposition: inline; filename=\"logo.png\"\r\n\r\n");
+            # $LOGO_BASE64 is already base64; emit it in <=76-char lines.
+            (my $b64 = $LOGO_BASE64) =~ s/\s+//g;
+            $b64 =~ s/(.{1,76})/$1\r\n/g;
+            $smtp->datasend($b64);
+            $smtp->datasend("--$rb--\r\n");
+        } else {
+            $smtp->datasend("Content-Type: text/plain; charset=UTF-8\r\n");
+            $smtp->datasend("\r\n");
+            $smtp->datasend($text . "\r\n");
+        }
         $smtp->dataend()                   or die "message not accepted\n";
         $smtp->quit();
         1;
@@ -1933,14 +2214,28 @@ use constant RESET_TOKEN_TTL => 1800;   # 30 minutes
 # V2: minimum wall time for a forgot-password request (timing-channel floor).
 use constant RESET_FLOOR_SECS => 0.5;
 
+################################################################################
+# _reset_token_hash
+#
 # Hash a token for storage/lookup with SHA-256 (Digest::SHA, core Perl). The
 # token itself is 128 bits of urandom; the hash only has to stop a DB read from
 # yielding a usable token. (1.60 used MD5; the switch invalidates any token
 # issued before the upgrade -- harmless, they expire within 30 minutes.)
+#
+# Parameters: reads @_ directly
+################################################################################
 sub _reset_token_hash { require Digest::SHA; return Digest::SHA::sha256_hex($_[0]); }
 
+################################################################################
+# reset_token_create
+#
 # Create a reset token for $username: returns the clear token (for the email)
 # or undef on error. Stores only its hash with an expiry.
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub reset_token_create {
     my ($dbh, $username) = @_;
     return undef unless $dbh;
@@ -1959,8 +2254,16 @@ sub reset_token_create {
     return $ok ? $tok : undef;
 }
 
+################################################################################
+# reset_token_user
+#
 # Resolve a clear token to its username if it is valid (exists, not used, not
 # expired). Returns the username or undef. Does NOT consume it.
+#
+# Parameters:
+#   $dbh
+#   $tok
+################################################################################
 sub reset_token_user {
     my ($dbh, $tok) = @_;
     return undef unless $dbh && defined $tok && $tok =~ /^[0-9a-f]{32}$/;
@@ -1973,7 +2276,15 @@ sub reset_token_user {
     return $u;
 }
 
+################################################################################
+# reset_token_consume
+#
 # Mark a token used (single-use). Best-effort.
+#
+# Parameters:
+#   $dbh
+#   $tok
+################################################################################
 sub reset_token_consume {
     my ($dbh, $tok) = @_;
     return unless $dbh && defined $tok;
@@ -1981,8 +2292,16 @@ sub reset_token_consume {
                     undef, _reset_token_hash($tok)); };
 }
 
+################################################################################
+# reset_token_invalidate_user
+#
 # Invalidate all outstanding reset tokens for a user (called whenever their
 # password changes, so a pending link can't be used afterwards).
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub reset_token_invalidate_user {
     my ($dbh, $username) = @_;
     return unless $dbh && defined $username;
@@ -1990,8 +2309,15 @@ sub reset_token_invalidate_user {
                     undef, $username); };
 }
 
+################################################################################
+# db_all_users
+#
 # All users, ordered by username, as an arrayref of hashrefs. Empty list on
 # error (callers treat that the same as "no users").
+#
+# Parameters:
+#   $dbh
+################################################################################
 sub db_all_users {
     my ($dbh) = @_;
     my $rows = $dbh->selectall_arrayref(
@@ -2001,7 +2327,15 @@ sub db_all_users {
     return $rows || [];
 }
 
+################################################################################
+# db_user_exists
+#
 # True if the user exists.
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub db_user_exists {
     my ($dbh, $username) = @_;
     my ($x) = $dbh->selectrow_array(
@@ -2009,7 +2343,18 @@ sub db_user_exists {
     return $x ? 1 : 0;
 }
 
+################################################################################
+# db_add_user
+#
 # Insert a new user. Returns (1) on success or (0, $errmsg) on failure.
+#
+# Parameters:
+#   $dbh
+#   $username
+#   $hash
+#   $edit
+#   $admin
+################################################################################
 sub db_add_user {
     my ($dbh, $username, $hash, $edit, $admin) = @_;
     my $ok = $dbh->do(
@@ -2018,7 +2363,16 @@ sub db_add_user {
     return $ok ? (1) : (0, $dbh->errstr);
 }
 
+################################################################################
+# db_set_password
+#
 # Update a user's password hash. Returns (1) or (0, $errmsg).
+#
+# Parameters:
+#   $dbh
+#   $username
+#   $hash
+################################################################################
 sub db_set_password {
     my ($dbh, $username, $hash) = @_;
     my $ok = $dbh->do('UPDATE users SET pass_hash = ? WHERE username = ?',
@@ -2026,7 +2380,16 @@ sub db_set_password {
     return $ok ? (1) : (0, $dbh->errstr);
 }
 
+################################################################################
+# db_set_edit_flag
+#
 # Update a user's edit-device-table flag. Returns (1) or (0, $errmsg).
+#
+# Parameters:
+#   $dbh
+#   $username
+#   $edit
+################################################################################
 sub db_set_edit_flag {
     my ($dbh, $username, $edit) = @_;
     my $ok = $dbh->do('UPDATE users SET edit_device_table = ? WHERE username = ?',
@@ -2034,7 +2397,16 @@ sub db_set_edit_flag {
     return $ok ? (1) : (0, $dbh->errstr);
 }
 
+################################################################################
+# db_set_admin_flag
+#
 # Update a user's admin_function flag. Returns (1) or (0, $errmsg).
+#
+# Parameters:
+#   $dbh
+#   $username
+#   $admin
+################################################################################
 sub db_set_admin_flag {
     my ($dbh, $username, $admin) = @_;
     my $ok = $dbh->do('UPDATE users SET admin_function = ? WHERE username = ?',
@@ -2042,17 +2414,33 @@ sub db_set_admin_flag {
     return $ok ? (1) : (0, $dbh->errstr);
 }
 
+################################################################################
+# db_delete_user
+#
 # Delete a user. Returns (1) or (0, $errmsg).
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub db_delete_user {
     my ($dbh, $username) = @_;
     my $ok = $dbh->do('DELETE FROM users WHERE username = ?', undef, $username);
     return $ok ? (1) : (0, $dbh->errstr);
 }
 
+################################################################################
+# user_is_admin
+#
 # True if $username has full admin powers: the built-in $PROTECTED_USER
 # account always does; any other user does if its admin_function flag is
 # set. A user with admin_function behaves exactly like the built-in admin
 # (user management, Tools, Setup). Takes an open $dbh.
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub user_is_admin {
     my ($dbh, $username) = @_;
     return 1 if defined $username && $username eq $PROTECTED_USER;
@@ -2061,9 +2449,17 @@ sub user_is_admin {
     return ($u && $u->{admin_function}) ? 1 : 0;
 }
 
+################################################################################
+# user_may_edit_table
+#
 # True if $username is allowed to view/edit the device table: any admin
 # (built-in or admin_function) always is; otherwise it depends on the
 # per-user edit_device_table flag. Takes an open $dbh.
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub user_may_edit_table {
     my ($dbh, $username) = @_;
     return 1 if user_is_admin($dbh, $username);
@@ -2093,6 +2489,12 @@ our %SITE_CTX;
 # model => { repository => <val>, template_dir => <val>, on_fetch_run => <val> }
 # Populated by model_defaults_init() from the parsed records.
 our %MODEL_DEFAULTS;
+################################################################################
+# model_defaults_init
+#
+# Parameters:
+#   $records
+################################################################################
 sub model_defaults_init {
     my ($records) = @_;
     %MODEL_DEFAULTS = ();
@@ -2110,11 +2512,20 @@ sub model_defaults_init {
     }
 }
 
+################################################################################
+# model_default_alias
+#
 # The model default for a device option, as an $alias (for comparison), or ''.
 # $dkind is the allow-list kind ('repository'|'template'|'fetch_run'); for
 # on_fetch_run only the directory part is taken. template_dir has no per-model
 # default line (it is the shared default template dir), so it is handled by the
 # caller via template_default_dir().
+#
+# Parameters:
+#   $model
+#   $key
+#   $dkind
+################################################################################
 sub model_default_alias {
     my ($model, $key, $dkind) = @_;
     my $raw = (defined $model && defined $MODEL_DEFAULTS{$model})
@@ -2125,6 +2536,13 @@ sub model_default_alias {
     my $a = alias_for_value($dkind, $raw);
     return defined $a ? $a : $raw;
 }
+################################################################################
+# site_ctx_init
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub site_ctx_init {
     my ($dbh, $username) = @_;
     my $acc = user_site_access($dbh, $username);
@@ -2142,6 +2560,12 @@ sub site_ctx_init {
 # All sites as an arrayref of { id, code, description }, ordered (id 0 first,
 # then by code). Cached per request.
 
+################################################################################
+# db_all_sites
+#
+# Parameters:
+#   $dbh
+################################################################################
 sub db_all_sites {
     my ($dbh) = @_;
     return $_sites_cache if defined $_sites_cache;
@@ -2157,6 +2581,13 @@ sub db_all_sites {
 # The set of site CODES a user may access (as a hashref { code => 1 }), plus a
 # flag. Cached per (username) per request. admin / holding site 0 => unrestricted.
 
+################################################################################
+# user_site_access
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub user_site_access {
     my ($dbh, $username) = @_;
     return $_user_sites_cache{$username} if exists $_user_sites_cache{$username};
@@ -2180,6 +2611,13 @@ sub user_site_access {
     return \%acc;
 }
 
+################################################################################
+# user_is_unrestricted
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub user_is_unrestricted {
     my ($dbh, $username) = @_;
     return user_site_access($dbh, $username)->{unrestricted} ? 1 : 0;
@@ -2187,11 +2625,24 @@ sub user_is_unrestricted {
 
 # --- site management DB helpers ------------------------------------------
 
+################################################################################
+# db_site_by_id
+#
+# Parameters:
+#   $dbh
+#   $id
+################################################################################
 sub db_site_by_id {
     my ($dbh, $id) = @_;
     return $dbh->selectrow_hashref('SELECT id, code, description FROM sites WHERE id = ?',
                                    undef, $id);
 }
+################################################################################
+# db_site_code_in_use_by_device
+#
+# Parameters:
+#   $code
+################################################################################
 sub db_site_code_in_use_by_device {
     my ($code) = @_;    # device table is the source of truth for device usage
     my ($content, $err) = slurp_device_table();
@@ -2202,14 +2653,30 @@ sub db_site_code_in_use_by_device {
     }
     return 0;
 }
+################################################################################
+# db_site_assigned_to_user
+#
+# Parameters:
+#   $dbh
+#   $id
+################################################################################
 sub db_site_assigned_to_user {
     my ($dbh, $id) = @_;
     my ($n) = $dbh->selectrow_array('SELECT COUNT(*) FROM user_sites WHERE site_id = ?', undef, $id);
     return $n ? 1 : 0;
 }
+################################################################################
+# db_add_site
+#
 # Add a site. Returns (1) on success or (0, $error) on failure. Robust against a
 # missing sites_id_seq (a partial upgrade): it is created on demand, and the id
 # is derived from MAX(id)+1 as a fallback so adding a site always works.
+#
+# Parameters:
+#   $dbh
+#   $code
+#   $desc
+################################################################################
 sub db_add_site {
     my ($dbh, $code, $desc) = @_;
     # Ensure the sequence exists (ignore error if it already does).
@@ -2228,25 +2695,58 @@ sub db_add_site {
                       undef, $id, $code, defined $desc ? $desc : '');
     return $rc ? (1) : (0, 'INSERT failed: ' . ($dbh->errstr // 'unknown error'));
 }
+################################################################################
+# db_update_site
+#
+# Parameters:
+#   $dbh
+#   $id
+#   $code
+#   $desc
+################################################################################
 sub db_update_site {
     my ($dbh, $id, $code, $desc) = @_;
     my $rc = $dbh->do('UPDATE sites SET code = ?, description = ? WHERE id = ?',
                       undef, $code, defined $desc ? $desc : '', $id);
     return $rc ? (1) : (0, $dbh->errstr // 'UPDATE failed');
 }
+################################################################################
+# db_delete_site
+#
+# Parameters:
+#   $dbh
+#   $id
+################################################################################
 sub db_delete_site {
     my ($dbh, $id) = @_;
     my $rc = $dbh->do('DELETE FROM sites WHERE id = ?', undef, $id);
     return $rc ? (1) : (0, $dbh->errstr // 'DELETE failed');
 }
+################################################################################
+# db_user_site_ids
+#
 # The site_ids assigned to a user (arrayref).
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub db_user_site_ids {
     my ($dbh, $username) = @_;
     my $rows = $dbh->selectcol_arrayref('SELECT site_id FROM user_sites WHERE username = ?',
                                         undef, $username);
     return $rows || [];
 }
+################################################################################
+# db_set_user_sites
+#
 # Replace a user's site assignments (transaction). admin always keeps site 0.
+#
+# Parameters:
+#   $dbh
+#   $username
+#   $ids
+################################################################################
 sub db_set_user_sites {
     my ($dbh, $username, $ids) = @_;
     my %want = map { $_ => 1 } @$ids;
@@ -2263,8 +2763,16 @@ sub db_set_user_sites {
     return 1;
 }
 
+################################################################################
+# user_may_download_full_report
+#
 # May this user download the full (unfiltered) report HTML? Unrestricted users
 # always may; a site-limited user needs the download_full_report flag.
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub user_may_download_full_report {
     my ($dbh, $username) = @_;
     return 1 if user_is_unrestricted($dbh, $username);
@@ -2272,10 +2780,18 @@ sub user_may_download_full_report {
     return ($u && $u->{download_full_report}) ? 1 : 0;
 }
 
+################################################################################
+# user_may_download_full_config
+#
 # May this user see UNMASKED device configs -- i.e. download a backup or copy a
 # config unmasked to the clipboard? Unrestricted users always may; a restricted
 # user needs the download_full_config right. The masked on-screen view is shown
 # to everyone regardless; this gates only the unmasked content.
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
 sub user_may_download_full_config {
     my ($dbh, $username) = @_;
     return 1 if user_is_unrestricted($dbh, $username);
@@ -2283,8 +2799,15 @@ sub user_may_download_full_config {
     return ($u && $u->{download_full_config}) ? 1 : 0;
 }
 
+################################################################################
+# device_site_code
+#
 # The site code stored on a device record (its site= option), or the reserved
 # "all sites" sentinel when none is set (an untagged device belongs to site 0).
+#
+# Parameters:
+#   $rec
+################################################################################
 sub device_site_code {
     my ($rec) = @_;
     for my $pair (@{ $rec->{opts} || [] }) {
@@ -2294,7 +2817,16 @@ sub device_site_code {
     return SITE_ALL_CODE;   # untagged => "any site" (id 0) => unrestricted-only
 }
 
+################################################################################
+# device_visible_to
+#
 # Is a device (by its record) visible to this user?
+#
+# Parameters:
+#   $dbh
+#   $username
+#   $rec
+################################################################################
 sub device_visible_to {
     my ($dbh, $username, $rec) = @_;
     my $acc = user_site_access($dbh, $username);
@@ -2304,11 +2836,19 @@ sub device_visible_to {
     return $acc->{codes}{$code} ? 1 : 0;
 }
 
+################################################################################
+# device_accessible
+#
 # Central guard for a per-device action reached by URL (view/compare/download a
 # backup, Backup Now, ...): is $devid visible to $username? Looks the device up
 # in the table and applies the site filter. An unrestricted user always passes;
 # a device that does not exist returns false. Use this before acting on any
 # ?dev=... parameter so the list filter cannot be bypassed by typing a URL.
+#
+# Parameters:
+#   $username
+#   $devid
+################################################################################
 sub device_accessible {
     my ($username, $devid) = @_;
     return 0 unless defined $devid && $devid ne '';
@@ -2326,8 +2866,16 @@ sub device_accessible {
     return 0;   # device not found
 }
 
+################################################################################
+# deny_device
+#
 # Emit a 403-style "not allowed / not found" page and return true when a
 # per-device action must be refused; callers do: return if deny_device(...).
+#
+# Parameters:
+#   $user
+#   $devid
+################################################################################
 sub deny_device {
     my ($user, $devid) = @_;
     return 0 if device_accessible($user, $devid);
@@ -2338,8 +2886,16 @@ sub deny_device {
     return 1;
 }
 
+################################################################################
+# device_visible_to_acc
+#
 # Visibility using a pre-fetched access hashref (from user_site_access), to
 # avoid a DB round-trip per device in a loop.
+#
+# Parameters:
+#   $acc
+#   $rec
+################################################################################
 sub device_visible_to_acc {
     my ($acc, $rec) = @_;
     return 1 if $acc->{unrestricted};
@@ -2348,8 +2904,15 @@ sub device_visible_to_acc {
     return $acc->{codes}{$code} ? 1 : 0;
 }
 
+################################################################################
+# known_site_codes
+#
 # A set { code => 1 } of all known site codes (excluding the '*' sentinel,
 # which is only ever the implicit untagged value, never written as site=*).
+#
+# Parameters:
+#   $dbh
+################################################################################
 sub known_site_codes {
     my ($dbh) = @_;
     my %c;
@@ -2360,10 +2923,19 @@ sub known_site_codes {
     return \%c;
 }
 
+################################################################################
+# site_table_errors
+#
 # Validation errors for the device table's site= tags and device-id uniqueness.
 # Returns a list of human-readable messages. Used both at editor load (shown as
 # a red banner) and at save (to block an invalid write). A site= value that is
 # not a known code is reported; so is a duplicate device-id.
+#
+# Parameters:
+#   $dbh
+#   $records
+#   $require_site
+################################################################################
 sub site_table_errors {
     my ($dbh, $records, $require_site) = @_;
     my @err;
@@ -2392,6 +2964,9 @@ sub site_table_errors {
     return @err;
 }
 
+################################################################################
+# verify_password
+#
 # Verify a plaintext password against an htpasswd hash. Supports the
 # salted formats commonly produced by `htpasswd`:
 #   $apr1$salt$hash       -- htpasswd default on many systems (Apache MD5)
@@ -2400,6 +2975,11 @@ sub site_table_errors {
 # The unsalted {SHA} format (htpasswd -s) is deliberately NOT accepted: it
 # is trivially brute-forced if the user table leaks. bcrypt ($2y$) is NOT
 # supported without an extra CPAN module -- see README.
+#
+# Parameters:
+#   $plain
+#   $hash
+################################################################################
 sub verify_password {
     my ($plain, $hash) = @_;
     return 0 unless defined $hash && length $hash;
@@ -2428,10 +3008,19 @@ sub verify_password {
     }
 }
 
+################################################################################
+# md5_crypt
+#
 # Pure-Perl implementation of the MD5-crypt algorithm (PHK's FreeBSD/Apache
 # MD5 crypt). Used for both "$1$" and "$apr1$" hashes -- identical
 # algorithm, only the magic string differs. Verified against
 # `openssl passwd -apr1` / `openssl passwd -1` reference output.
+#
+# Parameters:
+#   $password
+#   $existing_hash
+#   $magic
+################################################################################
 sub md5_crypt {
     my ($password, $existing_hash, $magic) = @_;
 
@@ -2533,12 +3122,19 @@ use constant CONFIG_MASK_BANNER =>
     . "# Note: Unencrypted secrets are masked on a best effort base. #\n"
     . "# ------------------------------------------------------------#\n";
 
+################################################################################
+# secure_random_bytes
+#
 # Cryptographically secure random bytes from the OS RNG (/dev/urandom). Loops
 # until the full count is read (guards against a short read), and DIES rather
 # than fall back to a weak PRNG: /dev/urandom is always available on the
 # supported platforms (Linux, AIX), so a failure here means a broken system and
 # issuing a weak session id / token / salt would be worse than failing. Callers
 # that must not die (reset-token creation) wrap this in eval.
+#
+# Parameters:
+#   $n
+################################################################################
 sub secure_random_bytes {
     my ($n) = @_;
     die "secure_random_bytes: bad length" unless defined $n && $n =~ /^\d+$/ && $n > 0;
@@ -2553,10 +3149,17 @@ sub secure_random_bytes {
     return $buf;
 }
 
+################################################################################
+# password_hash
+#
 # Hash a new/changed password for storage. Prefers bcrypt ($2b$) when
 # Crypt::Bcrypt is available, else falls back to the legacy Apache MD5 ($apr1$).
 # verify_password() reads either back. Used by every password set/change/add
 # and by the login-time transparent upgrade.
+#
+# Parameters:
+#   $password
+################################################################################
 sub password_hash {
     my ($password) = @_;
     if (bcrypt_available()) {
@@ -2566,8 +3169,14 @@ sub password_hash {
     return apr1_hash($password);
 }
 
+################################################################################
+# login_jitter
+#
 # A small random delay (50-100 ms) used on login failure paths instead of a
 # multi-second sleep: it flattens timing without tying up a FastCGI worker.
+#
+# Parameters: none
+################################################################################
 sub login_jitter { select(undef, undef, undef, 0.05 + rand(0.05)); }
 
 # A hash to verify against when the username does NOT exist, so that path costs
@@ -2583,10 +3192,20 @@ sub login_jitter { select(undef, undef, undef, 0.05 + rand(0.05)); }
     }
 }
 
+################################################################################
+# hash_is_preferred
+#
 # True if $hash is already in the preferred (bcrypt) format, so the login-time
 # upgrade knows whether a re-hash is needed.
+#
+# Parameters:
+#   $h
+################################################################################
 sub hash_is_preferred { my ($h) = @_; return defined $h && $h =~ /^\$2[aby]?\$/ ? 1 : 0; }
 
+################################################################################
+# password_policy_error
+#
 # Validate a new password against the configured policy. Returns undef if the
 # password is acceptable, or a single human-readable reason string if not.
 # $username (optional) lets it reject a password equal to the account name.
@@ -2599,6 +3218,11 @@ sub hash_is_preferred { my ($h) = @_; return defined $h && $h =~ /^\$2[aby]?\$/ 
 #   * PASSWORD_MIN_CLASSES  (at least N of the 4 classes present)
 #   * must differ from DEFAULT_PASSWORD and from the username (case-insensitive)
 # "special" is any non-alphanumeric character.
+#
+# Parameters:
+#   $pw
+#   $username
+################################################################################
 sub password_policy_error {
     my ($pw, $username) = @_;
     $pw = '' unless defined $pw;
@@ -2638,8 +3262,14 @@ sub password_policy_error {
     return undef;
 }
 
+################################################################################
+# password_policy_hint
+#
 # One-line human summary of the active password rules, for display on the
 # password forms. Returns '' if only the default length applies.
+#
+# Parameters: none
+################################################################################
 sub password_policy_hint {
     my @r;
     push @r, "$MIN_PASSWORD_LENGTH-"
@@ -2655,6 +3285,12 @@ sub password_policy_hint {
          . '. Must differ from your username and the default password.';
 }
 
+################################################################################
+# apr1_hash
+#
+# Parameters:
+#   $password
+################################################################################
 sub apr1_hash {
     my ($password) = @_;
     my @itoa64 = ('.', '/', 0 .. 9, 'A' .. 'Z', 'a' .. 'z');
@@ -2664,10 +3300,22 @@ sub apr1_hash {
     return md5_crypt($password, "\$apr1\$$salt\$", '$apr1$');
 }
 
+################################################################################
+# new_session_id
+#
+# Parameters: none
+################################################################################
 sub new_session_id {
     return unpack('H*', secure_random_bytes(24));
 }
 
+################################################################################
+# create_session
+#
+# Parameters:
+#   $username
+#   $pw_warn
+################################################################################
 sub create_session {
     my ($username, $pw_warn) = @_;
     my $sid = new_session_id();
@@ -2698,11 +3346,18 @@ sub create_session {
     return $sid;
 }
 
+################################################################################
+# load_session
+#
 # Load a session, returning ($username, $csrf_token, $pw_warn) or () if
 # invalid / expired. current_user() below wraps this for the common "just
 # the name" case; handlers that need the token or warning call this or
 # current_session() directly. Old 3-line session files (no warning line)
 # still load, with $pw_warn defaulting to ''.
+#
+# Parameters:
+#   $sid
+################################################################################
 sub load_session {
     my ($sid) = @_;
     return () unless defined $sid && $sid =~ /^[0-9a-f]{48}$/;
@@ -2766,12 +3421,21 @@ sub load_session {
     return ($username, $csrf, $pw_warn);
 }
 
+################################################################################
+# destroy_session
+#
+# Parameters:
+#   $sid
+################################################################################
 sub destroy_session {
     my ($sid) = @_;
     return unless defined $sid && $sid =~ /^[0-9a-f]{48}$/;
     unlink("$SESSION_DIR/$sid");
 }
 
+################################################################################
+# sweep_sessions
+#
 # Opportunistic cleanup of stale session files. Expiry is otherwise lazy -- a
 # file is only removed when ITS id is presented again after expiry (or on
 # logout) -- so an abandoned cookie (browser closed, machine changed) leaves its
@@ -2780,6 +3444,9 @@ sub destroy_session {
 # Unreadable/garbage files are reaped only if older than a grace margin, so a
 # file being written right now (create_session / the idle-slide temp+rename) is
 # never deleted mid-write. Called (throttled) from do_login; all errors ignored.
+#
+# Parameters: none
+################################################################################
 sub sweep_sessions {
     return unless defined $SESSION_DIR && -d $SESSION_DIR;
     # Throttle: a stamp file whose mtime marks the last sweep. Skip if a sweep
@@ -2823,6 +3490,9 @@ sub sweep_sessions {
     }
 }
 
+################################################################################
+# session_cookie
+#
 # Delete every session file belonging to $username, except $keep_sid (pass the
 # freshly-rotated current session's id for a self password change; pass undef to
 # invalidate ALL of the user's sessions, e.g. an admin resetting someone). Used
@@ -2832,6 +3502,10 @@ sub sweep_sessions {
 # The session cookie with the app's standard attributes (HttpOnly, SameSite,
 # path, and Secure when HTTPS_ENABLED). One definition shared by login and by
 # session rotation on password change.
+#
+# Parameters:
+#   $sid
+################################################################################
 sub session_cookie {
     my ($sid) = @_;
     return CGI::Cookie->new(
@@ -2844,6 +3518,13 @@ sub session_cookie {
     );
 }
 
+################################################################################
+# invalidate_user_sessions
+#
+# Parameters:
+#   $username
+#   $keep_sid
+################################################################################
 sub invalidate_user_sessions {
     my ($username, $keep_sid) = @_;
     return unless defined $username && $username ne '';
@@ -2863,6 +3544,11 @@ sub invalidate_user_sessions {
     }
 }
 
+################################################################################
+# current_user
+#
+# Parameters: none
+################################################################################
 sub current_user {
     # current_session() returns ($sid, $username, ...) -- the username is the
     # SECOND element. (A bare "my ($username) = current_session()" would capture
@@ -2871,10 +3557,16 @@ sub current_user {
     return $username;
 }
 
+################################################################################
+# current_session
+#
 # Returns ($sid, $username, $csrf_token, $pw_warn) for the request's
 # session, or () if not logged in. Kept separate from current_user() so the
 # dispatcher and forms can get at the token, sid, and default-password
 # warning without re-reading the cookie each time.
+#
+# Parameters: none
+################################################################################
 sub current_session {
     my %cookies = CGI::Cookie->fetch;
     my $sid = $cookies{$COOKIE_NAME} ? $cookies{$COOKIE_NAME}->value : undef;
@@ -2884,9 +3576,17 @@ sub current_session {
     return ($sid, $username, $csrf, $pw_warn);
 }
 
+################################################################################
+# secure_compare
+#
 # Constant-time string comparison, to avoid leaking how many leading
 # characters of a secret matched via response timing. Used for CSRF token
 # checks; also suitable for comparing password hashes.
+#
+# Parameters:
+#   $a
+#   $b
+################################################################################
 sub secure_compare {
     my ($a, $b) = @_;
     return 0 unless defined $a && defined $b;
@@ -2898,10 +3598,17 @@ sub secure_compare {
     return $diff == 0;
 }
 
+################################################################################
+# csrf_ok
+#
 # True if the request carries a valid CSRF token matching the session's.
 # Every state-changing POST handler calls this first. The token is read
 # from the "csrf" form field and compared (constant-time) against the one
 # stored in the session file at login.
+#
+# Parameters:
+#   $session_csrf
+################################################################################
 sub csrf_ok {
     my ($session_csrf) = @_;
     my $submitted = $cgi->param('csrf');
@@ -2909,17 +3616,29 @@ sub csrf_ok {
         && secure_compare($session_csrf, $submitted);
 }
 
+################################################################################
+# csrf_token
+#
 # The current session's CSRF token (or '' if somehow not logged in), for
 # embedding as a hidden field in state-changing forms. Reads the session
 # fresh; cheap enough (one small file read) and keeps callers from having
 # to thread the token through every function signature.
+#
+# Parameters: none
+################################################################################
 sub csrf_token {
     my (undef, undef, $csrf) = current_session();
     return defined $csrf ? $csrf : '';
 }
 
+################################################################################
+# csrf_field
+#
 # Hidden CSRF input for pasting into a <form>. Value is a 48-char hex
 # token, so it's safe unescaped, but esc() it anyway for belt-and-braces.
+#
+# Parameters: none
+################################################################################
 sub csrf_field {
     return qq{<input type="hidden" name="csrf" value="} . esc(csrf_token()) . qq{">\n};
 }
@@ -2937,8 +3656,15 @@ my %LOGIN_LANDING = map { $_ => 1 } qw(
     view_templates view_template view_log view_report
 );
 
+################################################################################
+# login_next_url
+#
 # Build the post-login redirect URL from a submitted "next" action name. Returns
 # the default (bare script_url) unless $next is one of the safe landing actions.
+#
+# Parameters:
+#   $next
+################################################################################
 sub login_next_url {
     my ($next) = @_;
     return script_url() unless defined $next && $next =~ /^[a-z_]+$/
@@ -2947,6 +3673,11 @@ sub login_next_url {
     return script_url() . '?action=' . $next;
 }
 
+################################################################################
+# do_login
+#
+# Parameters: none
+################################################################################
 sub do_login {
     my $username = $cgi->param('username') // '';
     my $password = $cgi->param('password') // '';
@@ -3049,6 +3780,11 @@ sub do_login {
     }
 }
 
+################################################################################
+# do_logout
+#
+# Parameters: none
+################################################################################
 sub do_logout {
     my %cookies = CGI::Cookie->fetch;
     my $sid = $cookies{$COOKIE_NAME} ? $cookies{$COOKIE_NAME}->value : undef;
@@ -3071,6 +3807,11 @@ sub do_logout {
     }
 }
 
+################################################################################
+# script_url
+#
+# Parameters: none
+################################################################################
 sub script_url {
     return $cgi->url(-absolute => 1);
 }
@@ -3079,6 +3820,14 @@ sub script_url {
 # Views
 # --------------------------------------------------------------------------
 
+################################################################################
+# show_login_form
+#
+# Parameters:
+#   $error
+#   $next
+#   $notice
+################################################################################
 sub show_login_form {
     my ($error, $next, $notice) = @_;
     # Fall back to the "next" the browser submitted (e.g. a failed login retry).
@@ -3119,9 +3868,15 @@ sub show_login_form {
     print page_foot();
 }
 
+################################################################################
+# show_forgot_password
+#
 # --- D: forgot-password / reset flow ---------------------------------------
 # Step 1 (GET): the "Forgot password?" page. If email is not enabled, show the
 # contact-admin note. Otherwise a form to enter a username or email.
+#
+# Parameters: none
+################################################################################
 sub show_forgot_password {
     print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Forgot password');            # pre-login: login backdrop
@@ -3155,10 +3910,16 @@ sub show_forgot_password {
     print page_foot();
 }
 
+################################################################################
+# do_forgot_password
+#
 # Step 2 (POST): process the request. ALWAYS responds with the same uniform
 # message, whether or not the account/email exists and whether or not mail was
 # actually sent -- so this never reveals which usernames or addresses are
 # valid (no account enumeration).
+#
+# Parameters: none
+################################################################################
 sub do_forgot_password {
     my $uniform = 'If an account matches, a reset link has been sent to the '
                 . 'email address on file. Check your inbox.';
@@ -3182,7 +3943,16 @@ sub do_forgot_password {
         # V2: count EVERY request against the IP -- existing account or not --
         # so the throttle can't be used as an oracle for which names exist.
         login_record_failure($dbh, 'ip', $ip);
-        unless (login_is_throttled($dbh, 'ip', $ip)) {
+        # Always leave an audit trail of the outcome (the log is admin-only; the
+        # user still sees the uniform "if an account matches..." response, so
+        # this does not leak account existence to the requester). Without this,
+        # a throttled / no-email / unknown-user request sent nothing AND logged
+        # nothing, making "I got no email" impossible to diagnose.
+        if (login_is_throttled($dbh, 'ip', $ip)) {
+            audit(dbh => $dbh, action => 'reset_requested',
+                  detail => "reset NOT sent: requests from $ip are throttled "
+                          . "(too many recent login/reset attempts)");
+        } else {
             my $username;
             if ($who =~ /@/) {
                 my $em = normalize_email($who);
@@ -3190,12 +3960,21 @@ sub do_forgot_password {
             } elsif (valid_id($who) && db_user_exists($dbh, $who)) {
                 $username = $who;
             }
-            if (defined $username) {
+            if (!defined $username) {
+                audit(dbh => $dbh, action => 'reset_requested',
+                      detail => "reset NOT sent: no account matches the request");
+            } else {
                 my $u = db_get_user($dbh, $username);
                 my $addr = $u ? ($u->{email} // '') : '';
-                if ($addr ne '') {
+                if ($addr eq '') {
+                    audit(dbh => $dbh, action => 'reset_requested', username => $username,
+                          detail => 'reset NOT sent: no email address on file for this account');
+                } else {
                     my $tok = reset_token_create($dbh, $username);
-                    if ($tok) {
+                    if (!$tok) {
+                        audit(dbh => $dbh, action => 'reset_requested', username => $username,
+                              detail => 'reset NOT sent: could not create a reset token');
+                    } else {
                         my $link = _reset_link($tok);
                         if (!defined $link) {
                             # V1: no SITE_URL configured -> refuse to send a link
@@ -3203,15 +3982,12 @@ sub do_forgot_password {
                             audit(dbh => $dbh, action => 'reset_requested', username => $username,
                                   detail => 'reset link NOT emailed: SITE_URL is not configured');
                         } else {
+                            my ($r_text, $r_html) = reset_email_bodies($username, $link);
                             my ($sent, $err) = send_mail(
                                 to => $addr,
                                 subject => 'fetchconfig-web password reset',
-                                body => "A password reset was requested for your fetchconfig-web "
-                                      . "account '$username'.\n\n"
-                                      . "To set a new password, open this link within 30 minutes:\n\n"
-                                      . "$link\n\n"
-                                      . "If you did not request this, you can ignore this email; "
-                                      . "your password will not change.\n");
+                                body => $r_text,
+                                html => $r_html);
                             audit(dbh => $dbh, action => 'reset_requested', username => $username,
                                   detail => ($sent ? 'reset link emailed'
                                                    : "reset link NOT emailed: " . ($err // 'error')));
@@ -3231,20 +4007,33 @@ sub do_forgot_password {
                      . CGI::escape($uniform), -status => '302 Found');
 }
 
+################################################################################
+# _reset_link
+#
 # Build the absolute reset link for a clear token.
 # V1: the reset link is built ONLY from the configured SITE_URL. It is never
 # derived from the request: HTTP_HOST is attacker-controlled (Host-header
 # poisoning would send the victim a link to the attacker's server), and with
 # UseCanonicalName Off even SERVER_NAME follows the Host header. Returns undef
 # when SITE_URL is not configured -- the caller then sends no link at all.
+#
+# Parameters:
+#   $tok
+################################################################################
 sub _reset_link {
     my ($tok) = @_;
     return undef unless defined $SITE_URL && $SITE_URL =~ m{^https?://[A-Za-z0-9.-]+(?::\d{1,5})?$};
     return $SITE_URL . script_url() . '?action=reset_token&tok=' . CGI::escape($tok);
 }
 
+################################################################################
+# show_reset_token
+#
 # Step 3 (GET): the token landing page -- a form to set a new password. The
 # token is validated but NOT consumed here (it is consumed on the POST).
+#
+# Parameters: none
+################################################################################
 sub show_reset_token {
     my $tok = $cgi->param('tok') // '';
     # V5: the token is in this page's URL; never let it leak via Referer.
@@ -3282,7 +4071,13 @@ sub show_reset_token {
     print page_foot();
 }
 
+################################################################################
+# do_reset_do
+#
 # Step 4 (POST): consume the token and set the new password.
+#
+# Parameters: none
+################################################################################
 sub do_reset_do {
     my $tok     = $cgi->param('tok') // '';
     my $new     = $cgi->param('new_password') // '';
@@ -3334,6 +4129,12 @@ sub do_reset_do {
     print qq{</div>\n}; print page_foot();
 }
 
+################################################################################
+# show_device_list
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_device_list {
     my ($user) = @_;
     # Time how long reading + parsing the device table takes, to show the
@@ -3344,7 +4145,6 @@ sub show_device_list {
 
     print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Devices', $user, 'full');
-    print qq{<h1>Devices</h1>\n};
 
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
@@ -3362,6 +4162,10 @@ sub show_device_list {
         $by_site{ $_->{site} }++ for grep { defined $_->{site} && $_->{site} ne '' } @$devices;
         my @site_codes = sort keys %by_site;
 
+        print qq{<div class="dev-layout">\n};
+        print qq{<div class="dev-main">\n};
+        print qq{<div class="tool-section-blue" id="devices-section">\n};
+        print qq{<h2 class="tool-section-title">Devices</h2>\n};
         print qq{<div class="filter-row">\n};
         print qq{<select id="model-filter" class="filter-select">\n};
         print qq{<option value="">(all models)</option>\n};
@@ -3387,16 +4191,15 @@ sub show_device_list {
             . qq{<select id="dev-page-size" class="filter-select">}
             . qq{<option value="0">All</option>}
             . qq{<option value="10">10</option>}
-            . qq{<option value="25">25</option>}
-            . qq{<option value="50">50</option>}
-            . qq{<option value="100" selected>100</option>}
+            . qq{<option value="20">20</option>}
+            . qq{<option value="40" selected>40</option>}
+            . qq{<option value="80">80</option>}
+            . qq{<option value="160">160</option>}
             . qq{</select></label>\n};
         print qq{</div>\n};
 
-        # Two-column layout: the device table on the left, the statistics
-        # panel in the upper-right corner.
-        print qq{<div class="dev-layout">\n};
-        print qq{<div class="dev-main">\n};
+        # The device table/pager; the blue box (opened above) wraps the filter
+        # and this table. The green statistics panel sits beside it.
 
         # Pager (Prev / page info / Next). Hidden by JS when everything fits
         # on one page.
@@ -3408,6 +4211,7 @@ sub show_device_list {
             . qq{<button type="button" class="btn btn-small" id="devlist-last">Last &raquo;</button>}
             . qq{</div>\n};
 
+        print qq{<div id="dev-table-scroll">\n};
         print qq{<table class="list" id="dev-table">\n}
             . qq{<tr>}
             . qq{<th class="sortable" data-key="model">Model<span class="sort-ind"></span></th>}
@@ -3441,8 +4245,10 @@ sub show_device_list {
                 . qq{</tr>\n};
         }
         print qq{</table>\n};
+        print qq{</div>\n};   # #dev-table-scroll
         print qq{<p class="no-match" id="dev-no-match" style="display:none;">}
             . qq{No devices match your filter.</p>\n};
+        print qq{</div>\n};   # .tool-section-blue
         print qq{</div>\n};   # .dev-main
 
         # Statistics panel (upper-right).
@@ -3478,10 +4284,16 @@ sub show_device_list {
     print page_foot();
 }
 
+################################################################################
+# device_filter_script
+#
 # Client-side substring filter for the device list. Runs entirely in the
 # browser against the already-rendered rows -- no round trip to the server
 # or to fetchconfig.pl, since the full device list is already on the page.
 # Matching is case-insensitive and matches anywhere in the Device-ID text.
+#
+# Parameters: none
+################################################################################
 sub device_filter_script {
     return <<'JS';
 <script>
@@ -3687,12 +4499,17 @@ sub device_filter_script {
 JS
 }
 
+################################################################################
+# show_status_page
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_status_page {
     my ($user) = @_;
 
     print std_header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('Status', $user, 'full');
-    print qq{<h1>Status</h1>\n};
+    print page_head('Device backup status', $user, 'full');
 
     my $t0 = [Time::HiRes::gettimeofday()];
     my ($rows, $err) = read_all_status($user);
@@ -3710,7 +4527,7 @@ sub show_status_page {
     }
 
     print qq{<div class="tool-section">\n};
-    print qq{<h2 class="tool-section-title">Device status</h2>\n};
+    print qq{<h2 class="tool-section-title">Device backup status</h2>\n};
 
     # Filter row: State + Changed dropdowns, Clear, and Per-page selector.
     print qq{<div class="dev-filter-row">\n};
@@ -3828,8 +4645,14 @@ sub show_status_page {
     print page_foot();
 }
 
+################################################################################
+# status_page_script
+#
 # Client-side filter/sort/paginate for the Status table. Self-contained,
 # namespaced 'status-*'. Mirrors the device-list behaviour.
+#
+# Parameters: none
+################################################################################
 sub status_page_script {
     return <<'JS';
 <script>
@@ -3949,6 +4772,13 @@ sub status_page_script {
 JS
 }
 
+################################################################################
+# show_backup_list
+#
+# Parameters:
+#   $user
+#   $dev
+################################################################################
 sub show_backup_list {
     my ($user, $dev) = @_;
 
@@ -3989,8 +4819,9 @@ sub show_backup_list {
         . esc($crumb_url) . qq{">$crumb_label</a></p>\n};
     my $_bn = do { my $d = db_connect(); my $n = $d ? db_note_get($d, $dev) : undef; $d->disconnect if $d;
                    $n && defined $n->{note} && $n->{note} ne '' ? 1 : 0; };
-    print qq{<h1>Backups for } . esc($dev) . qq{ }
-        . note_icon_button($dev, $_bn) . qq{</h1>\n};
+    print qq{<div class="tool-section" id="backup-list-section">\n};
+    print qq{<h2 class="tool-section-title">Backups for } . esc($dev) . qq{ }
+        . note_icon_button($dev, $_bn) . qq{</h2>\n};
 
     print qq{<div class="action-row">\n};
     print $cgi->start_form(-method => 'POST', -action => script_url(),
@@ -4179,6 +5010,8 @@ JS2a
 </script>
 JS2
 
+    print qq{</div>\n};   # .tool-section (Backups for device)
+    print top_bottom_nav();
     print page_foot();
 }
 
@@ -4202,14 +5035,32 @@ JS2
 
 my %SYNTAX_HIGHLIGHTERS;   # model => coderef($raw_content) -> html
 
+################################################################################
+# hl
+#
 # Wrap already-escaped text in a highlight span of the given class.
+#
+# Parameters:
+#   $class
+#   $escaped_text
+################################################################################
 sub hl {
     my ($class, $escaped_text) = @_;
     return qq{<span class="hl-$class">$escaped_text</span>};
 }
 
+################################################################################
+# highlight_config
+#
 # Return highlighted HTML for $content given the device $model, or undef if
 # no highlighter is registered for that model.
+#
+# Parameters:
+#   $model
+#   $content
+#   $dev
+#   $scheme_out
+################################################################################
 sub highlight_config {
     my ($model, $content, $dev, $scheme_out) = @_;
     return undef unless defined $model;
@@ -4238,7 +5089,16 @@ sub highlight_config {
     return $fn ? $fn->($content) : undef;
 }
 
+################################################################################
+# resolve_syntax_scheme
+#
 # Resolve the highlighting scheme name for a template-backed device, or undef.
+#
+# Parameters:
+#   $model
+#   $content
+#   $dev
+################################################################################
 sub resolve_syntax_scheme {
     my ($model, $content, $dev) = @_;
 
@@ -4280,9 +5140,16 @@ sub resolve_syntax_scheme {
     }
 }
 
+################################################################################
+# _run_template_syntax
+#
 # Run `fetchconfig.pl --template-syntax <path>` and return the scheme name from
 # stdout (exit 0), or undef (no style declared / error). Diagnostics are on
 # stderr and ignored. Uses the standard run_fetchconfig pipeline.
+#
+# Parameters:
+#   $path
+################################################################################
 sub _run_template_syntax {
     my ($path) = @_;
     return undef unless defined $path && $path ne '';
@@ -4303,8 +5170,15 @@ sub _run_template_syntax {
     return undef;
 }
 
+################################################################################
+# device_template_path
+#
 # Resolve a device's template file path (for a generic/template-backed device).
 # Returns the absolute .tmpl path, or undef if the device has no template.
+#
+# Parameters:
+#   $dev
+################################################################################
 sub device_template_path {
     my ($dev) = @_;
     my ($content, $err) = slurp_device_table();
@@ -4344,7 +5218,14 @@ sub device_template_path {
     return "$dir/$name";
 }
 
+################################################################################
+# detect_syntax_scheme
+#
 # Cheap content sniff for GENERIC_SYNTAX = auto. Returns a scheme name.
+#
+# Parameters:
+#   $content
+################################################################################
 sub detect_syntax_scheme {
     my ($content) = @_;
     return 'generic' unless defined $content;
@@ -4359,6 +5240,9 @@ sub detect_syntax_scheme {
     return 'generic';
 }
 
+################################################################################
+# highlight_cisco_ios
+#
 # --- Cisco IOS highlighter (cisco-ios, cisco-ios-ssh) --------------------
 #
 # A lightweight, line-oriented highlighter -- not a full IOS grammar. It
@@ -4366,6 +5250,10 @@ sub detect_syntax_scheme {
 # identifiers, IPv4 addresses, quoted strings, and bare numbers. Everything
 # is escaped via esc() first (which also masks secrets), then coloured, so
 # masked values like pass=?***? stay masked and nothing can be injected.
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_cisco_ios {
     my ($content) = @_;
     my @out;
@@ -4430,8 +5318,15 @@ sub highlight_cisco_ios {
     return join("\n", @out);
 }
 
+################################################################################
+# _hl_ios_line
+#
 # Highlight a single IOS line. Works on the RAW line; escapes each piece as
 # it is emitted.
+#
+# Parameters:
+#   $line
+################################################################################
 sub _hl_ios_line {
     my ($line) = @_;
 
@@ -4461,8 +5356,16 @@ sub _hl_ios_line {
     return $html;
 }
 
+################################################################################
+# _hl_ios_token
+#
 # Colour one IOS word token. $pos is its 0-based position among words on the
 # line (the first word is the command keyword).
+#
+# Parameters:
+#   $tok
+#   $pos
+################################################################################
 sub _hl_ios_token {
     my ($tok, $pos) = @_;
 
@@ -4494,6 +5397,9 @@ sub _hl_ios_token {
     return esc($tok);
 }
 
+################################################################################
+# highlight_procurve
+#
 # --- ProCurve highlighter (procurve, procurve-ssh) ----------------------
 #
 # ProCurve/Aruba running-config. Independent from the IOS highlighter so its
@@ -4503,6 +5409,10 @@ sub _hl_ios_token {
 # with 'exit'. VLAN membership continuation lines (a leading space followed
 # by a port list) are left uncoloured. Everything is escaped via esc()
 # first (which also masks pass=/enable= secrets).
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_procurve {
     my ($content) = @_;
     my @out;
@@ -4512,6 +5422,12 @@ sub highlight_procurve {
     return join("\n", @out);
 }
 
+################################################################################
+# _hl_pc_line
+#
+# Parameters:
+#   $line
+################################################################################
 sub _hl_pc_line {
     my ($line) = @_;
     # Comment line: ';' starts a comment in ProCurve configs.
@@ -4537,6 +5453,13 @@ sub _hl_pc_line {
     return $html;
 }
 
+################################################################################
+# _hl_pc_token
+#
+# Parameters:
+#   $tok
+#   $pos
+################################################################################
 sub _hl_pc_token {
     my ($tok, $pos) = @_;
     return hl('string', esc($tok)) if $tok =~ /^"[^"]*"$/;                  # quoted string
@@ -4549,6 +5472,9 @@ sub _hl_pc_token {
     return esc($tok);
 }
 
+################################################################################
+# highlight_comware
+#
 # --- Comware highlighter (comware-ssh) -----------------------------------
 #
 # Comware / H3C running-config. Independent highlighter. Notable syntax:
@@ -4558,6 +5484,10 @@ sub _hl_pc_token {
 # 'return'. Password material -- "key ... cipher $..." and "password hash
 # $..." -- is left as plain escaped text (not tokenised), and the usual
 # esc() secret-masking still applies on top.
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_comware {
     my ($content) = @_;
     my @out;
@@ -4567,6 +5497,12 @@ sub highlight_comware {
     return join("\n", @out);
 }
 
+################################################################################
+# _hl_cw_line
+#
+# Parameters:
+#   $line
+################################################################################
 sub _hl_cw_line {
     my ($line) = @_;
     # '#' lines (often a lone '#') are section separators/comments.
@@ -4591,6 +5527,13 @@ sub _hl_cw_line {
     return $html;
 }
 
+################################################################################
+# _hl_cw_token
+#
+# Parameters:
+#   $tok
+#   $pos
+################################################################################
 sub _hl_cw_token {
     my ($tok, $pos) = @_;
     return hl('ip', esc($tok)) if $tok =~ m{^\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?$};
@@ -4603,6 +5546,9 @@ sub _hl_cw_token {
     return esc($tok);
 }
 
+################################################################################
+# highlight_zyxel
+#
 # --- Zyxel highlighter (zyxel) ------------------------------------------
 #
 # Zyxel switch running-config. Cisco-IOS-like, but with its own quirks, so
@@ -4614,6 +5560,10 @@ sub _hl_cw_token {
 # like IOS. Everything is escaped via esc() first (which also masks
 # pass=/enable= secrets); a "password ..." line is emitted escaped-only so
 # the encrypted blob isn't tokenised.
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_zyxel {
     my ($content) = @_;
     my @out;
@@ -4623,6 +5573,12 @@ sub highlight_zyxel {
     return join("\n", @out);
 }
 
+################################################################################
+# _hl_zyxel_line
+#
+# Parameters:
+#   $line
+################################################################################
 sub _hl_zyxel_line {
     my ($line) = @_;
     return hl('comment', esc($line)) if $line =~ /^\s*!/;   # ! comment
@@ -4655,6 +5611,13 @@ sub _hl_zyxel_line {
     return $html;
 }
 
+################################################################################
+# _hl_zyxel_token
+#
+# Parameters:
+#   $tok
+#   $pos
+################################################################################
 sub _hl_zyxel_token {
     my ($tok, $pos) = @_;
     return hl('string', esc($tok)) if $tok =~ /^"[^"]*"$/;                  # quoted string
@@ -4669,6 +5632,9 @@ sub _hl_zyxel_token {
     return esc($tok);
 }
 
+################################################################################
+# highlight_aruba_cx
+#
 # --- Aruba CX highlighter (aruba-cx-ssh) --------------------------------
 #
 # Aruba AOS-CX running-config. Independent highlighter (AOS-CX is IOS-like
@@ -4681,6 +5647,10 @@ sub _hl_zyxel_token {
 # that may carry a /CIDR suffix; and single-quoted description strings.
 # Everything is escaped via esc() first (which also masks pass=/enable=
 # secrets).
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_aruba_cx {
     my ($content) = @_;
     my @out;
@@ -4713,6 +5683,12 @@ sub highlight_aruba_cx {
     return join("\n", @out);
 }
 
+################################################################################
+# _hl_aruba_line
+#
+# Parameters:
+#   $line
+################################################################################
 sub _hl_aruba_line {
     my ($line) = @_;
     return hl('comment', esc($line)) if $line =~ /^\s*!/;   # ! comment / separator
@@ -4731,7 +5707,14 @@ sub _hl_aruba_line {
     return _hl_aruba_tokens($line);
 }
 
+################################################################################
+# _hl_aruba_tokens
+#
 # Tokenise + colour a plain AOS-CX line (no comment/credential special-case).
+#
+# Parameters:
+#   $text
+################################################################################
 sub _hl_aruba_tokens {
     my ($text) = @_;
     my ($indent, $rest) = ($text =~ /^(\s*)(.*)$/s);
@@ -4747,6 +5730,13 @@ sub _hl_aruba_tokens {
     return $html;
 }
 
+################################################################################
+# _hl_aruba_token
+#
+# Parameters:
+#   $tok
+#   $pos
+################################################################################
 sub _hl_aruba_token {
     my ($tok, $pos) = @_;
     return hl('string', esc($tok)) if $tok =~ /^'[^']*'$/;                  # 'quoted'
@@ -4761,6 +5751,9 @@ sub _hl_aruba_token {
     return esc($tok);
 }
 
+################################################################################
+# highlight_nexus
+#
 # --- Cisco Nexus / NX-OS highlighter (nexus-ssh) ------------------------
 #
 # NX-OS running-config is Cisco-IOS-family syntax (! comments, "interface
@@ -4779,6 +5772,10 @@ sub _hl_aruba_token {
 #      rules don't colour the hex/hash oddly. (Note: like IOS "enable secret 5
 #      ...", these space-separated secrets are highlighted but NOT masked --
 #      mask_secrets only covers "pass=/enable=/community=" style values.)
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_nexus {
     my ($content) = @_;
     my @out;
@@ -4817,8 +5814,15 @@ sub highlight_nexus {
     return join("\n", @out);
 }
 
+################################################################################
+# _hl_nexus_line
+#
 # Highlight one NX-OS line. Protects inline secret blobs, then defers to the
 # shared IOS token colouring for everything else.
+#
+# Parameters:
+#   $line
+################################################################################
 sub _hl_nexus_line {
     my ($line) = @_;
     return hl('comment', esc($line)) if $line =~ /^\s*!/;
@@ -4840,9 +5844,17 @@ sub _hl_nexus_line {
     return _hl_ios_line($line);
 }
 
+################################################################################
+# _hl_ios_fragment
+#
 # Colour a fragment with the IOS per-token rules. $start_pos is the word index
 # of the fragment's first word: 0 makes that word the command keyword, 1+ keeps
 # it mid-line. Preserves whitespace.
+#
+# Parameters:
+#   $frag
+#   $start_pos
+################################################################################
 sub _hl_ios_fragment {
     my ($frag, $start_pos) = @_;
     my $html = '';
@@ -4855,6 +5867,9 @@ sub _hl_ios_fragment {
     return $html;
 }
 
+################################################################################
+# highlight_mediant
+#
 # --- AudioCodes Mediant SBC highlighter (mediant-sbc) -------------------
 #
 # The Mediant SBC "show running-config" is NOT Cisco IOS syntax. It is
@@ -4871,6 +5886,10 @@ sub _hl_ios_fragment {
 #     obscured by the device; highlighted as a string, not masked -- same as
 #     the space-separated secrets in the IOS/NX-OS highlighters, since
 #     mask_secrets only covers key=value syntax).
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_mediant {
     my ($content) = @_;
     my @out;
@@ -4902,6 +5921,9 @@ sub highlight_mediant {
     return join("\n", @out);
 }
 
+################################################################################
+# highlight_template
+#
 # --- fetchconfig generic-template highlighter -------------------------------
 #
 # Colours the state-machine template grammar (see README.template_engine.md):
@@ -4911,6 +5933,10 @@ sub highlight_mediant {
 #   - barewords prompt/user/pass/enable
 #   - /regex/ patterns, "double"/'single' strings, the -> arrow, numbers
 # Line-based; preserves the safety invariant (stripping the spans yields esc()).
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_template {
     my ($content) = @_;
     # Token -> colour class, by semantic role:
@@ -4996,10 +6022,17 @@ sub highlight_template {
     return join("\n", @out);
 }
 
+################################################################################
+# highlight_json
+#
 # --- JSON highlighter (scheme 'json') ---------------------------------------
 # Line-oriented, lightweight: colours keys, string/number/keyword values and
 # punctuation structure. Everything is esc()'d first, so the strip invariant
 # (strip(spans) == esc(original)) holds and nothing can be injected.
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_json {
     my ($content) = @_;
     my @out;
@@ -5008,6 +6041,12 @@ sub highlight_json {
     }
     return join("\n", @out);
 }
+################################################################################
+# _hl_json_line
+#
+# Parameters:
+#   $line
+################################################################################
 sub _hl_json_line {
     my ($line) = @_;
     return '' if $line =~ /^\s*$/;
@@ -5023,6 +6062,12 @@ sub _hl_json_line {
     }
     return $h;
 }
+################################################################################
+# _hl_json_value
+#
+# Parameters:
+#   $v
+################################################################################
 sub _hl_json_value {
     my ($v) = @_;
     my $out = '';
@@ -5036,9 +6081,16 @@ sub _hl_json_value {
     return $out;
 }
 
+################################################################################
+# highlight_xml
+#
 # --- XML highlighter (scheme 'xml') -----------------------------------------
 # Colours tags (<...>), attribute names/values and comments; text between tags
 # is left plain. esc() first, so the strip invariant holds.
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_xml {
     my ($content) = @_;
     my @out;
@@ -5047,6 +6099,12 @@ sub highlight_xml {
     }
     return join("\n", @out);
 }
+################################################################################
+# _hl_xml_line
+#
+# Parameters:
+#   $line
+################################################################################
 sub _hl_xml_line {
     my ($line) = @_;
     return '' if $line =~ /^\s*$/;
@@ -5070,10 +6128,17 @@ sub _hl_xml_line {
     return $out;
 }
 
+################################################################################
+# highlight_generic
+#
 # --- Generic highlighter (scheme 'generic') ---------------------------------
 # For template-produced text with no specific grammar: colour whole-line
 # comments (# or !), a leading command keyword, quoted strings and numbers.
 # Conservative on purpose -- it only adds a little structure.
+#
+# Parameters:
+#   $content
+################################################################################
 sub highlight_generic {
     my ($content) = @_;
     my @out;
@@ -5099,6 +6164,12 @@ sub highlight_generic {
     }
     return join("\n", @out);
 }
+################################################################################
+# _hl_generic_line
+#
+# Parameters:
+#   $line
+################################################################################
 sub _hl_generic_line {
     my ($line) = @_;
     return '' if $line =~ /^\s*$/;
@@ -5145,7 +6216,14 @@ $SYNTAX_HIGHLIGHTERS{'generic'}       = \&highlight_generic;
 $SYNTAX_HIGHLIGHTERS{'__template__'}  = \&highlight_template;
 $SYNTAX_HIGHLIGHTERS{'template'}      = \&highlight_template;
 
+################################################################################
+# device_model
+#
 # Model of a device (field 0 of its device-table line), or undef.
+#
+# Parameters:
+#   $dev
+################################################################################
 sub device_model {
     my ($dev) = @_;
     my ($line, $err) = find_device_table_line($dev);
@@ -5154,12 +6232,19 @@ sub device_model {
     return $f[0];
 }
 
+################################################################################
+# device_repository
+#
 # Resolve the repository directory that applies to a device, from the device
 # table, exactly as fetchconfig.pl does: the device's own repository= option
 # first, else the "default:" repository= for that device's model (all
 # default: lines of a model merge; the last one wins). There is no further
 # fallback -- fetchconfig has none either (repository is mandatory). Returns
 # undef if the device isn't found or has no repository.
+#
+# Parameters:
+#   $dev
+################################################################################
 sub device_repository {
     my ($dev) = @_;
     my ($content, $err) = slurp_device_table();
@@ -5195,11 +6280,18 @@ sub device_repository {
     return $repo;
 }
 
+################################################################################
+# device_status_info
+#
 # Read the per-device status file (fetchconfig >= 9.52 writes
 # "<repository>/<device-id>.status") and return a hashref with the fields we
 # show in the Backup Now spinner: { duration, state, changed } -- each only
 # present if found. Returns undef if there's no readable status file. $dev is
 # already validated ^[\w.\-]+$ (no slashes/..), so the path is safe.
+#
+# Parameters:
+#   $dev
+################################################################################
 sub device_status_info {
     my ($dev) = @_;
     return undef unless valid_id($dev);
@@ -5222,9 +6314,16 @@ sub device_status_info {
     return (%info) ? \%info : undef;
 }
 
+################################################################################
+# read_status_file
+#
 # Parse a status file into a hashref of all its fields (start/end date+time,
 # duration, state, changed). Returns undef if unreadable. Generic key=value
 # reader restricted to the fields we display.
+#
+# Parameters:
+#   $path
+################################################################################
 sub read_status_file {
     my ($path) = @_;
     open(my $fh, '<', $path) or return undef;
@@ -5243,11 +6342,18 @@ sub read_status_file {
     return \%info;
 }
 
+################################################################################
+# read_all_status
+#
 # Read the status file for every device in the device table, resolving each
 # device's repository (its own repository= option, else its model's default:
 # repository=; no further fallback). Returns an arrayref of hashrefs:
 #   { id, info => {status fields} | undef }   (info undef = no status file)
 # in device-table order. Parses the device table once for efficiency.
+#
+# Parameters:
+#   $filter_user
+################################################################################
 sub read_all_status {
     my ($filter_user) = @_;
     my ($content, $err) = slurp_device_table();
@@ -5290,15 +6396,29 @@ sub read_all_status {
 }
 
 
+################################################################################
+# is_web_binary_model
+#
+# Parameters:
+#   $model
+################################################################################
 sub is_web_binary_model {
     my ($model) = @_;
     return 0 unless defined $model;
     return ($model eq 'tplink-web-sg105e' || $model eq 'procurve-web-1700') ? 1 : 0;
 }
 
+################################################################################
+# web_config_filename
+#
 # The download filename for a web-binary model's decoded config. The switches
 # expect different names on their restore pages, so it's per-model:
 # ProCurve 1700 -> "<dev>-switch.cfg", TP-Link -> "<dev>-config.cfg".
+#
+# Parameters:
+#   $model
+#   $dev
+################################################################################
 sub web_config_filename {
     my ($model, $dev) = @_;
     my $suffix = (defined $model && $model eq 'procurve-web-1700')
@@ -5306,6 +6426,14 @@ sub web_config_filename {
     return "$dev$suffix";
 }
 
+################################################################################
+# show_backup_content
+#
+# Parameters:
+#   $user
+#   $dev
+#   $idx
+################################################################################
 sub show_backup_content {
     my ($user, $dev, $idx) = @_;
 
@@ -5325,7 +6453,8 @@ sub show_backup_content {
         . qq{<span class="sep">/</span>}
         . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
         . esc($dev) . qq{</a></p>\n};
-    print qq{<h1>} . esc($dev) . qq{ - backup #} . esc($idx) . qq{</h1>\n};
+    print qq{<div class="tool-section" id="view-backup-section">\n};
+    print qq{<h2 class="tool-section-title">} . esc($dev) . qq{ - backup #} . esc($idx) . qq{</h2>\n};
 
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
@@ -5380,12 +6509,16 @@ sub show_backup_content {
                 print qq{</p>\n};
             }
             print copy_button_script($may_full, $dev, $idx);
-            print top_bottom_nav();
         }
     }
+    print qq{</div>\n};   # .tool-section (View backup)
+    print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# allow_full_config
+#
 # Download the NEWEST backup's configuration for a device as a file. For the
 # web-binary models (TP-Link / ProCurve 1700) it transparently uudecodes and
 # uses their per-model name; for normal text models it serves the raw config
@@ -5395,6 +6528,11 @@ sub show_backup_content {
 # be visible to the user (site scope) AND the user must hold download_full_config
 # (unrestricted users always do). Returns 1 if allowed; otherwise emits a 403
 # text response and returns 0.
+#
+# Parameters:
+#   $user
+#   $dev
+################################################################################
 sub allow_full_config {
     my ($user, $dev) = @_;
     my $dbh = db_connect();
@@ -5410,9 +6548,18 @@ sub allow_full_config {
     return $ok;
 }
 
+################################################################################
+# serve_config_raw
+#
 # config_raw: serve the UNMASKED config for one backup as text/plain, for the
 # authorized "Copy unmasked" button. Gated and audited. Never linked for an
 # unauthorized user, and refuses with 403 if called directly without the right.
+#
+# Parameters:
+#   $user
+#   $dev
+#   $idx
+################################################################################
 sub serve_config_raw {
     my ($user, $dev, $idx) = @_;
     unless (valid_id($dev) && defined $idx && $idx =~ /^\d+$/) {
@@ -5434,6 +6581,13 @@ sub serve_config_raw {
     print $content;
 }
 
+################################################################################
+# download_latest_config
+#
+# Parameters:
+#   $user
+#   $dev
+################################################################################
 sub download_latest_config {
     my ($user, $dev) = @_;
 
@@ -5504,8 +6658,15 @@ sub download_latest_config {
     print $content;
 }
 
+################################################################################
+# backup_compact_stamp
+#
 # Compact "YYMMDD-HHMMSS" timestamp from a backup file path
 # ("...run.20260914.000000CEST" -> "260914-000000"), or '' if not present.
+#
+# Parameters:
+#   $path
+################################################################################
 sub backup_compact_stamp {
     my ($path) = @_;
     return '' unless defined $path;
@@ -5519,10 +6680,17 @@ sub backup_compact_stamp {
     return '';
 }
 
+################################################################################
+# backup_name_suffix
+#
 # The suffix fetchconfig appended to a backup filename via
 # filename_append_suffix, or '' if none. Only a DOTTED suffix is recognised
 # (".txt", ".conf", ".bak.gz"): a dot-less one can't be reliably separated
 # from the timezone letters, so it's treated as "no suffix".
+#
+# Parameters:
+#   $path
+################################################################################
 sub backup_name_suffix {
     my ($path) = @_;
     return '' unless defined $path;
@@ -5530,12 +6698,21 @@ sub backup_name_suffix {
     return ($base =~ /\.\d{8}\.\d{6}[A-Za-z]*(\.[^.].*)$/) ? $1 : '';
 }
 
+################################################################################
+# download_tplink_config
+#
 # Serve a TP-Link Easy Smart backup as a downloadable file, transparently
 # uudecoding the stored backup into the real (binary) config file. The stored
 # backup is uuencoded ("begin 644 <name>.cfg" ... "end"); we decode the body
 # lines with unpack("u") and send the raw bytes as an attachment whose name
 # is per-model ("<dev>-switch.cfg" for ProCurve 1700, "<dev>-config.cfg" for
 # TP-Link).
+#
+# Parameters:
+#   $user
+#   $dev
+#   $idx
+################################################################################
 sub download_tplink_config {
     my ($user, $dev, $idx) = @_;
 
@@ -5590,9 +6767,16 @@ sub download_tplink_config {
     print $bytes;
 }
 
+################################################################################
+# uudecode_content
+#
 # Decode uuencoded text ("begin <mode> <name>" ... "end") to the raw bytes.
 # Tolerates leading log/blank lines before "begin". Returns ($bytes, undef)
 # or (undef, $errmsg).
+#
+# Parameters:
+#   $text
+################################################################################
 sub uudecode_content {
     my ($text) = @_;
     return (undef, 'empty backup') unless defined $text && $text ne '';
@@ -5617,11 +6801,18 @@ sub uudecode_content {
     return ($data, undef);
 }
 
+################################################################################
+# copy_button_html
+#
 # Copy-to-clipboard button markup. Must be paired with a
 # <pre id="config-content"> immediately after it, and copy_button_script()
 # printed once later in the same page. $may_full: when true the user may copy
 # the UNMASKED config, so the button is labelled "Copy unmasked" and the script
 # fetches the raw config server-side; otherwise it copies the masked DOM.
+#
+# Parameters:
+#   $may_full
+################################################################################
 sub copy_button_html {
     my ($may_full) = @_;
     my $label = $may_full ? 'Copy unmasked' : 'Copy';
@@ -5633,6 +6824,14 @@ sub copy_button_html {
         . qq{<span id="copy-label">} . esc($label) . qq{</span></button>\n};
 }
 
+################################################################################
+# copy_button_script
+#
+# Parameters:
+#   $may_full
+#   $dev
+#   $idx
+################################################################################
 sub copy_button_script {
     my ($may_full, $dev, $idx) = @_;
     my $raw_url = ($may_full && defined $dev)
@@ -5718,6 +6917,12 @@ sub copy_button_script {
 JS
 }
 
+################################################################################
+# show_compare
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_compare {
     my ($user) = @_;
     my $dev = $cgi->param('dev') // '';
@@ -5737,7 +6942,8 @@ sub show_compare {
         . qq{<span class="sep">/</span>}
         . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
         . esc($dev) . qq{</a></p>\n};
-    print qq{<h1>Compare backups: } . esc($dev) . qq{</h1>\n};
+    print qq{<div class="tool-section" id="compare-backups-section">\n};
+    print qq{<h2 class="tool-section-title">Compare backups: } . esc($dev) . qq{</h2>\n};
 
     # De-dup and validate indices; require exactly two.
     my %seen;
@@ -5747,6 +6953,7 @@ sub show_compare {
         my $got = scalar(@idxs);
         print qq{<p class="error">Please select exactly two backups to compare }
             . qq{(you selected $got). Go back and tick two, then press Compare.</p>\n};
+        print qq{</div>\n};   # .tool-section
         print page_foot();
         return;
     }
@@ -5772,15 +6979,25 @@ sub show_compare {
         print qq{<p class="error">fetchconfig.pl -m failed (exit $status): }
             . esc($diff_text) . qq{</p>\n};
     }
+    print qq{</div>\n};   # .tool-section (Compare backups)
+    print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# render_unified_diff
+#
 # Render a unified/normal diff as a dark <pre> block with each line colored
 # by its leading marker: '+'/'>' added (green), '-'/'<' removed (red),
 # '@@'/'***'/'---' hunk headers (blue), everything else plain. Works for
 # both `diff -u` and traditional `diff` output, since we key only on the
 # first character(s). Each line is esc()'d individually, so content is
 # still fully escaped -- we only wrap it in a coloring <span>.
+#
+# Parameters:
+#   $text
+#   $unmask
+################################################################################
 sub render_unified_diff {
     my ($text, $unmask) = @_;
     my $esc_text = $unmask ? sub { CGI::escapeHTML($_[0]) } : sub { esc($_[0]) };
@@ -5800,11 +7017,19 @@ sub render_unified_diff {
     return $html;
 }
 
+################################################################################
+# build_unified_diff
+#
 # Build a unified-style diff STRING from two texts, in-app (for the Tools
 # "compare configs" feature, where there's no fetchconfig.pl -m to call).
 # Uses Algorithm::Diff::sdiff and emits ONLY the changed lines: "-old"
 # (removed/changed-from) and "+new" (added/changed-to). Unchanged context
 # lines are omitted. Returns (\$diff_text, $identical).
+#
+# Parameters:
+#   $left_text
+#   $right_text
+################################################################################
 sub build_unified_diff {
     my ($left_text, $right_text) = @_;
     my @left  = split /\n/, (defined $left_text  ? $left_text  : ''), -1;
@@ -5825,7 +7050,13 @@ sub build_unified_diff {
     return (join("\n", @out), $identical);
 }
 
+################################################################################
+# diff_legend
+#
 # Shared colour legend shown above both the unified and side-by-side diffs.
+#
+# Parameters: none
+################################################################################
 sub diff_legend {
     return qq{<p class="diff-legend">}
          . qq{<span class="sw sw-add"></span>added}
@@ -5833,15 +7064,24 @@ sub diff_legend {
          . qq{<span class="sw sw-chg"></span>changed</p>\n};
 }
 
+################################################################################
+# diff_legend_unified
+#
 # Legend for the unified diff, which only distinguishes old vs. new lines
 # (removed/added) -- there is no separate "changed" colour there. The
 # swatches use the same red/green as the dark diff block itself.
+#
+# Parameters: none
+################################################################################
 sub diff_legend_unified {
     return qq{<p class="diff-legend">}
          . qq{<span class="sw sw-uni-del"></span>red = old}
          . qq{<span class="sw sw-uni-add"></span>green = new</p>\n};
 }
 
+################################################################################
+# show_side_by_side
+#
 # Side-by-side comparison of two backups, computed in-app with
 # Algorithm::Diff::sdiff() rather than fetchconfig.pl's own -m diff. We
 # fetch both configs (same -g retrieval the single-backup view uses) and
@@ -5849,6 +7089,10 @@ sub diff_legend_unified {
 # removed (red), changed (amber), unchanged (plain). Kept as a distinct
 # action from show_compare() so the CLI-native unified diff stays exactly
 # as it was; this is an additional view, not a replacement.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_side_by_side {
     my ($user) = @_;
     my $dev = $cgi->param('dev') // '';
@@ -5868,7 +7112,8 @@ sub show_side_by_side {
         . qq{<span class="sep">/</span>}
         . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
         . esc($dev) . qq{</a></p>\n};
-    print qq{<h1>Side by side: } . esc($dev) . qq{</h1>\n};
+    print qq{<div class="tool-section" id="side-by-side-section">\n};
+    print qq{<h2 class="tool-section-title">Side by side: } . esc($dev) . qq{</h2>\n};
 
     my %seen;
     my @idxs = grep { !$seen{$_}++ } grep { /^\d+$/ } @sel;
@@ -5877,6 +7122,7 @@ sub show_side_by_side {
         my $got = scalar(@idxs);
         print qq{<p class="error">Please select exactly two backups to compare }
             . qq{(you selected $got). Go back and tick two, then press Side by Side.</p>\n};
+        print qq{</div>\n};   # .tool-section
         print page_foot();
         return;
     }
@@ -5888,6 +7134,7 @@ sub show_side_by_side {
     my ($older, $err_m) = get_backup_content($dev, $m);
     if ($err_n || $err_m) {
         print qq{<p class="error">} . esc($err_n || $err_m) . qq{</p>\n};
+        print qq{</div>\n};   # .tool-section
         print page_foot();
         return;
     }
@@ -5897,13 +7144,20 @@ sub show_side_by_side {
 
     # Left = older, right = newer, so the columns read "before -> after".
     print render_side_by_side($older, $newer, "backup #$m (older)", "backup #$n (newer)");
+    print qq{</div>\n};   # .tool-section (Side by side)
     print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# top_bottom_nav
+#
 # Floating "Top" / "Bottom" navigation, fixed in the bottom-right corner, to
 # jump quickly to either end of a long side-by-side diff. Placed at the
 # bottom (not the top) so it never overlaps the title bar's Log out link.
+#
+# Parameters: none
+################################################################################
 sub top_bottom_nav {
     return <<'HTML';
 <div class="page-nav">
@@ -5928,12 +7182,19 @@ sub top_bottom_nav {
 HTML
 }
 
+################################################################################
+# normalize_config_ws
+#
 # Normalize a config's whitespace for comparison: per line, collapse every
 # run of whitespace (spaces/tabs) to a single space and trim the ends --
 # EXCEPT inside double-quoted spans, whose contents are preserved verbatim.
 # This lets two device tables that differ only in tab-vs-space alignment
 # compare as identical, while a real change inside a quoted value (e.g. a
 # comment) still shows. Used by the Tools "compare configs" feature.
+#
+# Parameters:
+#   $text
+################################################################################
 sub normalize_config_ws {
     my ($text) = @_;
     return '' unless defined $text;
@@ -5958,10 +7219,21 @@ sub normalize_config_ws {
 }
 
 
+################################################################################
+# render_side_by_side
+#
 # a row per aligned pair: 'u' unchanged, 'c' changed, '+' added on the
 # right (absent left), '-' removed from the left (absent right). We keep an
 # independent line counter per side so the gutter shows each side's real
 # line number, blank where that side has no line for the row.
+#
+# Parameters:
+#   $left_text
+#   $right_text
+#   $left_label
+#   $right_label
+#   $unmask
+################################################################################
 sub render_side_by_side {
     my ($left_text, $right_text, $left_label, $right_label, $unmask) = @_;
     # $unmask (optional): when true, the config line text is HTML-escaped
@@ -6021,6 +7293,12 @@ sub render_side_by_side {
     return $html;
 }
 
+################################################################################
+# show_backup_now
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_backup_now {
     my ($user) = @_;
     my $dev = $cgi->param('dev') // '';
@@ -6039,7 +7317,8 @@ sub show_backup_now {
         . qq{<span class="sep">/</span>}
         . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
         . esc($dev) . qq{</a></p>\n};
-    print qq{<h1>Backup Now: } . esc($dev) . qq{</h1>\n};
+    print qq{<div class="tool-section" id="backup-now-section">\n};
+    print qq{<h2 class="tool-section-title">Backup Now: } . esc($dev) . qq{</h2>\n};
 
     # Keepalive while fetchconfig.pl runs, so the web server's inactivity
     # timeout cannot end a long run (see run_command_capture).
@@ -6097,14 +7376,22 @@ sub show_backup_now {
 
     print qq{<p><a class="btn" href="} . esc($return_link) . qq{">}
         . qq{Return to backups for } . esc($dev) . qq{</a></p>\n};
+    print qq{</div>\n};   # .tool-section (Backup Now)
     print page_foot();
 }
 
+################################################################################
+# show_check_empty
+#
 # Check for empty backup files on disk via `fetchconfig.pl -z dev_id`, and
 # show the tool's report in the same layout as Backup Now (breadcrumb,
 # heading, status line, copyable output block). Read-only: -z only inspects
 # the files already in the repository, so this uses the same non-sudo
 # run_fetchconfig() path as -l/-g, not the sudo Backup Now path.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_check_empty {
     my ($user) = @_;
     my $dev = $cgi->param('dev') // '';
@@ -6123,7 +7410,8 @@ sub show_check_empty {
         . qq{<span class="sep">/</span>}
         . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
         . esc($dev) . qq{</a></p>\n};
-    print qq{<h1>Check empty backups: } . esc($dev) . qq{</h1>\n};
+    print qq{<div class="tool-section" id="check-empty-section">\n};
+    print qq{<h2 class="tool-section-title">Check empty backups: } . esc($dev) . qq{</h2>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -z </code>}
         . esc($dev) . qq{, which inspects the backup files already on disk.</p>\n};
 
@@ -6152,6 +7440,7 @@ sub show_check_empty {
 
     print qq{<p><a class="btn" href="} . esc($return_link) . qq{">}
         . qq{Return to backups for } . esc($dev) . qq{</a></p>\n};
+    print qq{</div>\n};   # .tool-section (Check empty backups)
     print page_foot();
 }
 
@@ -6163,8 +7452,15 @@ sub show_check_empty {
 # Tools (admin only): orphaned-backup check and delete
 # =============================================================================
 
+################################################################################
+# user_may_use_tools
+#
 # True if this user may use the Tools: any admin (built-in
 # $PROTECTED_USER or a user with admin_function). Opens its own DB handle.
+#
+# Parameters:
+#   $user
+################################################################################
 sub user_may_use_tools {
     my ($user) = @_;
     return 0 unless defined $user;
@@ -6189,9 +7485,17 @@ my %TOOL_TITLE = (
     diskspace  => 'Disk space',
     audit      => 'Audit log',
 );
+################################################################################
+# show_tools
+#
 # Render a single Tools tool as its own page: $only is one of the %TOOL_TITLE
 # keys naming which tool to show. Called without $only (?action=tools, no tool
 # selected) it shows a short "pick a tool from the Tools menu" prompt.
+#
+# Parameters:
+#   $user
+#   $only
+################################################################################
 sub show_tools {
     my ($user, $only) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -6205,7 +7509,6 @@ sub show_tools {
 
     my $title = ($only && $TOOL_TITLE{$only}) ? $TOOL_TITLE{$only} : 'Tools';
     print page_head($title, $user, 'full');
-    print qq{<h1>} . esc($title) . qq{</h1>\n};
     my $flash_msg = $cgi->param('msg');
     my $flash_err = $cgi->param('err');
     if (defined $flash_msg && $flash_msg ne '') { print qq{<p class="success">} . esc($flash_msg) . qq{</p>\n}; }
@@ -6525,10 +7828,19 @@ sub show_tool_nobackup   { show_tools($_[0], 'nobackup'); }
 sub show_tool_empty_bk   { show_tools($_[0], 'empty_bk'); }
 sub show_tool_suffix     { show_tools($_[0], 'suffix'); }
 
+################################################################################
+# show_tool_logo
+#
 # "Upload report logo" tool page: upload a logo image into the report_dir and
 # manage (list/delete) the logos already there. Separate from the device-table
 # editor so the editor form need not become multipart. $errs is an optional
 # arrayref of messages to show (from a failed upload/delete).
+#
+# Parameters:
+#   $user
+#   $errs
+#   $msg
+################################################################################
 sub show_tool_logo {
     my ($user, $errs, $msg) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -6611,6 +7923,9 @@ sub show_tool_logo {
     print page_foot();
 }
 
+################################################################################
+# collect_repo_dirs
+#
 # Collect the distinct directories fetchconfig-web writes into, for the Disk
 # space tool. Returns an arrayref of { purpose, dir } in display order:
 #   - every repository: each distinct repository= actually used by a
@@ -6618,6 +7933,9 @@ sub show_tool_logo {
 #   - the report_dir.
 # Deduped by real path (a repo that equals the report_dir still appears once per
 # purpose, but identical repository paths collapse to one row).
+#
+# Parameters: reads @_ directly
+################################################################################
 sub collect_repo_dirs {
     # Rows keyed by "purpose\0realpath" so the same directory from both sources
     # merges into one row whose source becomes "allowed and configured".
@@ -6683,6 +8001,9 @@ sub collect_repo_dirs {
     return \@rows;
 }
 
+################################################################################
+# show_tool_show_cfg
+#
 # "Show fetchconfig-web.cfg" tool (?action=tool_show_cfg, admin only,
 # read-only): every setting of $CONFIG_FILE in a table -- Status | Option |
 # Value | Default | Range -- grouped by the file's "# --- <title> ---"
@@ -6690,6 +8011,10 @@ sub collect_repo_dirs {
 # valid; invalid (unknown/obsolete key, bad value, or an earlier duplicate)
 # in red; nonexistent (not in the file, default applies) in gray. DBpass
 # (and any unknown password-like key) is shown as "****".
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_tool_show_cfg {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -6754,11 +8079,18 @@ sub show_tool_show_cfg {
     print page_foot();
 }
 
+################################################################################
+# show_tool_diskspace
+#
 # Disk space tool (?action=tool_diskspace, admin only, read-only). Shows free
 # space for every repository directory and the report_dir, with the filesystem
 # device id (st_dev) in gray so directories on the same filesystem are obvious.
 # Uses Filesys::Df (loaded lazily); if that module is absent the box explains
 # how to install it rather than breaking the app.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_tool_diskspace {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -6879,9 +8211,15 @@ sub show_tool_diskspace {
 
 use constant AUDIT_PAGE_SIZE => 100;
 
+################################################################################
+# audit_filter_sql
+#
 # Build the WHERE clause + bind values for the audit viewer's filters, from the
 # CGI params (f_user, f_action, f_object, f_text, f_from, f_to). Returns
 # ($where_sql, \@binds). All comparisons are parameterized (no SQL injection).
+#
+# Parameters: reads @_ directly
+################################################################################
 sub audit_filter_sql {
     my @w; my @b;
     my $p = sub { my $v = $cgi->param($_[0]); return (defined $v && $v ne '') ? $v : undef; };
@@ -6899,10 +8237,17 @@ sub audit_filter_sql {
     return ($sql, \@b);
 }
 
+################################################################################
+# show_audit_data
+#
 # JSON data endpoint for the audit viewer (?action=audit_data, admin only).
 # Returns one page of rows (newest first) plus the total, so the client can
 # page without ever receiving the whole table. Params: offset (0,100,...) and
 # the f_* filters.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_audit_data {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -6949,8 +8294,15 @@ sub show_audit_data {
         . ',"limit":' . $limit . ',"rows":[' . join(',', @items) . ']}';
 }
 
+################################################################################
+# do_audit_csv
+#
 # CSV export of the audit log for the current filter (?action=audit_csv, admin).
 # Streams all matching rows (no paging) as a download.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_audit_csv {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -6981,8 +8333,14 @@ sub do_audit_csv {
     print $csv->('(export failed)') unless $ok;
 }
 
+################################################################################
+# login_failures_filter_sql
+#
 # WHERE clause + binds for the login-failures viewer filters (f_kind, f_from,
 # f_to). All comparisons parameterized. 'to' is extended to end-of-day.
+#
+# Parameters: reads @_ directly
+################################################################################
 sub login_failures_filter_sql {
     my @w; my @b;
     my $p = sub { my $v = $cgi->param($_[0]); return (defined $v && $v ne '') ? $v : undef; };
@@ -6996,9 +8354,16 @@ sub login_failures_filter_sql {
     return ($sql, \@b);
 }
 
+################################################################################
+# show_login_failures_data
+#
 # JSON data endpoint for the login-failures viewer (?action=login_failures_data,
 # admin only). One page of rows (newest failure first) plus the total, so the
 # client pages without receiving the whole table. Params: offset + the filters.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_login_failures_data {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -7064,7 +8429,15 @@ sub show_login_failures_data {
 # orphan-cleanup removes notes whose device-id is gone from the table (unless
 # the keep flag is set).
 
+################################################################################
+# note_icon_button
+#
 # Paper-note icon (U+1F4DD) button for a device. $has => filled vs. outline.
+#
+# Parameters:
+#   $dev
+#   $has
+################################################################################
 sub note_icon_button {
     my ($dev, $has) = @_;
     my $cls = $has ? 'note-icon has-note' : 'note-icon';
@@ -7074,8 +8447,15 @@ sub note_icon_button {
          . qq{&#x1F4DD;</button>};
 }
 
+################################################################################
+# show_note_get
+#
 # note_get (?action=note_get&dev=...): JSON {note,keep,updated} for a device the
 # user may see; 403 otherwise.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_note_get {
     my ($user) = @_;
     my $dev = $cgi->param('dev') // '';
@@ -7103,7 +8483,14 @@ sub show_note_get {
         . '}';
 }
 
+################################################################################
+# do_note_save
+#
 # note_save (POST+CSRF): upsert the note; site-checked; audited without the body.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_note_save {
     my ($user) = @_;
     my $dev  = $cgi->param('dev') // '';
@@ -7132,7 +8519,14 @@ sub do_note_save {
     print $ok ? '{"ok":true}' : '{"error":' . json_string($dberr // 'save failed') . '}';
 }
 
+################################################################################
+# do_note_delete
+#
 # note_delete (POST+CSRF): delete one device's note (from the viewer). Site-checked.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_note_delete {
     my ($user) = @_;
     my $dev = $cgi->param('dev') // '';
@@ -7149,8 +8543,15 @@ sub do_note_delete {
                      . CGI::escape('Note deleted.'), -status => '302 Found');
 }
 
+################################################################################
+# show_notes_data
+#
 # Notes viewer data endpoint (?action=notes_data): one page of notes the user
 # may see (site-scoped), newest-updated first, with the usual filters.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_notes_data {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -7223,7 +8624,14 @@ sub show_notes_data {
         . ',"limit":' . $limit . ',"rows":[' . join(',', @items) . ']}';
 }
 
+################################################################################
+# show_notes
+#
 # Device -> Notes viewer page (any logged-in user; site-scoped). Audit-log look.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_notes {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -7319,8 +8727,15 @@ HTML
     print page_foot();
 }
 
+################################################################################
+# notes_orphans
+#
 # Tools -> Orphaned notes cleanup (admin): notes whose device-id is no longer in
 # the device table AND keep = FALSE.
+#
+# Parameters:
+#   $dbh
+################################################################################
 sub notes_orphans {
     my ($dbh) = @_;
     return [] unless $dbh;
@@ -7340,6 +8755,12 @@ sub notes_orphans {
     return [ grep { !$present{ $_->{device_id} } } @$rows ];
 }
 
+################################################################################
+# show_notes_orphans
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_notes_orphans {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -7364,7 +8785,7 @@ sub show_notes_orphans {
         . qq{listed or deleted here.</p>\n};
     if (!@$orphans) {
         print qq{<p class="muted">No orphaned notes.</p>\n};
-        print qq{</div>\n}; print page_foot(); return;
+        print qq{</div>\n}; print top_bottom_nav(); print page_foot(); return;
     }
     print qq{<form method="POST" action="} . esc(script_url()) . qq{" style="margin:0 0 0.8em;" }
         . qq{data-confirm="Delete all } . scalar(@$orphans) . qq{ orphaned notes? This cannot be undone." }
@@ -7380,9 +8801,16 @@ sub show_notes_orphans {
             . qq{<td>} . esc($o->{updated}) . qq{</td></tr>\n};
     }
     print qq{</table>\n</div>\n};
+    print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# do_notes_orphan_delete
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_notes_orphan_delete {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -7403,6 +8831,12 @@ sub do_notes_orphan_delete {
                      . CGI::escape("Deleted $n orphaned note(s)."), -status => '302 Found');
 }
 
+################################################################################
+# show_login_failures
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_login_failures {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -7540,7 +8974,14 @@ HTML
     print page_foot();
 }
 
+################################################################################
+# do_clear_login_failures
+#
 # Admin "Clear all" for the login-failures viewer (POST + CSRF).
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_clear_login_failures {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -7559,7 +9000,14 @@ sub do_clear_login_failures {
                      -status => '302 Found');
 }
 
+################################################################################
+# fmt_age
+#
 # Format an age in seconds as a short human string (e.g. "3m 12s", "1h 04m").
+#
+# Parameters:
+#   $s
+################################################################################
 sub fmt_age {
     my ($s) = @_;
     $s = 0 unless defined $s && $s >= 0;
@@ -7570,9 +9018,16 @@ sub fmt_age {
     return sprintf('%dh %02dm', $h, $m);
 }
 
+################################################################################
+# show_tool_audit
+#
 # Audit log viewer page (?action=tool_audit, admin only). Renders the filter
 # controls, an empty results table and the pager; the rows are fetched by AJAX
 # from show_audit_data() so the (potentially large) table is never sent whole.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_tool_audit {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -7714,6 +9169,9 @@ HTML
     print page_foot();
 }
 
+################################################################################
+# show_fetchconfig_log
+#
 # Full-page fetchconfig log viewer (?action=view_log, admin only, read-only).
 # Reads FETCHCONFIG_LOG and shows it split into collapsible sections at each
 # "-----[NAME]-----" header. Section names are bold; the [NAME] is green, or
@@ -7721,6 +9179,10 @@ HTML
 # sections start expanded, the rest collapsed. Rendered up to LOG_MAX_DEVICES
 # sections, with a warning if the log has more. A "Log table load time" line
 # is shown below the output.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_fetchconfig_log {
     my ($user) = @_;
 
@@ -7845,12 +9307,19 @@ sub show_fetchconfig_log {
 # behind the fetchconfig-web login.
 # =============================================================================
 
+################################################################################
+# valid_logo_name
+#
 # The resolved report directory (the email: report_dir option -> allow-list
 # path), or undef if reporting is not configured / disabled / the dir is not
 # resolvable. Reads the device table directly (server-side).
 # A filename is an acceptable logo name iff it is a bare basename (no path
 # separators, no "..") ending in .png/.jpg/.gif (case-insensitive extension,
 # case-PRESERVED name -- Linux is case-sensitive).
+#
+# Parameters:
+#   $f
+################################################################################
 sub valid_logo_name {
     my ($f) = @_;
     return 0 unless defined $f && $f ne '';
@@ -7858,9 +9327,17 @@ sub valid_logo_name {
     return $f =~ /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|gif)$/i ? 1 : 0;
 }
 
+################################################################################
+# list_report_images
+#
 # List image files (.png/.jpg/.gif) in $dir, case-preserved, sorted. Returns
 # (\@first_n, $total). @first_n is capped at $limit (default 25). ($dir undef or
 # unreadable -> ([], 0).)
+#
+# Parameters:
+#   $dir
+#   $limit
+################################################################################
 sub list_report_images {
     my ($dir, $limit) = @_;
     $limit = 25 unless defined $limit;
@@ -7873,10 +9350,17 @@ sub list_report_images {
     return (\@imgs, $total);
 }
 
+################################################################################
+# image_magic_type
+#
 # Quick content sniff: return 'png'|'jpg'|'gif' if $bytes begins with that
 # format's magic, else undef. Used to reject a mislabeled upload regardless of
 # its extension. (Dimensions are NOT checked -- no core module reads them; the
 # "250x50" guidance is advisory.)
+#
+# Parameters:
+#   $bytes
+################################################################################
 sub image_magic_type {
     my ($bytes) = @_;
     return undef unless defined $bytes && length($bytes) >= 4;
@@ -7886,10 +9370,17 @@ sub image_magic_type {
     return undef;
 }
 
+################################################################################
+# logo_data_uri
+#
 # Read a logo image and return a "data:image/<type>;base64,<...>" URI for inline
 # preview (the report directory is not web-served, so <img src="name"> can't
 # work). Returns undef if the file can't be read, exceeds the 100KB logo cap, or
 # isn't a real PNG/JPEG/GIF. Uses MIME::Base64 (core since Perl 5.8).
+#
+# Parameters:
+#   $path
+################################################################################
 sub logo_data_uri {
     my ($path) = @_;
     return undef unless defined $path && -f $path;
@@ -7907,6 +9398,11 @@ sub logo_data_uri {
     return "data:$mime;base64,$b64";
 }
 
+################################################################################
+# report_directory
+#
+# Parameters: none
+################################################################################
 sub report_directory {
     my ($content, $err) = slurp_device_table();
     return undef if $err;
@@ -7928,8 +9424,15 @@ sub report_directory {
     return ($val =~ m{^/} && $val !~ /\.\./) ? $val : undef;
 }
 
+################################################################################
+# valid_report_name
+#
 # A report filename is valid iff it is a bare basename matching report-*.html
 # (no path separators, no "..").
+#
+# Parameters:
+#   $f
+################################################################################
 sub valid_report_name {
     my ($f) = @_;
     return 0 unless defined $f && $f ne '';
@@ -7937,16 +9440,30 @@ sub valid_report_name {
     return $f =~ /^report-.*\.html$/ ? 1 : 0;
 }
 
+################################################################################
+# report_name_stamp
+#
 # Parse a report-YYYYMMDD-HHMMSS.html timestamp into a sortable string; falls
 # back to '' (caller then uses mtime).
+#
+# Parameters:
+#   $f
+################################################################################
 sub report_name_stamp {
     my ($f) = @_;
     return "$1$2" if defined $f && $f =~ /^report-(\d{8})-(\d{6})\.html$/;
     return '';
 }
 
+################################################################################
+# list_reports
+#
 # List report-*.html files in the report dir, newest first. Returns an
 # arrayref of { name, size, mtime, stamp } (stamp = filename timestamp or '').
+#
+# Parameters:
+#   $dir
+################################################################################
 sub list_reports {
     my ($dir) = @_;
     return [] unless defined $dir && $dir ne '';
@@ -7975,18 +9492,25 @@ sub list_reports {
     return \@files;
 }
 
+################################################################################
+# show_reports
+#
 # The Reports list page (?action=report), all logged-in users.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_reports {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('Reports', $user, 'full');
+    print page_head('Backup reports', $user, 'full');
     my $flash_msg = $cgi->param('msg');
     my $flash_err = $cgi->param('err');
     if (defined $flash_msg && $flash_msg ne '') { print qq{<p class="success">} . esc($flash_msg) . qq{</p>\n}; }
     if (defined $flash_err && $flash_err ne '') { print qq{<p class="error">} . esc($flash_err) . qq{</p>\n}; }
 
     print qq{<div class="tool-section">\n};
-    print qq{<h2 class="tool-section-title">Reports</h2>\n};
+    print qq{<h2 class="tool-section-title">Backup reports</h2>\n};
 
     my $dir = report_directory();
     unless (defined $dir) {
@@ -8069,10 +9593,17 @@ sub show_reports {
     print page_foot();
 }
 
+################################################################################
+# parse_report_blocks
+#
 # Parse the device-diff blocks out of a report's HTML. Returns a list of
 # { device, state, diff_html } where diff_html is the re-escaped, re-classified
 # diff body (or '' for a device with no diff, e.g. Unchanged). The report HTML
 # is untrusted: we extract text and re-emit it, never inject the raw markup.
+#
+# Parameters:
+#   $html
+################################################################################
 sub parse_report_blocks {
     my ($html) = @_;
     my @blocks;
@@ -8108,8 +9639,15 @@ sub parse_report_blocks {
     return @blocks;
 }
 
+################################################################################
+# html_unescape
+#
 # Minimal HTML entity unescape for text pulled out of the report (it was
 # HTML-escaped by fetchconfig); we re-escape with esc() afterwards.
+#
+# Parameters:
+#   $s
+################################################################################
 sub html_unescape {
     my ($s) = @_;
     return '' unless defined $s;
@@ -8119,9 +9657,16 @@ sub html_unescape {
     return $s;
 }
 
+################################################################################
+# show_view_report
+#
 # View a report (?action=view_report&file=...): parse the device-diff blocks
 # and show them as collapsible sections (collapsed initially), with
 # Expand/Collapse all -- like the fetchconfig-log viewer.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_view_report {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -8133,12 +9678,12 @@ sub show_view_report {
     my $file = $cgi->param('file');
     $file = '' unless defined $file;
     unless (defined $dir && valid_report_name($file) && -f "$dir/$file") {
-        print qq{<h1>View report</h1>\n};
         print qq{<p class="error">Report not found, or not a valid report file.</p>\n};
         print page_foot();
         return;
     }
-    print qq{<h1>View report <span class="muted">(} . esc($file) . qq{)</span></h1>\n};
+    print qq{<div class="tool-section" id="view-report-section">\n};
+    print qq{<h2 class="tool-section-title">View report <span class="muted">(} . esc($file) . qq{)</span></h2>\n};
 
     my $html = '';
     if (open(my $fh, '<', "$dir/$file")) { local $/; $html = <$fh>; close($fh); }
@@ -8173,6 +9718,7 @@ sub show_view_report {
         print $filtered
             ? qq{<p class="muted">This report contains no device sections for your sites.</p>\n}
             : qq{<p class="muted">This report contains no device sections / diffs.</p>\n};
+        print qq{</div>\n};   # .tool-section (View report)
         print page_foot();
         return;
     }
@@ -8200,10 +9746,16 @@ sub show_view_report {
     }
     print qq{</div>\n};
     print report_viewer_script();
+    print qq{</div>\n};   # .tool-section (View report)
     print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# report_viewer_script
+#
+# Parameters: none
+################################################################################
 sub report_viewer_script {
     return <<'JS';
 <script>
@@ -8238,9 +9790,16 @@ sub report_viewer_script {
 JS
 }
 
+################################################################################
+# do_download_report
+#
 # Stream a report file as a download (?action=download_report&file=...). The
 # web server cannot reach the report dir, so the CGI streams the bytes behind
 # the login, as an attachment so the untrusted HTML never renders in our origin.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_download_report {
     my ($user) = @_;
     # The raw file contains every device; a site-limited user may download it
@@ -8281,7 +9840,14 @@ sub do_download_report {
     }
 }
 
+################################################################################
+# do_delete_report
+#
 # Delete one report (POST+CSRF).
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_delete_report {
     my ($user) = @_;
     my $dir  = report_directory();
@@ -8299,7 +9865,14 @@ sub do_delete_report {
     }
 }
 
+################################################################################
+# redirect_to_logo_tool
+#
 # Redirect back to the Upload report logo tool page, carrying a message.
+#
+# Parameters:
+#   %o
+################################################################################
 sub redirect_to_logo_tool {
     my (%o) = @_;
     my $url = script_url() . '?action=tool_logo';
@@ -8308,10 +9881,17 @@ sub redirect_to_logo_tool {
     print std_header(-location => $url, -status => '302 Found');
 }
 
+################################################################################
+# do_upload_logo
+#
 # Upload a report logo into report_dir (POST + CSRF, multipart). Enforces:
 # <=100KB, PNG/JPEG/GIF magic bytes (independent of the extension), a safe
 # case-preserved basename. Dimensions are not checked (no core module reads
 # them). The report dir must be web-writable (reports are written there).
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_upload_logo {
     my ($user) = @_;
     my $dir = report_directory();
@@ -8380,7 +9960,14 @@ sub do_upload_logo {
     redirect_to_logo_tool(msg => "Uploaded $base (" . human_size(length($data)) . ").");
 }
 
+################################################################################
+# do_delete_logo
+#
 # Delete a report logo from report_dir (POST + CSRF).
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_delete_logo {
     my ($user) = @_;
     my $dir  = report_directory();
@@ -8398,7 +9985,14 @@ sub do_delete_logo {
     }
 }
 
+################################################################################
+# do_prune_reports
+#
 # Prune reports older than N days, always keeping the newest (POST+CSRF).
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_prune_reports {
     my ($user) = @_;
     my $dir  = report_directory();
@@ -8428,7 +10022,14 @@ sub do_prune_reports {
                              . " older than $days day" . ($days == 1 ? '' : 's') . '.');
 }
 
+################################################################################
+# stamp_to_epoch
+#
 # report-YYYYMMDD-HHMMSS stamp -> epoch (local time), or undef.
+#
+# Parameters:
+#   $s
+################################################################################
 sub stamp_to_epoch {
     my ($s) = @_;
     return undef unless defined $s && $s =~ /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/;
@@ -8436,6 +10037,12 @@ sub stamp_to_epoch {
     return eval { POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900) };
 }
 
+################################################################################
+# redirect_to_reports
+#
+# Parameters:
+#   %o
+################################################################################
 sub redirect_to_reports {
     my (%o) = @_;
     my $url = script_url() . '?action=report';
@@ -8444,6 +10051,12 @@ sub redirect_to_reports {
     print std_header(-location => $url, -status => '302 Found');
 }
 
+################################################################################
+# human_size
+#
+# Parameters:
+#   $n
+################################################################################
 sub human_size {
     my ($n) = @_;
     $n = 0 unless defined $n;
@@ -8451,7 +10064,14 @@ sub human_size {
     return sprintf('%.1f KB', $n/1024)  if $n < 1024*1024;
     return sprintf('%.1f MB', $n/1024/1024);
 }
+################################################################################
+# fmt_mtime
+#
 # Format an mtime epoch as "YYYY-MM-DD HH:MM" in local time.
+#
+# Parameters:
+#   $t
+################################################################################
 sub fmt_mtime {
     my ($t) = @_;
     return '' unless $t;
@@ -8460,9 +10080,16 @@ sub fmt_mtime {
         $lt[5]+1900, $lt[4]+1, $lt[3], $lt[2], $lt[1]);
 }
 
+################################################################################
+# show_view_templates
+#
 # Template list page (?action=view_templates, admin only, read-only). Lists the
 # *.tmpl files in the directories fetchconfig reports via -t, one row per file
 # (de-duplicated by full path), sorted by template name.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_view_templates {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -8520,9 +10147,16 @@ sub show_view_templates {
     print page_foot();
 }
 
+################################################################################
+# show_view_template
+#
 # Single-template view (?action=view_template&path=..., admin only, read-only).
 # The path MUST contain no ".." and MUST be a member of the current template
 # list (exact full-path whitelist); anything else is refused.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_view_template {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -8543,14 +10177,14 @@ sub show_view_template {
     # Security: reject traversal, anything not in the discovered set, and any
     # entry that is not a plain regular file (symlink / hard link / special).
     unless (template_path_ok($path)) {
-        print qq{<h1>Template</h1>\n};
-        print qq{<p class="error">} . esc(template_refusal_message($path)) . qq{</p>\n};
+            print qq{<p class="error">} . esc(template_refusal_message($path)) . qq{</p>\n};
         print page_foot();
         return;
     }
 
     (my $name = $path) =~ s{.*/}{}; $name =~ s/\.tmpl$//;
-    print qq{<h1>Template: } . esc($name) . qq{</h1>\n};
+    print qq{<div class="tool-section" id="template-view-section">\n};
+    print qq{<h2 class="tool-section-title">Template: } . esc($name) . qq{</h2>\n};
     print qq{<p class="muted">} . esc($path) . qq{</p>\n};
 
     my $content;
@@ -8561,6 +10195,7 @@ sub show_view_template {
                   detail => "cannot read template file: $why");
             print qq{<p class="error">The template could not be read. }
                 . qq{See the audit log for details.</p>\n};
+            print qq{</div>\n};   # .tool-section (Template view)
             print page_foot();
             return;
         };
@@ -8578,15 +10213,24 @@ sub show_view_template {
     print qq{<pre class="config$hl_class" id="config-content">} . $body . qq{</pre>\n};
     print qq{</div>\n};
     print copy_button_script();
+    print qq{</div>\n};   # .tool-section (Template view)
+    print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# show_template_models_json
+#
 # JSON: the model names available in a template directory (?action=template_models
 # &dir=...). Used by the device-table editor to re-evaluate the generic model=
 # dropdown when the user types a template_dir that fetchconfig -t does not yet
 # know about (it only lists configured directories). The directory is scanned
 # directly for *.tmpl files (scan_dir_models). Admin/edit-table gated,
 # read-only. Returns {"models":[...]}.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_template_models_json {
     my ($user) = @_;
     print std_header(-type => 'application/json', -charset => 'UTF-8');
@@ -8604,10 +10248,18 @@ sub show_template_models_json {
     print $json, "\n";
 }
 
+################################################################################
+# show_edit_template
+#
 # Template editor page (?action=edit_template&path=..., admin only). A vertical
 # split: left "Editor" textarea, right "Checked version" (highlighted, refreshed
 # when Check syntax is pressed). Buttons: Save, Check syntax, Revert (only if a
 # .bak exists), Cancel. Save is blocked if the syntax check fails.
+#
+# Parameters:
+#   $user
+#   %opt
+################################################################################
 sub show_edit_template {
     my ($user, %opt) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8')
@@ -8670,6 +10322,27 @@ sub show_edit_template {
     my $list_url  = esc(script_url() . '?action=view_templates');
     my $reopen_url = esc(script_url() . '?action=edit_template&path=' . CGI::escape($path));
 
+
+    # Title with the full path in parentheses (muted).
+    print qq{<div class="tool-section" id="template-edit-section">\n};
+    # Show the backup's timestamp in the title when a .bak exists, so it is
+    # obvious at a glance whether "Revert to last backup version" has something
+    # to revert to.
+    my $bak_path = template_backup_path($path);
+    my $bak_label = '';
+    if (defined $bak_path) {
+        my @st = stat($bak_path);
+        if (@st) {
+            my @t = localtime($st[9]);
+            $bak_label = sprintf(' - backup %04d-%02d-%02d %02d-%02d-%02d',
+                                 $t[5] + 1900, $t[4] + 1, $t[3], $t[2], $t[1], $t[0]);
+        } else {
+            $bak_label = ' - backup available';
+        }
+    }
+    print qq{<h2 class="tool-section-title">Edit template: } . esc($name)
+        . qq{ <span class="muted tpl-path">(} . esc($path) . esc($bak_label) . qq{)</span></h2>\n};
+
     # Toolbar row: back-link + action buttons. The back-link and "Discard
     # changes" are guarded by JS (tpl-editor-script) when there are unsaved
     # edits; Save/Check/Revert submit the form normally.
@@ -8687,9 +10360,6 @@ sub show_edit_template {
     }
     print qq{</div>\n};
 
-    # Title with the full path in parentheses (muted).
-    print qq{<h1 class="tpl-title">Edit template: } . esc($name)
-        . qq{ <span class="muted tpl-path">(} . esc($path) . qq{)</span></h1>\n};
 
     # Optional result box (syntax-check outcome / save messages).
     if (defined $opt{result_html}) { print $opt{result_html}; }
@@ -8705,15 +10375,23 @@ sub show_edit_template {
     print qq{</div>\n};
 
     print $cgi->end_form;
+    print qq{</div>\n};   # .tool-section (Edit template)
     print tpl_editor_script($saved);
     print page_foot();
 }
 
+################################################################################
+# tpl_editor_script
+#
 # Client-side dirty-state tracking for the template editor:
 #   - toggles the red "-- Unsaved changes" label in the Editor pane title,
 #   - guards the "<- Templates" back-link and "Discard changes" link with the
 #     custom confirm dialog when there are unsaved edits.
 # Save / Check syntax / Revert submit the form and are not guarded here.
+#
+# Parameters:
+#   $saved
+################################################################################
 sub tpl_editor_script {
     my ($saved) = @_;
     # The baseline is the on-disk (saved) content, so edits shown after a
@@ -8753,7 +10431,15 @@ JS
     return $out;
 }
 
+################################################################################
+# template_check_result_html
+#
 # Format the --check-template output into a result box (green ok / red errors).
+#
+# Parameters:
+#   $ok
+#   $detail
+################################################################################
 sub template_check_result_html {
     my ($ok, $detail) = @_;
     $detail = '' unless defined $detail;
@@ -8766,8 +10452,15 @@ sub template_check_result_html {
     return $html;
 }
 
+################################################################################
+# do_check_template
+#
 # POST: run the syntax check on the submitted buffer, refresh the preview, do
 # not save. (action=check_template)
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_check_template {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -8793,7 +10486,14 @@ sub do_check_template {
         result_html => template_check_result_html($ok, $detail));
 }
 
+################################################################################
+# do_save_template
+#
 # POST: syntax-check then save (only if ok). (action=save_template)
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_save_template {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -8832,7 +10532,14 @@ sub do_save_template {
         checked_content => $content, result_html => $box);
 }
 
+################################################################################
+# do_revert_template
+#
 # POST: revert to <target>.bak, reload the editor from the restored file.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_revert_template {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -8856,7 +10563,14 @@ sub do_revert_template {
     show_edit_template($user, no_header => 1, path => $path, result_html => $box);
 }
 
+################################################################################
+# _check_buffer
+#
 # Write $content to a temp file and run the structural check on it.
+#
+# Parameters:
+#   $content
+################################################################################
 sub _check_buffer {
     my ($content) = @_;
     my ($tfh, $tmp) = eval { tempfile('fcweb-chk-XXXXXXXX', DIR => $BACKUP_TMP_DIR, SUFFIX => '.tmpl') };
@@ -8869,7 +10583,13 @@ sub _check_buffer {
     return ($ok, $detail);
 }
 
+################################################################################
+# log_viewer_script
+#
 # Client-side expand/collapse for the log viewer.
+#
+# Parameters: none
+################################################################################
 sub log_viewer_script {
     return <<'JS';
 <script>
@@ -8912,10 +10632,17 @@ sub log_viewer_script {
 JS
 }
 
+################################################################################
+# render_scan_tool
+#
 # Render a "scan every device" tool box: a titled section with a Start/Cancel
 # scan button, a progress bar, and a results list, driven client-side by
 # per-device JSON calls. Reused by both device-scan tools. All element IDs
 # are namespaced with %opt: prefix so two boxes can coexist on the page.
+#
+# Parameters:
+#   %o
+################################################################################
 sub render_scan_tool {
     my (%o) = @_;
     my $p = $o{prefix};
@@ -8948,10 +10675,23 @@ sub render_scan_tool {
     print qq{</div>\n};
 }
 
+################################################################################
+# scan_tool_script
+#
 # Emit the self-contained scanner script for one scan tool. Every id and the
 # ids array are namespaced by $p so multiple scanners coexist. $flag is the
 # JSON status word that means "list this device"; $none_msg / $all_ok are the
 # result wordings (see render_scan_tool).
+#
+# Parameters:
+#   $p
+#   $ids_json
+#   $action
+#   $flag
+#   $none_msg
+#   $all_ok
+#   $concurrency
+################################################################################
 sub scan_tool_script {
     my ($p, $ids_json, $action, $flag, $none_msg, $all_ok, $concurrency) = @_;
     my $url = esc(script_url());
@@ -9120,14 +10860,27 @@ sub scan_tool_script {
 JS
 }
 
+################################################################################
+# _js_str
+#
 # Helpers for building the JS result strings from Perl. _js_str double-quotes
 # a Perl string as a JS string literal; the all_ok template has a %d (count,
 # filled in JS) and %s (plural) -- we pre-split it so JS can insert the count.
+#
+# Parameters:
+#   $s
+################################################################################
 sub _js_str {
     my ($s) = @_;
     $s =~ s/([\\"])/\\$1/g;
     return qq{"$s"};
 }
+################################################################################
+# _all_ok_js
+#
+# Parameters:
+#   $tmpl
+################################################################################
 sub _all_ok_js {
     # Turn "All %d device%s ..." into a JS expression string that fills the
     # count (total) and plural at runtime. We emit it as a concatenation:
@@ -9142,11 +10895,18 @@ sub _all_ok_js {
 }
 
 
+################################################################################
+# show_compare_backups
+#
 # Compare two device-table configs (each either "current" -- the live table
 # -- or a backup, selected by checkbox in the Restore device table tool).
 # Whitespace outside
 # quotes is normalized before diffing, so tab/space-only differences don't
 # show. Rendered side-by-side (red/green), admin-only, passwords masked.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_compare_backups {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9160,7 +10920,8 @@ sub show_compare_backups {
     print page_head('Compare configurations', $user, 'wide');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_restore') . qq{">&larr; Restore device table</a></p>\n};
-    print qq{<h1>Compare configurations</h1>\n};
+    print qq{<div class="tool-section" id="compare-section">\n};
+    print qq{<h2 class="tool-section-title">Compare configurations</h2>\n};
 
     # Exactly two selections; each is "current" or a valid backup name.
     my %seen;
@@ -9170,6 +10931,7 @@ sub show_compare_backups {
         print qq{<p class="error">Please select exactly two configurations to }
             . qq{compare (you selected $got). Go back to Tools, tick two, then }
             . qq{press Compare selected.</p>\n};
+        print qq{</div>\n};   # .tool-section (Compare)
         print page_foot();
         return;
     }
@@ -9184,6 +10946,7 @@ sub show_compare_backups {
             my ($content, $err) = slurp_device_table();
             if ($err) {
                 print qq{<p class="error">} . esc($err) . qq{</p>\n};
+                print qq{</div>\n};   # .tool-section (Compare)
                 print page_foot();
                 return;
             }
@@ -9193,6 +10956,7 @@ sub show_compare_backups {
             my $path = resolve_backup_path($s);
             unless ($path) {
                 print qq{<p class="error">No such backup: } . esc($s) . qq{</p>\n};
+                print qq{</div>\n};   # .tool-section (Compare)
                 print page_foot();
                 return;
             }
@@ -9243,11 +11007,19 @@ sub show_compare_backups {
         print render_side_by_side($left, $right, $sides[0]{label}, $sides[1]{label}, $unmask);
     }
 
+    print qq{</div>\n};   # .tool-section (Compare)
     print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# do_check_suffix_one
+#
 # Per-device JSON endpoint for the "consistent backup extensions" scan.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_check_suffix_one {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
@@ -9273,8 +11045,15 @@ sub do_check_suffix_one {
     }
 }
 
+################################################################################
+# do_check_backups_one
+#
 # JSON endpoint for the "Devices without backups" scan: checks ONE device
 # and returns its backup status. Admin-only, read-only GET (no CSRF).
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_check_backups_one {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
@@ -9300,8 +11079,15 @@ sub do_check_backups_one {
     }
 }
 
+################################################################################
+# show_view_backup
+#
 # View a device-table backup (read-only). Admin-only; strict name check.
 # Passwords are masked in the display like every other config view.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_view_backup {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9340,9 +11126,16 @@ sub show_view_backup {
     print page_foot();
 }
 
+################################################################################
+# do_restore_backup
+#
 # Restore the device table from a backup. Admin-only, POST + CSRF, strict
 # name check. Backs the CURRENT table up first (so restore is undoable),
 # then writes the chosen backup in place via the shared safe writer.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_restore_backup {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
@@ -9404,7 +11197,14 @@ sub do_restore_backup {
         . "(Previous table backed up as $info.)");
 }
 
+################################################################################
+# do_delete_backup
+#
 # Delete a device-table backup. Admin-only, POST + CSRF, strict name check.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_delete_backup {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
@@ -9426,10 +11226,17 @@ sub do_delete_backup {
     }
 }
 
+################################################################################
+# do_delete_old_backups
+#
 # Delete device-table backups older than N days, ALWAYS keeping the single
 # newest backup (by the timestamp in its filename) even if it is older than
 # N days. Age is taken from the filename timestamp, not the file mtime. N
 # must be an integer >= 1. POST + CSRF (state-changing); admin only.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_delete_old_backups {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
@@ -9475,8 +11282,15 @@ sub do_delete_old_backups {
     }
 }
 
+################################################################################
+# show_orphan_check
+#
 # Run the read-only orphaned-backup check and show its transcript, in the
 # same layout as Backup Now / Check Empty Backups.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_orphan_check {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9490,7 +11304,8 @@ sub show_orphan_check {
     print page_head('Check for orphaned backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned backup cleanup</a></p>\n};
-    print qq{<h1>Check for orphaned backups</h1>\n};
+    print qq{<div class="tool-section" id="orphan-check-section">\n};
+    print qq{<h2 class="tool-section-title">Check for orphaned backups</h2>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -o</code>. Nothing }
         . qq{is deleted.</p>\n};
 
@@ -9528,11 +11343,19 @@ sub show_orphan_check {
         print copy_button_script();
     }
 
+    print qq{</div>\n};   # .tool-section (Check for orphaned backups)
     print page_foot();
 }
 
+################################################################################
+# do_orphan_delete
+#
 # Run the destructive orphaned-backup delete and show its transcript. POST +
 # CSRF (state-changing), admin only, re-checked here.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_orphan_delete {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9546,7 +11369,8 @@ sub do_orphan_delete {
     print page_head('Delete orphaned backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned backup cleanup</a></p>\n};
-    print qq{<h1>Delete orphaned backups</h1>\n};
+    print qq{<div class="tool-section" id="orphan-delete-section">\n};
+    print qq{<h2 class="tool-section-title">Delete orphaned backups</h2>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -o -D</code>.</p>\n};
 
     my ($output, $status, $err) = run_orphan_delete();
@@ -9584,10 +11408,18 @@ sub do_orphan_delete {
         print copy_button_script();
     }
 
+    print qq{</div>\n};   # .tool-section (Delete orphaned backups)
     print page_foot();
 }
 
+################################################################################
+# show_empty_check
+#
 # Empty-directory check page: full output of `fetchconfig.pl -e`.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_empty_check {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9601,7 +11433,8 @@ sub show_empty_check {
     print page_head('Check for empty directories', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty directory cleanup</a></p>\n};
-    print qq{<h1>Check for empty directories</h1>\n};
+    print qq{<div class="tool-section" id="empty-dir-check-section">\n};
+    print qq{<h2 class="tool-section-title">Check for empty directories</h2>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -e</code>. Nothing }
         . qq{is deleted.</p>\n};
 
@@ -9639,10 +11472,18 @@ sub show_empty_check {
         print copy_button_script();
     }
 
+    print qq{</div>\n};   # .tool-section (Check for empty directories)
     print page_foot();
 }
 
+################################################################################
+# do_empty_delete
+#
 # Empty-directory delete page: full output of `fetchconfig.pl -e -D`.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_empty_delete {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9656,7 +11497,8 @@ sub do_empty_delete {
     print page_head('Delete empty directories', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty directory cleanup</a></p>\n};
-    print qq{<h1>Delete empty directories</h1>\n};
+    print qq{<div class="tool-section" id="empty-dir-delete-section">\n};
+    print qq{<h2 class="tool-section-title">Delete empty directories</h2>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -e -D</code>.</p>\n};
 
     my ($output, $status, $err) = run_empty_delete();
@@ -9691,12 +11533,20 @@ sub do_empty_delete {
         print copy_button_script();
     }
 
+    print qq{</div>\n};   # .tool-section (Delete empty directories)
     print page_foot();
 }
 
+################################################################################
+# show_empty_bk_check
+#
 # "Empty backup cleanup" CHECK: fetchconfig.pl -Z over all devices (read-only).
 # fetchconfig exits 1 when zero-byte backups ARE found and 0 when none, so the
 # count is taken from the summary line, not the exit status.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_empty_bk_check {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9709,17 +11559,26 @@ sub show_empty_bk_check {
     print page_head('Check for empty backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty backup cleanup</a></p>\n};
-    print qq{<h1>Check for empty backups</h1>\n};
+    print qq{<div class="tool-section" id="empty-bk-check-section">\n};
+    print qq{<h2 class="tool-section-title">Check for empty backups</h2>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -Z</code>. Nothing is deleted.</p>\n};
     # Render a spinner immediately, then fetch the (slow) scan result so the
     # spinner stays visible on THIS page until the output is ready. If the
     # browser has no fetch, fall back to running the scan inline.
     print empty_bk_result_shell('empty_bk_check_data');
+    print qq{</div>\n};   # .tool-section (Check for empty backups)
     print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# do_empty_bk_delete
+#
 # "Empty backup cleanup" DELETE: fetchconfig.pl -Z -D (POST + CSRF). Audited.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_empty_bk_delete {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9732,18 +11591,27 @@ sub do_empty_bk_delete {
     print page_head('Delete empty backups', $user, 'checkout');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty backup cleanup</a></p>\n};
-    print qq{<h1>Delete empty backups</h1>\n};
+    print qq{<div class="tool-section" id="empty-bk-delete-section">\n};
+    print qq{<h2 class="tool-section-title">Delete empty backups</h2>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -Z -D</code>.</p>\n};
     print empty_bk_result_shell('empty_bk_delete_data');
+    print qq{</div>\n};   # .tool-section (Delete empty backups)
     print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# empty_bk_result_shell
+#
 # The spinner shell for an empty-backup result page: shows a spinner, then
 # fetches the result fragment from $data_action (GET for check, POST+CSRF for
 # delete) and swaps it in -- so the spinner stays on THIS page until the scan
 # finishes. Without fetch, a <noscript> link lets the user get the result page
 # the old (blocking) way via the same action with &inline=1.
+#
+# Parameters:
+#   $data_action
+################################################################################
 sub empty_bk_result_shell {
     my ($data_action) = @_;
     my $url  = esc(script_url());
@@ -9761,7 +11629,7 @@ sub empty_bk_result_shell {
           . qq{<p><button type="submit" class="btn">Show result</button></p></form></noscript>}
         : qq{<noscript><p><a class="btn" href="$url?action=$data_action&inline=1">Show result</a></p></noscript>};
     my $h = <<"HTML";
-<div id="ebk-result">
+<div id="ebk-result" style="min-height:22em;width:900px;max-width:100%;box-sizing:border-box;">
   <div class="backup-overlay-box" id="ebk-spin" style="margin:1.5em auto;max-width:30em;">
     <div class="backup-spinner" aria-hidden="true"></div>
     <div class="backup-patience">Scanning all devices &mdash; please wait.</div>
@@ -9804,9 +11672,16 @@ HTML
     return $h;
 }
 
+################################################################################
+# empty_bk_result_fragment
+#
 # Build the result fragment (status line + output block) for an empty-backup
 # run. $mode is 'check' (-Z) or 'delete' (-Z -D). The delete run is audited
 # here, where the command actually runs.
+#
+# Parameters:
+#   $mode
+################################################################################
 sub empty_bk_result_fragment {
     my ($mode) = @_;
     my ($output, $status, $err, $aborted) = $mode eq 'delete'
@@ -9848,10 +11723,17 @@ sub empty_bk_result_fragment {
     return $h;
 }
 
+################################################################################
+# show_empty_bk_check_data
+#
 # Data endpoints: run the scan and return just the result fragment. check is a
 # read-only GET; delete is POST + CSRF (enforced by the dispatcher's
 # state-changing set). With &inline=1 (the <noscript> fallback) the fragment is
 # wrapped in a minimal page instead.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_empty_bk_check_data {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
@@ -9874,6 +11756,12 @@ sub show_empty_bk_check_data {
         print $frag;
     }
 }
+################################################################################
+# do_empty_bk_delete_data
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_empty_bk_delete_data {
     my ($user) = @_;
     unless (user_may_use_tools($user)) {
@@ -9897,6 +11785,12 @@ sub do_empty_bk_delete_data {
     }
 }
 
+################################################################################
+# redirect_to_user_page
+#
+# Parameters:
+#   %opts
+################################################################################
 sub redirect_to_user_page {
     my (%opts) = @_;
     my $act = $opts{action} || 'user';   # which User sub-page to return to
@@ -9909,6 +11803,9 @@ sub redirect_to_user_page {
     print std_header(@hdr);
 }
 
+################################################################################
+# show_sites_page
+#
 # =============================================================================
 # Site management (admin only): CRUD the site codes. id 0 ("All sites") is the
 # fixed sentinel and cannot be edited or deleted. A code can be deleted only if
@@ -9918,6 +11815,10 @@ sub redirect_to_user_page {
 # The Sites management page (admin only): list site codes with edit/delete and
 # an "Add a site" form, in the green section box. Has a client-side filter so a
 # large list (hundreds of sites) stays manageable.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_sites_page {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -9931,13 +11832,12 @@ sub show_sites_page {
         return;
     }
     print page_head('Sites', $user, 'full');
-    print qq{<h1>Sites</h1>\n};
     my $msg = $cgi->param('msg'); my $err = $cgi->param('err');
     print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
     print qq{<p class="error">}   . esc($err) . qq{</p>\n} if defined $err && $err ne '';
 
     print qq{<div class="user-section">\n};
-    print qq{<h2>Site codes</h2>\n};
+    print qq{<h2 class="tool-section-title">Sites</h2>\n};
     print qq{<h3>Add a site</h3>\n};
     print $cgi->start_form(-method=>'POST', -action=>script_url(), -class=>'inline-form');
     print qq{<input type="hidden" name="action" value="add_site">};
@@ -9947,8 +11847,8 @@ sub show_sites_page {
     print qq{<button type="submit" class="btn btn-green">Add site</button>};
     print $cgi->end_form;
     print qq{<p class="muted">A device's <code>site=</code> tag limits which users }
-        . qq{can see it; assign sites to a user with <strong>Edit sites</strong> on }
-        . qq{the User page. <strong>All sites</strong> (the reserved entry) means }
+        . qq{can see it; assign sites to a user with <strong>Edit site access</strong> }
+        . qq{on the user's edit page. <strong>All sites</strong> (the reserved entry) means }
         . qq{unrestricted.</p>\n};
     print qq{<input type="text" id="site-mgmt-filter" class="filter-box" }
         . qq{placeholder="Filter sites&hellip;" autocomplete="off">\n};
@@ -10016,10 +11916,22 @@ sub show_sites_page {
     print page_foot();
 }
 
+################################################################################
+# _sites_redirect
+#
+# Parameters:
+#   %o
+################################################################################
 sub _sites_redirect { my (%o)=@_; my $u=script_url().'?action=sites';
     $u.='&msg='.CGI::escape($o{msg}) if $o{msg}; $u.='&err='.CGI::escape($o{err}) if $o{err};
     print std_header(-location=>$u, -status=>'302 Found'); }
 
+################################################################################
+# do_add_site
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_add_site {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -10036,6 +11948,12 @@ sub do_add_site {
     else     { _sites_redirect(err=>"Could not add site '$code': " . ($dberr // 'database error') . '.'); }
 }
 
+################################################################################
+# do_edit_site
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_edit_site {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -10088,6 +12006,12 @@ sub do_edit_site {
     _sites_redirect(msg=>"Updated site '$code'.");
 }
 
+################################################################################
+# do_delete_site
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_delete_site {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -10108,7 +12032,14 @@ sub do_delete_site {
     else      { _sites_redirect(err=>"Could not delete site '$site->{code}': " . ($derr // 'database error') . '.'); }
 }
 
+################################################################################
+# show_user_sites_form
+#
 # Per-user site assignment (admin only): a checkbox list of all site codes.
+#
+# Parameters:
+#   $admin
+################################################################################
 sub show_user_sites_form {
     my ($admin) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -10126,9 +12057,9 @@ sub show_user_sites_form {
 
     print page_head('Assign sites', $admin, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=user_list') . qq{">&larr; Users</a></p>\n};
-    print qq{<h1>Sites for } . esc($target) . qq{</h1>\n};
-    print qq{<div class="user-section"><h2>Assigned sites</h2>\n};
+        . esc(script_url() . '?action=user_edit&username=' . CGI::escape($target)) . qq{">&larr; Edit user</a></p>\n};
+
+    print qq{<div class="user-section"><h2 class="tool-section-title">Sites for } . esc($target) . qq{</h2>\n};
 
     if ($target eq $PROTECTED_USER) {
         print qq{<p class="muted">The built-in <strong>admin</strong> account always has }
@@ -10160,8 +12091,8 @@ sub show_user_sites_form {
     print qq{</div>\n};
     # Permissions (admin / edit / full report / full config) are set on the
     # user edit page, not here -- this page edits site access only.
-    print qq{<p><button type="submit" class="btn btn-green">Save</button> }
-        . qq{<a class="btn" href="} . esc(script_url().'?action=user_list') . qq{">Cancel</a></p>\n};
+    print qq{<p><a class="btn" href="} . esc(script_url().'?action=user_edit&username=' . CGI::escape($target)) . qq{">Cancel</a> }
+        . qq{<button type="submit" class="btn btn-green">Save</button></p>\n};
     print $cgi->end_form;
     print qq{</div>\n};
     print qq{<script>
@@ -10209,6 +12140,12 @@ sub show_user_sites_form {
     print page_foot();
 }
 
+################################################################################
+# do_set_user_sites
+#
+# Parameters:
+#   $admin
+################################################################################
 sub do_set_user_sites {
     my ($admin) = @_;
     my $dbh = db_connect();
@@ -10217,7 +12154,7 @@ sub do_set_user_sites {
     my $target = $cgi->param('username') // '';
     my $trow = $target ne '' ? db_get_user($dbh, $target) : undef;
     unless ($trow) { $dbh->disconnect; redirect_to_user_page(action=>"user_list", err=>'User not found.'); return; }
-    if ($target eq $PROTECTED_USER) { $dbh->disconnect; redirect_to_user_page(action=>"user_list", err=>'admin always has All sites.'); return; }
+    if ($target eq $PROTECTED_USER) { $dbh->disconnect; redirect_to_user_page(action=>"user_edit", username=>$target, err=>'admin always has All sites.'); return; }
     my @ids = grep { /^\d+$/ } $cgi->multi_param('site_id');
     # "All sites" (id 0) is mutually exclusive with specific sites: if it is
     # ticked, store only site 0 (unrestricted), ignoring any specific picks.
@@ -10244,9 +12181,15 @@ sub do_set_user_sites {
     audit(action=>'set_user_sites', object_type=>'user', object_id=>$target,
           old_value=>$as_codes->(@old_ids), new_value=>$as_codes->(@ids),
           detail=>$detail);
-    redirect_to_user_page(action=>"user_list", msg=>"Updated sites for $target.");
+    redirect_to_user_page(action=>"user_edit", username=>$target, msg=>"Updated sites for $target.");
 }
 
+################################################################################
+# do_set_download_full_report
+#
+# Parameters:
+#   $admin
+################################################################################
 sub do_set_download_full_report {
     my ($admin) = @_;
     my $dbh = db_connect();
@@ -10263,6 +12206,12 @@ sub do_set_download_full_report {
     redirect_to_user_page(action=>"user_list", msg=>"Updated report-download right for $target.");
 }
 
+################################################################################
+# do_set_download_full_config
+#
+# Parameters:
+#   $admin
+################################################################################
 sub do_set_download_full_config {
     my ($admin) = @_;
     my $dbh = db_connect();
@@ -10279,6 +12228,12 @@ sub do_set_download_full_config {
     redirect_to_user_page(action=>"user_list", msg=>"Updated config-download right for $target.");
 }
 
+################################################################################
+# do_set_email
+#
+# Parameters:
+#   $admin
+################################################################################
 sub do_set_email {
     my ($admin) = @_;
     my $dbh = db_connect();
@@ -10305,6 +12260,13 @@ sub do_set_email {
     redirect_to_user_page(action=>"user_list", msg=>"Updated email for $target.");
 }
 
+################################################################################
+# show_user_page
+#
+# Parameters:
+#   $user
+#   $only
+################################################################################
 sub show_user_page {
     my ($user, $only) = @_;
     my $msg = $cgi->param('msg');
@@ -10329,7 +12291,6 @@ sub show_user_page {
 
     print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head($title, $user, 'full');
-    print qq{<h1>} . esc($title) . qq{</h1>\n};
 
     if (defined $msg && $msg ne '') {
         print qq{<p class="success">} . esc($msg) . qq{</p>\n};
@@ -10349,7 +12310,7 @@ sub show_user_page {
 
     if ($only eq 'password') {
     print qq{<div class="user-section">\n};
-    print qq{<h2>Change your password</h2>\n};
+    print qq{<h2 class="tool-section-title">Change your password</h2>\n};
     print qq{<div class="form-narrow">\n};
     print $cgi->start_form(-method => 'POST', -action => script_url());
     print qq{<input type="hidden" name="action" value="change_password">\n};
@@ -10381,7 +12342,7 @@ sub show_user_page {
             $cur = $me->{email} if $me && defined $me->{email};
         }
         print qq{<div class="user-section">\n};
-        print qq{<h2>Change your email</h2>\n};
+        print qq{<h2 class="tool-section-title">Change your email</h2>\n};
         print qq{<p class="muted">Email address, used for password reset; }
             . qq{leave blank to remove.</p>\n};
         print qq{<div class="form-narrow">\n};
@@ -10412,7 +12373,7 @@ sub show_user_page {
 
     if ($only eq 'users' && $is_admin) {
         print qq{<div class="user-section">\n};
-        print qq{<h2>Users</h2>\n};
+        print qq{<h2 class="tool-section-title">Users</h2>\n};
         if (!$admin_dbh) {
             print qq{<p class="error">Cannot reach the user database.</p>\n};
         } else {
@@ -10472,7 +12433,7 @@ sub show_user_page {
 
     if ($only eq 'add' && $is_admin) {
         print qq{<div class="user-section">\n};
-        print qq{<h2>Add user</h2>\n};
+        print qq{<h2 class="tool-section-title">Add user</h2>\n};
         print qq{<div class="form-narrow">\n};
         print $cgi->start_form(-method => 'POST', -action => script_url());
         print qq{<input type="hidden" name="action" value="add_user">\n};
@@ -10501,9 +12462,16 @@ sub show_user_page {
     print page_foot();
 }
 
+################################################################################
+# show_user_edit
+#
 # Per-user edit page (?action=user_edit&username=..., admin only). All of a
 # user's settings in one grouped form with Return / Cancel / Save. Site access
 # is a read-only wrapped summary with a button to the separate sites editor.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_user_edit {
     my ($user) = @_;
     my $target = $cgi->param('username') // '';
@@ -10675,10 +12643,17 @@ JS
     print page_foot();
 }
 
+################################################################################
+# do_user_save
+#
 # Single save for the user edit page (POST+CSRF, admin only). Writes email and
 # all permission fields in one UPDATE, and emits ONE audit line per CHANGED
 # field (reusing the existing set_* action names), so the audit log reflects
 # exactly what the admin changed -- no noise for unchanged fields.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_user_save {
     my ($user) = @_;
     my $target = $cgi->param('username') // '';
@@ -10763,11 +12738,23 @@ sub do_user_save {
 
 # Thin per-page handlers for the split User menu.
 sub show_user_add             { show_user_page($_[0], 'add'); }
+################################################################################
+# show_change_password_form
+#
+# Parameters: reads @_ directly
+################################################################################
 sub show_change_password_form { show_user_page($_[0], 'password'); }
 sub show_change_email_form    { show_user_page($_[0], 'email'); }
 
+################################################################################
+# do_change_email
+#
 # Self-service: the logged-in user sets their OWN email address. Any logged-in
 # user may do this (unlike set_email, which is an admin editing another user).
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_change_email {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -10792,7 +12779,163 @@ sub do_change_email {
                              : 'Your email address was removed.'));
 }
 
+################################################################################
+# email_html_shell
+#
 # Self-service: send a test message to the logged-in user's own saved address.
+# Shared HTML shell for all notification emails: a centred white card with a
+# brand header bar (program icon + "fetchconfig-web vN.NN") and $inner as the
+# body. $inner is trusted HTML the caller has already escaped. Keeps every
+# email (test, reset, admin verify) in one consistent, email-client-safe style.
+#
+# Parameters:
+#   $inner
+################################################################################
+sub email_html_shell {
+    my ($inner) = @_;
+    my $ver = esc(APP_VERSION);
+    return <<"HTML";
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#222;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;">
+    <tr><td align="center" style="padding:24px 12px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border:1px solid #e1e4e8;border-radius:10px;overflow:hidden;">
+        <tr>
+          <td style="background:#1f4e79;padding:18px 24px;">
+            <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+              <td style="vertical-align:middle;">
+                <img src="cid:fcwlogo" alt="" width="40" height="40" style="display:block;border-radius:8px;">
+              </td>
+              <td style="vertical-align:middle;padding-left:14px;color:#ffffff;font-size:20px;font-weight:600;">
+                fetchconfig-web <span style="opacity:0.8;font-weight:400;">v$ver</span>
+              </td>
+            </tr></table>
+          </td>
+        </tr>
+        <tr><td style="padding:28px 24px;font-size:15px;line-height:1.6;">
+$inner
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
+HTML
+}
+
+################################################################################
+# test_email_bodies
+#
+# Plain-text + HTML bodies for the "email configured" test mail.
+#
+# Parameters:
+#   $user
+#   $to
+################################################################################
+sub test_email_bodies {
+    my ($user, $to) = @_;
+    my $text = <<"TXT";
+Dear $user,
+
+Your email address $to has been successfully configured for fetchconfig-web.
+From now on, you will receive notifications from fetchconfig-web at this address.
+
+If you did not request this change, please contact your administrator.
+
+Kind regards,
+fetchconfig-web
+TXT
+    my ($e_user, $e_to) = (esc($user), esc($to));
+    my $inner = <<"HTML";
+<p style="margin:0 0 16px;">Dear <strong>$e_user</strong>,</p>
+<p style="margin:0 0 16px;">Your email address
+  <a href="mailto:$e_to" style="color:#1f4e79;">$e_to</a>
+  has been successfully configured for fetchconfig-web.
+  From now on, you will receive notifications from fetchconfig-web at this address.</p>
+<p style="margin:0 0 16px;color:#57606a;font-size:14px;">If you did not request this change, please contact your administrator.</p>
+<p style="margin:0;">Kind regards,<br><strong>fetchconfig-web</strong></p>
+HTML
+    return ($text, email_html_shell($inner));
+}
+
+################################################################################
+# reset_email_bodies
+#
+# Plain-text + HTML bodies for the password-reset mail. $link is the reset URL.
+#
+# Parameters:
+#   $user
+#   $link
+################################################################################
+sub reset_email_bodies {
+    my ($user, $link) = @_;
+    my $mins = int(RESET_TOKEN_TTL / 60);
+    my $text = <<"TXT";
+Dear $user,
+
+A password reset was requested for your fetchconfig-web account.
+
+To set a new password, open this link within $mins minutes:
+
+$link
+
+If you did not request this, you can ignore this email; your password will not change.
+
+Kind regards,
+fetchconfig-web
+TXT
+    my ($e_user, $e_link) = (esc($user), esc($link));
+    my $inner = <<"HTML";
+<p style="margin:0 0 16px;">Dear <strong>$e_user</strong>,</p>
+<p style="margin:0 0 16px;">A password reset was requested for your fetchconfig-web account.</p>
+<p style="margin:0 0 20px;">To set a new password, use the button below within <strong>$mins minutes</strong>:</p>
+<p style="margin:0 0 20px;">
+  <a href="$e_link" style="display:inline-block;background:#1f4e79;color:#ffffff;text-decoration:none;padding:11px 22px;border-radius:6px;font-weight:600;">Set a new password</a>
+</p>
+<p style="margin:0 0 16px;font-size:13px;color:#57606a;">If the button does not work, copy this link into your browser:<br>
+  <a href="$e_link" style="color:#1f4e79;word-break:break-all;">$e_link</a></p>
+<p style="margin:0 0 16px;color:#57606a;font-size:14px;">If you did not request this, you can ignore this email; your password will not change.</p>
+<p style="margin:0;">Kind regards,<br><strong>fetchconfig-web</strong></p>
+HTML
+    return ($text, email_html_shell($inner));
+}
+
+################################################################################
+# verify_email_bodies
+#
+# Plain-text + HTML bodies for the admin "Verify email setup" test mail.
+#
+# Parameters:
+#   $to
+################################################################################
+sub verify_email_bodies {
+    my ($to) = @_;
+    my $text = <<"TXT";
+This is a test message from fetchconfig-web.
+
+If you are reading this, email delivery to $to is working.
+
+Kind regards,
+fetchconfig-web
+TXT
+    my $e_to = esc($to);
+    my $inner = <<"HTML";
+<p style="margin:0 0 16px;">This is a test message from <strong>fetchconfig-web</strong>.</p>
+<p style="margin:0 0 16px;">If you are reading this, email delivery to
+  <a href="mailto:$e_to" style="color:#1f4e79;">$e_to</a> is working.</p>
+<p style="margin:0;">Kind regards,<br><strong>fetchconfig-web</strong></p>
+HTML
+    return ($text, email_html_shell($inner));
+}
+
+################################################################################
+# do_test_my_email
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_test_my_email {
     my ($user) = @_;
     unless ($EMAIL) {
@@ -10817,10 +12960,12 @@ sub do_test_my_email {
             err => 'You have no email address saved.');
         return;
     }
+    my ($text, $html) = test_email_bodies($user, $addr);
     my ($ok, $why) = send_mail(
         to      => $addr,
-        subject => 'fetchconfig-web test email',
-        body    => "Your fetchconfig-web email address setup was successful.\n");
+        subject => 'fetchconfig-web email configured',
+        body    => $text,
+        html    => $html);
     login_record_failure($dbh, 'ip', $ip) if $dbh;   # count against the throttle
     audit(dbh => $dbh, action => 'test_email', object_type => 'user', object_id => $user,
           detail => ($ok ? 'self-service test email sent'
@@ -10835,9 +12980,16 @@ sub do_test_my_email {
     }
 }
 
+################################################################################
+# show_verify_email
+#
 # --- Admin: Tools -> Verify email setup -------------------------------------
 # A diagnostic that sends a fixed confirmation message to a typed address and
 # shows the real SMTP result, so an admin can validate the email configuration.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_verify_email {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -10876,6 +13028,12 @@ sub show_verify_email {
     print page_foot();
 }
 
+################################################################################
+# do_verify_email
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_verify_email {
     my ($user) = @_;
     my $dbh = db_connect();
@@ -10902,10 +13060,12 @@ sub do_verify_email {
                                to => scalar $cgi->param('to'));
         return;
     }
+    my ($v_text, $v_html) = verify_email_bodies($to);
     my ($ok, $why) = send_mail(
         to      => $to,
         subject => 'fetchconfig-web email setup test',
-        body    => "Email setup of fetchconfig-web successful.\n");
+        body    => $v_text,
+        html    => $v_html);
     login_record_failure($dbh, 'ip', $ip);
     audit(dbh => $dbh, action => 'test_email', object_type => 'email',
           detail => ($ok ? 'admin verify-email sent' : 'admin verify-email FAILED: ' . ($why // 'error')));
@@ -10915,6 +13075,12 @@ sub do_verify_email {
                                       to => $to); }
 }
 
+################################################################################
+# _verify_email_redirect
+#
+# Parameters:
+#   %a
+################################################################################
 sub _verify_email_redirect {
     my (%a) = @_;
     my $url = script_url() . '?action=tool_verify_email';
@@ -10924,9 +13090,18 @@ sub _verify_email_redirect {
     print std_header(-location => $url, -status => '302 Found');
 }
 
+################################################################################
+# _right_toggle_form
+#
 # A small grant/revoke toggle form for a right (edit_device_table or
 # admin_function): shows the current state as a tag and a button that
 # flips it. $action is the handler action name.
+#
+# Parameters:
+#   $action
+#   $username
+#   $has
+################################################################################
 sub _right_toggle_form {
     my ($action, $username, $has) = @_;
     my $new = $has ? 0 : 1;
@@ -10949,9 +13124,16 @@ sub _right_toggle_form {
     return $h;
 }
 
+################################################################################
+# do_change_password
+#
 # Change the *current* session's own password. The target user always
 # comes from the session ($user), never from form input, so this endpoint
 # has no way to change anyone else's password.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_change_password {
     my ($user) = @_;
     my $current = $cgi->param('current_password') // '';
@@ -11013,12 +13195,19 @@ sub do_change_password {
         msg => 'Password changed.', cookie => $cookie);
 }
 
+################################################################################
+# show_reset_password_form
+#
 # Small form for $PROTECTED_USER to set a new password for ANOTHER user
 # without needing that user's current password -- linked from the
 # "Change password" button next to each non-protected row in the Users
 # table. Never usable against $PROTECTED_USER's own account: that always
 # goes through do_change_password() above instead, which re-checks the
 # current password.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_reset_password_form {
     my ($user) = @_;
     my $target = $cgi->param('username') // '';
@@ -11052,7 +13241,7 @@ sub show_reset_password_form {
 
     print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head("Change password: $target", $user);
-    print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url() . '?action=user_list') . qq{">&larr; User</a></p>\n};
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url() . '?action=user_edit&username=' . CGI::escape($target)) . qq{">&larr; Edit user</a></p>\n};
     print qq{<h1>Set a new password for } . esc($target) . qq{</h1>\n};
     print qq{<p class="muted">As an admin you can set a new password for another }
         . qq{user without knowing their current one.</p>\n};
@@ -11073,12 +13262,19 @@ sub show_reset_password_form {
     print page_foot();
 }
 
+################################################################################
+# do_reset_password
+#
 # Set a new password for another user WITHOUT needing their current
 # password -- restricted to $PROTECTED_USER, and never usable against
 # $PROTECTED_USER's own account. This is the one path in the app that can
 # set a password without proving knowledge of the old one, so -- like
 # add/delete user -- the privilege check is enforced here in the handler
 # itself, not just by hiding the form/link in the view.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_reset_password {
     my ($user) = @_;
     my $target  = $cgi->param('username') // '';
@@ -11107,12 +13303,12 @@ sub do_reset_password {
     }
     if (my $perr = password_policy_error($new, $target)) {
         $dbh->disconnect;
-        redirect_to_user_page(action=>"user_list", err => $perr);
+        redirect_to_user_page(action=>"user_edit", username=>$target, err => $perr);
         return;
     }
     if ($new ne $confirm) {
         $dbh->disconnect;
-        redirect_to_user_page(action=>"user_list", err => 'New password and confirmation do not match.');
+        redirect_to_user_page(action=>"user_edit", username=>$target, err => 'New password and confirmation do not match.');
         return;
     }
     unless (db_user_exists($dbh, $target)) {
@@ -11125,7 +13321,7 @@ sub do_reset_password {
     reset_token_invalidate_user($dbh, $target) if $ok;   # kill any pending reset links
     $dbh->disconnect;
     if (!$ok) {
-        redirect_to_user_page(action=>"user_list", err => "Could not update password: " . ($err // 'unknown error'));
+        redirect_to_user_page(action=>"user_edit", username=>$target, err => "Could not update password: " . ($err // 'unknown error'));
         return;
     }
     audit(action => 'reset_password', object_type => 'user', object_id => $target,
@@ -11142,21 +13338,28 @@ sub do_reset_password {
             destroy_session($old_sid) if defined $old_sid;
             invalidate_user_sessions($user, $new_sid);
         }
-        redirect_to_user_page(action=>"user_list",
-            msg => "Your password was reset.", cookie => $cookie);
+        redirect_to_user_page(action=>"user_edit", username=>$target,
+            msg => "Password for $target was reset.", cookie => $cookie);
         return;
     }
     # Resetting another user: invalidate ALL of that user's sessions, so they
     # are signed out everywhere and must log in with the new password. The
     # admin's own session is untouched.
     invalidate_user_sessions($target, undef);
-    redirect_to_user_page(action=>"user_list",
+    redirect_to_user_page(action=>"user_edit", username=>$target,
         msg => "Password for '$target' reset. They have been signed out and must log in with the new password.");
 }
 
+################################################################################
+# do_add_user
+#
 # Add a new user. Restricted to $PROTECTED_USER -- checked here as well as
 # hidden in the view, since this is the actual enforcement point (the view
 # merely decides whether to render the form).
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_add_user {
     my ($user) = @_;
     my $new_user = $cgi->param('username') // '';
@@ -11217,8 +13420,15 @@ sub do_add_user {
         msg => "User '$new_user' added. Set its permissions and site access below.");
 }
 
+################################################################################
+# do_delete_user
+#
 # Delete a user. Restricted to $PROTECTED_USER, and $PROTECTED_USER itself
 # can never be the target -- both checked here, not just hidden in the view.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_delete_user {
     my ($user) = @_;
     my $target = $cgi->param('username') // '';
@@ -11259,8 +13469,15 @@ sub do_delete_user {
     redirect_to_user_page(action=>"user_list", msg => "User '$target' deleted.");
 }
 
+################################################################################
+# do_set_edit_right
+#
 # Grant or revoke a user's device-table edit right. Admin-only; never
 # applies to the protected admin account (which is always allowed).
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_set_edit_right {
     my ($user) = @_;
     my $target = $cgi->param('username') // '';
@@ -11305,10 +13522,17 @@ sub do_set_edit_right {
         : "Revoked device-table edit right from '$target'.");
 }
 
+################################################################################
+# do_set_admin_right
+#
 # Grant or revoke a user's admin_function right. Admin-only (any admin can
 # do it, per requirement). Never applies to the protected admin account
 # (which is always an admin). A user with admin_function becomes a full
 # admin, so this is the most privileged toggle here.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_set_admin_right {
     my ($user) = @_;
     my $target = $cgi->param('username') // '';
@@ -11353,8 +13577,15 @@ sub do_set_admin_right {
         : "Revoked admin functions from '$target'.");
 }
 
+################################################################################
+# clear_pw_warning_if_changed
+#
 # Clear the default-password warning on the current session if the new
 # password is no longer the default. Rewrites the session file's 4th line.
+#
+# Parameters:
+#   $new_password
+################################################################################
 sub clear_pw_warning_if_changed {
     my ($new_password) = @_;
     return if $new_password eq $DEFAULT_PASSWORD;   # still the default -> keep warning
@@ -11387,6 +13618,12 @@ sub clear_pw_warning_if_changed {
 # Help
 # =============================================================================
 
+################################################################################
+# show_help
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_help {
     my ($user) = @_;
 
@@ -11398,12 +13635,19 @@ sub show_help {
     print page_foot();
 }
 
+################################################################################
+# show_setup
+#
 # "Show device table" (Setup devices menu): shows $DEVICE_TABLE exactly as fetchconfig.pl
 # reads it -- verbatim, no parsing/filtering. That can include device
 # credentials carried on "default:" lines (see find_directive_lines()), so
 # it's gated to the protected admin OR any user granted the
 # edit_device_table right, and re-checked here even though the menu link is
 # already hidden for others -- the action is reachable directly by URL.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_setup {
     my ($user) = @_;
 
@@ -11491,9 +13735,22 @@ my %COMMON_OPTS = (
     comment                => { type => 'text',   mandatory => 0 },
     to                     => { type => 'recipients', mandatory => 0 },
     site                   => { type => 'enum_site', mandatory => 0 },
+    # Device locking (fetchconfig 9.69+). lock_dir is a directory-alias option
+    # resolved against the 'lock' allow-list kind, like template_dir.
+    lock                   => { type => 'enum_onoff', mandatory => 0 },
+    lock_dir               => { type => 'path',       mandatory => 0 },
+    lock_retry             => { type => 'int',         mandatory => 0 },
+    lock_retry_time        => { type => 'int',         mandatory => 0 },
 );
 
+################################################################################
+# _model_opts
+#
 # Merge helper: common options plus per-model extras/overrides.
+#
+# Parameters:
+#   %extra
+################################################################################
 sub _model_opts { my (%extra) = @_; return { %COMMON_OPTS, %extra }; }
 
 # Per-model option catalog. Models sharing a shape are built from the common
@@ -11678,19 +13935,40 @@ my %EMAIL_OPTS = (
     report_hide    => { type => 'report_hide',     mandatory => 0, repeatable => 1 },
 );
 
+################################################################################
+# known_models
+#
 # Ordered list of known models, for the "model" dropdown in the editor.
+#
+# Parameters: reads @_ directly
+################################################################################
 sub known_models { return sort keys %MODEL_CATALOG; }
 
+################################################################################
+# option_spec
+#
 # Look up the option spec for (model, key). Returns a hashref {type,
 # mandatory} or undef if the key isn't recognized for that model.
+#
+# Parameters:
+#   $model
+#   $key
+################################################################################
 sub option_spec {
     my ($model, $key) = @_;
     my $cat = $MODEL_CATALOG{$model} || \%COMMON_OPTS;
     return $cat->{$key};
 }
 
+################################################################################
+# model_option_keys
+#
 # The full option set a model recognizes (for the "+ add option" menu),
 # as a sorted list of keys. Unknown model -> the common set.
+#
+# Parameters:
+#   $model
+################################################################################
 sub model_option_keys {
     my ($model) = @_;
     my $cat = $MODEL_CATALOG{$model} || \%COMMON_OPTS;
@@ -11712,6 +13990,9 @@ sub model_option_keys {
 # the editor doesn't model round-trip untouched.
 # -----------------------------------------------------------------------------
 
+################################################################################
+# parse_opts
+#
 # Split an options field ("k=v,k2=v2") into an ordered [[k,v],...] list,
 # matching fetchconfig V9.38's Abstract::parse_options() exactly so the
 # editor and the tool agree byte-for-byte on quoting. It uses
@@ -11720,6 +14001,10 @@ sub model_option_keys {
 # outside quotes, which would corrupt values like a Windows "DOMAIN\user"
 # username. Surrounding quotes are then removed by dequote_value(), which
 # only strips a genuinely-wrapping pair and unescapes \" and \\ inside it.
+#
+# Parameters:
+#   $str
+################################################################################
 sub parse_opts {
     my ($str) = @_;
     my @opts;
@@ -11741,16 +14026,30 @@ sub parse_opts {
     return \@opts;
 }
 
+################################################################################
+# opt_trim
+#
 # Trim leading/trailing whitespace (verbatim from fetchconfig Abstract.pm).
+#
+# Parameters:
+#   $opt
+################################################################################
 sub opt_trim {
     my ($opt) = @_;
     return $1 if $opt =~ /^\s*(\S|\S.*\S)\s*$/;
     return $opt;
 }
 
+################################################################################
+# dequote_value
+#
 # Strip a genuinely-wrapping pair of double quotes and unescape \" and \\
 # inside it (verbatim from fetchconfig Abstract.pm). An unquoted value is
 # returned unchanged, backslashes and all.
+#
+# Parameters:
+#   $val
+################################################################################
 sub dequote_value {
     my ($val) = @_;
     return $val unless $val =~ /^"(.*)"$/s;
@@ -11758,6 +14057,9 @@ sub dequote_value {
     return $inner;
 }
 
+################################################################################
+# serialize_opts
+#
 # Serialize an [[k,v],...] list back to "k=v,k2=v2", producing exactly what
 # fetchconfig V9.38's parser reads back. Values are stored unquoted (as
 # parse_opts/dequote_value returns them), so a value is wrapped in double
@@ -11768,6 +14070,11 @@ sub dequote_value {
 # unquoted value with a backslash but no comma/space (e.g. DOMAIN\user) is
 # left exactly as-is -- V9.38 leaves such backslashes untouched, so we must
 # not add quotes that would change how it's read.
+#
+# Parameters:
+#   $opts
+#   $comma_only
+################################################################################
 sub serialize_opts {
     my ($opts, $comma_only) = @_;
     return join(',', map {
@@ -11792,6 +14099,12 @@ sub serialize_opts {
     } @$opts);
 }
 
+################################################################################
+# parse_device_table
+#
+# Parameters:
+#   $content
+################################################################################
 sub parse_device_table {
     my ($content) = @_;
     my @records;
@@ -11878,6 +14191,9 @@ sub parse_device_table {
     return \@records;
 }
 
+################################################################################
+# normalize_dir_opts
+#
 # Serialize records into the fixed section layout the operator wants:
 #
 #   # DEFAULT OPTIONS SECTION
@@ -11899,6 +14215,10 @@ sub parse_device_table {
 # Return a copy of an opts arrayref with repository= / template_dir= literal
 # paths rewritten to their $alias (Q-1/Q-2), when the allow-list is present.
 # Unresolvable values and everything else are left unchanged.
+#
+# Parameters:
+#   $opts
+################################################################################
 sub normalize_dir_opts {
     my ($opts) = @_;
     my $al = read_allowed_dirs();
@@ -11920,6 +14240,12 @@ sub normalize_dir_opts {
     return \@out;
 }
 
+################################################################################
+# serialize_records
+#
+# Parameters:
+#   $records
+################################################################################
 sub serialize_records {
     my ($records) = @_;
     my (@emails, @defaults, @devices, @unknown);
@@ -12004,6 +14330,9 @@ sub serialize_records {
     return join("\n", @out) . "\n";
 }
 
+################################################################################
+# lock_device_table
+#
 # Current modification time (epoch seconds) of $DEVICE_TABLE, or '' if it
 # can't be stat'd. Used for the edit concurrency guard: the editor captures
 # this when the page loads and the save handler refuses to write if the
@@ -12018,6 +14347,9 @@ sub serialize_records {
 # a saver must re-verify the staleness token AFTER acquiring this lock.
 # Returns undef (and a reason in $@-style second value) if the lock cannot be
 # taken; callers then refuse to write rather than proceed unlocked.
+#
+# Parameters: none
+################################################################################
 sub lock_device_table {
     my $dir  = (defined $BACKUP_TMP_DIR && $BACKUP_TMP_DIR ne '') ? $BACKUP_TMP_DIR : $SESSION_DIR;
     my $lock = "$dir/device_table.lock";
@@ -12034,6 +14366,11 @@ sub lock_device_table {
     return ($fh, undef);
 }
 
+################################################################################
+# device_table_mtime
+#
+# Parameters: none
+################################################################################
 sub device_table_mtime {
     # Staleness token for the edit concurrency guard. It is an opaque string
     # "<mtime>:<size>:<md5>" rather than a bare mtime, so a change is detected
@@ -12058,9 +14395,15 @@ sub device_table_mtime {
     return sprintf('%.6f:%d:%s', $st[9], $st[7], $digest);
 }
 
+################################################################################
+# slurp_device_table
+#
 # Read $DEVICE_TABLE verbatim for the "Show device table" view -- no parsing, no
 # filtering of comments/blank lines, unlike read_device_ids(). Returns
 # ($content, $error); $content is undef on error.
+#
+# Parameters: none
+################################################################################
 sub slurp_device_table {
     open(my $fh, '<', $DEVICE_TABLE)
         or return (undef, "Cannot read device table $DEVICE_TABLE: $!");
@@ -12083,10 +14426,24 @@ sub slurp_device_table {
 # no real password would be.
 my $SECRET_KEEP = '\\__unchanged__/';
 
+################################################################################
+# render_option_field
+#
 # Render one option as an editable control appropriate to its type. $rk is
 # the per-record field prefix (e.g. "r3"); $key is the option name. Secret
 # values are never emitted in clear text: a field showing $SECRET_KEEP means
 # "unchanged". Returns HTML.
+#
+# Parameters:
+#   $rk
+#   $model_or_email
+#   $key
+#   $val
+#   $is_email
+#   $section
+#   $row_tpl_dir
+#   $idx
+################################################################################
 sub render_option_field {
     my ($rk, $model_or_email, $key, $val, $is_email, $section, $row_tpl_dir, $idx) = @_;
     $section = '' unless defined $section;
@@ -12334,7 +14691,7 @@ sub render_option_field {
                           . qq{upload/delete on the Tools page to narrow the list.</span>};
             }
         }
-    } elsif ((($key eq 'repository' || $key eq 'template_dir')
+    } elsif ((($key eq 'repository' || $key eq 'template_dir' || $key eq 'lock_dir')
               || $type eq 'enum_report_dir')
              && read_allowed_dirs()->{present}) {
         # Allow-list is active: restrict this path to the configured entries.
@@ -12344,7 +14701,8 @@ sub render_option_field {
         # visible but not re-selectable (and the save is blocked).
         my $al      = read_allowed_dirs();
         my $dkind   = $type eq 'enum_report_dir' ? 'report'
-                    : $key  eq 'repository'       ? 'repository' : 'template';
+                    : $key  eq 'repository'       ? 'repository'
+                    : $key  eq 'lock_dir'         ? 'lock' : 'template';
         my $v       = defined $val ? $val : '';
         my $allowed = defined resolve_allowed_path($dkind, $v);
         # Options carry $aliases; normalise a stored literal path to its alias
@@ -12421,9 +14779,19 @@ sub render_option_field {
          . $control . $del . qq{</div>\n};
 }
 
+################################################################################
+# render_add_option
+#
 # Render the "+ add option" control for a record: a small select listing the
 # model's (or email's) recognized options not already present, plus a button
 # that adds the chosen option's field via JS.
+#
+# Parameters:
+#   $rk
+#   $model_or_email
+#   $present
+#   $is_email
+################################################################################
 sub render_add_option {
     my ($rk, $model_or_email, $present, $is_email) = @_;
     my @keys = $is_email ? (sort keys %EMAIL_OPTS) : model_option_keys($model_or_email);
@@ -12456,6 +14824,12 @@ sub render_add_option {
          . qq{<option value="">+ add option&hellip;</option>$opts</select></div>\n};
 }
 
+################################################################################
+# show_edit_table
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_edit_table {
     my ($user) = @_;
     my $render_t0 = [Time::HiRes::gettimeofday()];
@@ -12796,10 +15170,16 @@ sub show_edit_table {
     print page_foot();
 }
 
+################################################################################
+# model_opts_script
+#
 # Emit the per-model recognized-option lists as a JS object, so the editor
 # can populate the "+ add option" menu for newly-added rows and when a
 # row's model changes. Keys are model names; '__common__' is the fallback
 # for an unknown model. Option names are simple identifiers, safe to inline.
+#
+# Parameters: none
+################################################################################
 sub model_opts_script {
     my @parts;
     for my $m (known_models()) {
@@ -12812,11 +15192,18 @@ sub model_opts_script {
     return qq{<script>window.__FCWEB_MODEL_OPTS = $obj;</script>\n};
 }
 
+################################################################################
+# reconstruct_records_from_form
+#
 # Rebuild the editor's records from the submitted form, in original index
 # order (new rows, "rN" with N >= the original rec_count, are appended;
 # deleted rows are skipped). Secret fields left at the mask recover their
 # original value from $orig (the freshly re-read table). Returns
 # (\@records, \@warnings).
+#
+# Parameters:
+#   $orig
+################################################################################
 sub reconstruct_records_from_form {
     my ($orig) = @_;
     my $count = $cgi->param('rec_count') // 0;
@@ -12990,9 +15377,16 @@ sub reconstruct_records_from_form {
     return (\@records, \@warnings);
 }
 
+################################################################################
+# validate_records
+#
 # Hard validation of reconstructed records. Returns an arrayref of error
 # strings (empty = OK). Devices need a Device-ID (valid chars, unique) and
 # a valid host (IPv4/IPv6/FQDN).
+#
+# Parameters:
+#   $records
+################################################################################
 sub validate_records {
     my ($records) = @_;
     my (@errors, %seen_id);
@@ -13125,11 +15519,18 @@ sub validate_records {
     return \@errors;
 }
 
+################################################################################
+# regex_bracket_problem
+#
 # Heuristic bracket-balance check for a regex, to catch the common typos Perl
 # accepts as literals (a stray ')' or '}', or an unclosed '(' / '{'). It is
 # escaping- and char-class-aware: inside [...] the ( ) { } are literal, and a
 # lone ']' or '}' as a literal is NOT flagged (Perl is lenient and those are
 # legal), only an unmatched closer or unclosed opener. Returns '' if ok.
+#
+# Parameters:
+#   $rx
+################################################################################
 sub regex_bracket_problem {
     my ($rx) = @_;
     return '' unless defined $rx;
@@ -13154,10 +15555,17 @@ sub regex_bracket_problem {
     return '';
 }
 
+################################################################################
+# directory_allowlist_violations
+#
 # Return a list of human-readable directory allow-list violations for the given
 # records: every repository= / template_dir= on a device or default line that
 # does not resolve to an allowed directory (by $alias or by matching an allowed
 # path). Empty list when the allow-list is absent or all paths are allowed.
+#
+# Parameters:
+#   $records
+################################################################################
 sub directory_allowlist_violations {
     my ($records) = @_;
     my $al = read_allowed_dirs();
@@ -13203,11 +15611,21 @@ sub directory_allowlist_violations {
     return @v;
 }
 
+################################################################################
+# generic_model_dir_error
+#
 # Q-D: check that $model exists in the effective template directory for a
 # generic row. $dir is the row's template_dir (undef/'' = use the default-section
 # directory for device rows, section-only for default rows). Returns an error
 # string, or '' if ok. If `fetchconfig -t` failed (rc 1/2 or could not run),
 # returns an error too, so a broken template setup blocks the save.
+#
+# Parameters:
+#   $label
+#   $section
+#   $model
+#   $dir
+################################################################################
 sub generic_model_dir_error {
     my ($label, $section, $model, $dir) = @_;
     my $t = run_templates_t();
@@ -13245,11 +15663,18 @@ sub generic_model_dir_error {
     return "Template '$model' for $label was not found in $where.";
 }
 
+################################################################################
+# show_preview_table
+#
 # Preview: reconstruct the records from the submitted form and show the
 # exact text that WOULD be written, without touching the file. Secrets are
 # masked in the preview so passwords aren't shown in clear text. Same edit
 # gate as the editor. This is POST (it carries the whole form), so it's in
 # the state-changing set for CSRF, but it writes nothing.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_preview_table {
     my ($user) = @_;
 
@@ -13272,7 +15697,8 @@ sub show_preview_table {
     my $masked  = mask_secrets($preview);
 
     print page_head('Preview device table', $user, 'wide');
-    print qq{<h1>Preview device table</h1>\n};
+    print qq{<div class="tool-section" id="preview-table-section">\n};
+    print qq{<h2 class="tool-section-title">Preview device table</h2>\n};
     if (@$errors) {
         print qq{<p class="error">Validation errors &mdash; Save is blocked until these are fixed: }
             . esc(join('  ', @$errors)) . qq{</p>\n};
@@ -13303,13 +15729,20 @@ sub show_preview_table {
     print qq{<pre class="config" id="config-content">} . esc($masked) . qq{</pre>\n};
     print qq{</div>\n};
     print copy_button_script();
+    print qq{</div>\n};   # .tool-section (Preview device table)
     print top_bottom_nav();
     print page_foot();
 }
 
+################################################################################
+# preview_hidden_fields
+#
 # Re-emit every submitted parameter (except 'action', which the buttons
 # set) as a hidden input, so the preview page can re-POST the exact editor
 # form on Save or Back. Multi-valued params are emitted once per value.
+#
+# Parameters: none
+################################################################################
 sub preview_hidden_fields {
     my $html = '';
     for my $name ($cgi->param()) {
@@ -13323,12 +15756,19 @@ sub preview_hidden_fields {
     return $html;
 }
 
+################################################################################
+# do_save_table
+#
 # Save handler for the device-table editor. Rebuilds the records from the
 # submitted form, writes them back in the fixed section layout, atomically,
 # after a timestamped backup. Gated on the edit right; POST + CSRF are
 # already enforced by the dispatcher. Concurrency-guarded by the device
 # table's mtime, so a save can't silently clobber a change made (by another
 # admin, or an OS-side edit) after the editor was opened.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_save_table {
     my ($user) = @_;
 
@@ -13467,6 +15907,9 @@ sub do_save_table {
     redirect_to_editor(msg => "Device table saved. Backup: $info.$note");
 }
 
+################################################################################
+# backup_and_write_table
+#
 # Shared "write the device table safely" path, reused by the structured
 # editor, bulk edit, and restore. Writes a timestamped backup of
 # $current_content to $BACKUP_DEVICE_TABLE first, then overwrites
@@ -13475,6 +15918,11 @@ sub do_save_table {
 # (1, $backup_basename) on success, or (0, $error_message) on failure with
 # nothing changed (or, if the failure was mid-write, a message pointing at
 # the backup as the recovery point).
+#
+# Parameters:
+#   $current_content
+#   $new_content
+################################################################################
 sub backup_and_write_table {
     my ($current_content, $new_content) = @_;
 
@@ -13536,10 +15984,17 @@ sub backup_and_write_table {
     return (1, _basename($bak));
 }
 
+################################################################################
+# valid_host
+#
 # True if $host looks like a valid device host: an IPv4 address, an IPv6
 # address, or a DNS hostname/FQDN. Deliberately permissive on the hostname
 # side (fetchconfig ultimately just hands it to the connection layer), but
 # rejects whitespace, commas, and other clearly-wrong input.
+#
+# Parameters:
+#   $host
+################################################################################
 sub valid_host {
     my ($host) = @_;
     return 0 unless defined $host && $host ne '';
@@ -13561,8 +16016,17 @@ sub valid_host {
     return 1;
 }
 
+################################################################################
+# orig_option_value
+#
 # Recover the original value of option $key on the Nth original record
 # (used for secret write-back). Returns the value or undef.
+#
+# Parameters:
+#   $orig
+#   $n
+#   $key
+################################################################################
 sub orig_option_value {
     my ($orig, $n, $key) = @_;
     my $r = $orig->[$n];
@@ -13576,6 +16040,12 @@ sub orig_option_value {
     return undef;
 }
 
+################################################################################
+# _basename
+#
+# Parameters:
+#   $p
+################################################################################
 sub _basename { my ($p) = @_; $p =~ s{.*/}{}; return $p; }
 
 # Redirect back to the editor with a flash message (PRG, same pattern as the
@@ -13584,18 +16054,31 @@ sub _basename { my ($p) = @_; $p =~ s{.*/}{}; return $p; }
 # Device-table backup restore (Restore device table tool, admin only)
 # =============================================================================
 
+################################################################################
+# backup_name_re
+#
 # The regexp a valid backup basename must match:
 # "<device_table_basename>.<YYYY-MM-DD_HHMMSS>.bak". Used both to list
 # backups and to validate a user-supplied name before touching the file --
 # no slashes, no "..", nothing but this exact shape is ever accepted.
+#
+# Parameters: none
+################################################################################
 sub backup_name_re {
     my $base = quotemeta(_basename($DEVICE_TABLE));
     return qr/^${base}\.\d{4}-\d\d-\d\d_\d{6}\.bak$/;
 }
 
+################################################################################
+# backup_epoch_from_name
+#
 # Epoch seconds parsed from a backup's own filename timestamp
 # ("<table>.YYYY-MM-DD_HHMMSS.bak"), or undef. Used for age decisions so a
 # restore/copy touching the file's mtime doesn't change a backup's "age".
+#
+# Parameters:
+#   $name
+################################################################################
 sub backup_epoch_from_name {
     my ($name) = @_;
     return undef unless defined $name
@@ -13606,9 +16089,16 @@ sub backup_epoch_from_name {
     return defined $t ? $t : undef;
 }
 
+################################################################################
+# time_with_age
+#
 # List device-table backups in $BACKUP_DEVICE_TABLE, newest first. Returns
 # an arrayref of { name, size, mtime } (name is the basename only).
 # Format a Unix time as "YYYY-MM-DD HH:MM (N min ago)" for the Restore confirm.
+#
+# Parameters:
+#   $t
+################################################################################
 sub time_with_age {
     my ($t) = @_;
     return 'unknown' unless defined $t && $t > 0;
@@ -13625,6 +16115,11 @@ sub time_with_age {
     return "$stamp ($ago)";
 }
 
+################################################################################
+# list_table_backups
+#
+# Parameters: none
+################################################################################
 sub list_table_backups {
     my $re = backup_name_re();
     my @backups;
@@ -13643,9 +16138,16 @@ sub list_table_backups {
     return \@backups;
 }
 
+################################################################################
+# resolve_backup_path
+#
 # Validate a user-supplied backup name and return its full path, or undef if
 # it doesn't match the strict backup pattern (defends against path traversal
 # -- the name can only ever be a bare backup filename in the backup dir).
+#
+# Parameters:
+#   $name
+################################################################################
 sub resolve_backup_path {
     my ($name) = @_;
     return undef unless defined $name && $name =~ backup_name_re();
@@ -13653,6 +16155,12 @@ sub resolve_backup_path {
     return (-f $path) ? $path : undef;
 }
 
+################################################################################
+# redirect_to_tools
+#
+# Parameters:
+#   %o
+################################################################################
 sub redirect_to_tools {
     my (%o) = @_;
     my $url = script_url() . '?action=tool_restore';
@@ -13661,6 +16169,12 @@ sub redirect_to_tools {
     print std_header(-location => $url, -status => '302 Found');
 }
 
+################################################################################
+# redirect_to_editor
+#
+# Parameters:
+#   %o
+################################################################################
 sub redirect_to_editor {
     my (%o) = @_;
     my $url = script_url() . '?action=edit_table';
@@ -13669,7 +16183,14 @@ sub redirect_to_editor {
     print std_header(-location => $url, -status => '302 Found');
 }
 
+################################################################################
+# redirect_to_setup
+#
 # Redirect to the "Show device table" view with a flash message (PRG).
+#
+# Parameters:
+#   %o
+################################################################################
 sub redirect_to_setup {
     my (%o) = @_;
     my $url = script_url() . '?action=setup';
@@ -13682,9 +16203,16 @@ sub redirect_to_setup {
 # Bulk Edit -- full-text edit of the DEVICES SECTION only (admin only)
 # =============================================================================
 
+################################################################################
+# devices_to_text
+#
 # Serialize the device records to the raw "model<TAB>id<TAB>host<TAB>opts"
 # text shown in the Bulk Edit textarea (one device per line, passwords in
 # plaintext). Matches the device lines the section serializer writes.
+#
+# Parameters:
+#   $records
+################################################################################
 sub devices_to_text {
     my ($records) = @_;
     my @lines;
@@ -13697,10 +16225,17 @@ sub devices_to_text {
     return join("\n", @lines) . (@lines ? "\n" : '');
 }
 
+################################################################################
+# text_to_devices
+#
 # Parse the Bulk Edit textarea into device records. Blank lines are skipped.
 # Each non-blank line is split into model / id / host / options (options
 # parsed with the same quote-aware parser as the editor). Returns an
 # arrayref of device records (same shape as parse_device_table's devices).
+#
+# Parameters:
+#   $text
+################################################################################
 sub text_to_devices {
     my ($text) = @_;
     my @devs;
@@ -13724,10 +16259,19 @@ sub text_to_devices {
     return \@devs;
 }
 
+################################################################################
+# show_bulk_edit
+#
 # The Bulk Edit page. Admin-only. Textarea preloaded with the current device
 # lines; Save replaces the ENTIRE device section with the textarea content.
 # $err_text/$prefill let the save handler redraw the page with the user's
 # text and error messages on a validation failure.
+#
+# Parameters:
+#   $user
+#   $prefill
+#   $errors
+################################################################################
 sub show_bulk_edit {
     my ($user, $prefill, $errors) = @_;
 
@@ -13838,9 +16382,16 @@ JS
     print page_foot();
 }
 
+################################################################################
+# do_bulk_save
+#
 # Save handler for Bulk Edit. Admin-only, POST + CSRF, mtime concurrency
 # guard. Replaces the device records with the textarea content, keeping the
 # default:/email:/other records untouched; validates all-or-nothing.
+#
+# Parameters:
+#   $user
+################################################################################
 sub do_bulk_save {
     my ($user) = @_;
 
@@ -13924,11 +16475,19 @@ sub do_bulk_save {
         . "). Backup: $info.");
 }
 
+################################################################################
+# render_merged_default_readonly
+#
 # Render one editable record (device / default / email) as a card.
 # A compact read-only rendering of a record (used for the Defaults tab shown to
 # site-limited users: they can see the model defaults but not change them).
 # Render one read-only box for a model's merged defaults (last value wins).
 # $merged = { order => [keys in first-seen order], val => { key => last value } }.
+#
+# Parameters:
+#   $model
+#   $merged
+################################################################################
 sub render_merged_default_readonly {
     my ($model, $merged) = @_;
     my $h = qq{<div class="rec-card rec-readonly">\n};
@@ -13943,6 +16502,12 @@ sub render_merged_default_readonly {
     return $h;
 }
 
+################################################################################
+# render_record_card_readonly
+#
+# Parameters:
+#   $r
+################################################################################
 sub render_record_card_readonly {
     my ($r) = @_;
     my $model = defined $r->{model} ? $r->{model} : '';
@@ -13960,7 +16525,15 @@ sub render_record_card_readonly {
     return $h;
 }
 
+################################################################################
+# mask_secrets_opt
+#
 # Mask a secret option's value for read-only display.
+#
+# Parameters:
+#   $k
+#   $v
+################################################################################
 sub mask_secrets_opt {
     my ($k, $v) = @_;
     return $v unless defined $k;
@@ -13969,6 +16542,9 @@ sub mask_secrets_opt {
     return $v;
 }
 
+################################################################################
+# show_edit_card
+#
 # Collapsed device row for the editor: shows Device-ID / Model / Site and an
 # Edit button. Carries only the hidden "${rk}_kind=device" + "${rk}_untouched=1"
 # markers so an un-expanded device round-trips verbatim on save (see
@@ -13981,6 +16557,10 @@ sub mask_secrets_opt {
 # the full editor would use -- so the secret write-back and save round-trip are
 # identical to a server-rendered card. Access is gated: edit right, device kind,
 # and (for a site-limited user) per-site visibility.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_edit_card {
     my ($user) = @_;
     my $card_t0 = [Time::HiRes::gettimeofday()];
@@ -14036,6 +16616,13 @@ sub show_edit_card {
     print $card_html;
 }
 
+################################################################################
+# render_device_summary_row
+#
+# Parameters:
+#   $idx
+#   $r
+################################################################################
 sub render_device_summary_row {
     my ($idx, $r) = @_;
     my $rk = "r$idx";
@@ -14059,6 +16646,9 @@ sub render_device_summary_row {
          . qq{</div>\n};
 }
 
+################################################################################
+# render_device_expanded_row
+#
 # A device row rendered already-expanded: the summary line plus the full
 # editable card inline, matching what the JS produces on expand. Used by the
 # "Back to editor" (from_form) render so the user's in-progress edits are kept
@@ -14072,6 +16662,12 @@ sub render_device_summary_row {
 # collapsed summary line with the card hidden (but still in the DOM, so its
 # fields still submit). This lets an edited-then-collapsed device come back
 # COLLAPSED yet keep both its edits and its red dot.
+#
+# Parameters:
+#   $idx
+#   $r
+#   $open
+################################################################################
 sub render_device_expanded_row {
     my ($idx, $r, $open) = @_;
     $open = 1 unless defined $open;
@@ -14109,6 +16705,14 @@ sub render_device_expanded_row {
     return $h;
 }
 
+################################################################################
+# render_record_card
+#
+# Parameters:
+#   $rk
+#   $r
+#   $kind
+################################################################################
 sub render_record_card {
     my ($rk, $r, $kind) = @_;
     my $h = qq{<div class="rec-card" data-rk="$rk" data-kind="$kind">\n};
@@ -14177,15 +16781,26 @@ sub render_record_card {
     return $h;
 }
 
+################################################################################
+# help_file_path
+#
 # Read $HELP_FILE as-is (an HTML fragment, not a full document) and print
 # it verbatim inside this page's own chrome -- operator-authored content,
 # not user input, so it deliberately does NOT go through esc(). Falls back
 # to a built-in description if the file is missing.
 # Full on-disk path of the help page (HELP_DIR + HELP_FILE), and the directory
 # the sibling docs (LICENSE.html, PRIVACY.html, ...) live in.
+#
+# Parameters: reads @_ directly
+################################################################################
 sub help_file_path { return (defined $HELP_DIR && $HELP_DIR ne '' ? "$HELP_DIR/" : '') . $HELP_FILE; }
 sub help_doc_dir   { return defined $HELP_DIR ? $HELP_DIR : ''; }
 
+################################################################################
+# read_help_file
+#
+# Parameters: none
+################################################################################
 sub read_help_file {
     if (open(my $fh, '<:encoding(UTF-8)', help_file_path())) {
         local $/;
@@ -14196,6 +16811,9 @@ sub read_help_file {
     return default_help_html();
 }
 
+################################################################################
+# edit_table_script
+#
 # Client-side behavior for the editor: tab switching, reveal-secret, add/
 # remove option, add/remove record. New rows get a fresh record index
 # ("rN") beyond rec_count so the server sees them; rec_count is bumped so
@@ -14203,6 +16821,9 @@ sub read_help_file {
 # fields are cleared) rather than reindexing, keeping the server logic
 # simple. All option controls are named "<rk>_opt_<key>", so adding an
 # option just appends a new field with that name.
+#
+# Parameters: reads @_ directly
+################################################################################
 sub edit_table_script {
     # Ship the full `fetchconfig -t` snapshot to the browser so the client-side
     # "+ add option" handler and the model= re-evaluation (on template_dir
@@ -14228,7 +16849,7 @@ sub edit_table_script {
     #   FCWEB_FETCHRUN_DISABLED  1 when "directory: fetch_run none".
     my $al = read_allowed_dirs();
     my %flat;
-    for my $kind (qw(repository template fetch_run report)) {
+    for my $kind (qw(repository template fetch_run report lock)) {
         $flat{$_} = $al->{alias2path}{$kind}{$_} for keys %{ $al->{alias2path}{$kind} };
     }
     my $jesc = sub { my $s = defined $_[0] ? $_[0] : ''; $s =~ s/(["\\])/\\$1/g; $s };
@@ -14239,7 +16860,7 @@ sub edit_table_script {
         qq{"$kind":[} . join(',', map {
             qq[{"alias":"] . $jesc->($_->{alias}) . qq[","path":"] . $jesc->($_->{path}) . qq["}]
         } @{ $al->{$kind} }) . ']';
-    } qw(repository template fetch_run report)) . '}';
+    } qw(repository template fetch_run report lock)) . '}';
     my $fr_disabled  = ($al->{present} && $al->{fetch_run_disabled}) ? 1 : 0;
     my $rep_disabled = ($al->{present} && $al->{report_disabled})    ? 1 : 0;
     # Site options for the add-option dropdown (same list the server renders).
@@ -14275,7 +16896,7 @@ sub edit_table_script {
   var TPL_ROWS = window.FCWEB_TPL_ROWS || [];
   var TPL_DEFAULT_DIR = window.FCWEB_TPL_DEFAULT_DIR || '';
   var DIR_ALIAS = window.FCWEB_DIR_ALIAS || {};
-  var DIR_ENTRIES = window.FCWEB_DIR_ENTRIES || {repository:[],template:[],fetch_run:[],report:[]};
+  var DIR_ENTRIES = window.FCWEB_DIR_ENTRIES || {repository:[],template:[],fetch_run:[],report:[],lock:[]};
   var FETCHRUN_DISABLED = !!window.FCWEB_FETCHRUN_DISABLED;
   var REPORT_DISABLED = !!window.FCWEB_REPORT_DISABLED;
   var SITE_OPTIONS = window.FCWEB_SITE_OPTIONS || [];
@@ -14660,6 +17281,8 @@ sub edit_table_script {
                   ' data-tpl-role="template_dir" data-tpl-section="' + ksecT + '"');
     } else if (key === 'repository' && DIR_PRESENT && (DIR_ENTRIES.repository || []).length) {
       control = dirAliasSelectHTML('repository', name, '');
+    } else if (key === 'lock_dir' && DIR_PRESENT && (DIR_ENTRIES.lock || []).length) {
+      control = dirAliasSelectHTML('lock', name, '');
     } else if (key === 'template_dir') {
       var ksec = (card.getAttribute('data-kind') === 'default') ? 'default' : 'device';
       control = '<input type="text" name="' + name + '" value="" size="30" ' +
@@ -15131,6 +17754,11 @@ JS
     return $out;
 }
 
+################################################################################
+# default_help_html
+#
+# Parameters: none
+################################################################################
 sub default_help_html {
     my $path = CGI::escapeHTML(help_file_path());
     return <<"HTML";
@@ -15146,6 +17774,9 @@ HTML
 # Data access -- device table + fetchconfig.pl invocation
 # =============================================================================
 
+################################################################################
+# host_sort_key
+#
 # Parse the fetchconfig device table.
 #
 # Each device line is a run of whitespace-separated columns, e.g.:
@@ -15163,6 +17794,10 @@ HTML
 # clean dotted-quad with each octet 0-255 becomes "0" + zero-padded octets
 # (so plain string comparison matches numeric IP order); anything else
 # becomes "1" + the lowercased host. IPs thus group before names.
+#
+# Parameters:
+#   $host
+################################################################################
 sub host_sort_key {
     my ($host) = @_;
     $host = '' unless defined $host;
@@ -15173,6 +17808,12 @@ sub host_sort_key {
     return '1-' . lc($host);
 }
 
+################################################################################
+# read_device_ids
+#
+# Parameters:
+#   $filter_user
+################################################################################
 sub read_device_ids {
     my ($filter_user) = @_;
     # When a user is given and is site-limited, only their visible devices are
@@ -15228,12 +17869,19 @@ sub read_device_ids {
     return ([ sort { lc($a->{id}) cmp lc($b->{id}) } @devices ], undef);
 }
 
+################################################################################
+# find_device_table_line
+#
 # Find the raw device_table line for a specific device-id (trimmed of
 # leading/trailing whitespace, but otherwise verbatim -- this is what gets
 # handed to fetchconfig.pl's -line= for a live "Backup Now" run). Uses the
 # same parsing rules as read_device_ids() so it stays consistent with the
 # device list. Returns ($line, $error); $line is undef (no error) if the
 # device simply isn't found.
+#
+# Parameters:
+#   $dev
+################################################################################
 sub find_device_table_line {
     my ($dev) = @_;
     open(my $fh, '<', $DEVICE_TABLE)
@@ -15285,14 +17933,19 @@ sub find_device_table_line {
 #     fetch_run=>[...], fetch_run_configured, fetch_run_disabled,
 #     alias2path=>{ kind => { '$A'=>'/p' } } }
 
+################################################################################
+# read_allowed_dirs
+#
+# Parameters: none
+################################################################################
 sub read_allowed_dirs {
     return $_allowed_dirs_cache if defined $_allowed_dirs_cache;
     my %al = (present => 0, rc => 0, raw => '',
-              repository => [], template => [], fetch_run => [], report => [],
+              repository => [], template => [], fetch_run => [], report => [], lock => [],
               fetch_run_configured => 0, fetch_run_disabled => 0,
               report_configured => 0, report_disabled => 0,
               alias2path => { repository => {}, template => {},
-                              fetch_run => {}, report => {} });
+                              fetch_run => {}, report => {}, lock => {} });
     my ($out, $err, $status, $fork_err) =
         run_fetchconfig('-devices=' . $DEVICE_TABLE, '--list-allowed-dirs');
     $al{raw} = collapse_model_registration(
@@ -15306,7 +17959,8 @@ sub read_allowed_dirs {
         my ($id, $kind, $alias, $path) = @f;
         $kind = lc $kind;
         next unless $kind eq 'repository' || $kind eq 'template'
-                 || $kind eq 'fetch_run' || $kind eq 'report';
+                 || $kind eq 'fetch_run' || $kind eq 'report'
+                 || $kind eq 'lock';
         $al{present} = 1;
         # fetch_run and report are "disable-able": a "none" row means the
         # feature is configured-but-off (the option cannot be used).
@@ -15324,8 +17978,14 @@ sub read_allowed_dirs {
     return $_allowed_dirs_cache;
 }
 
+################################################################################
+# directory_raw_block
+#
 # The verbatim "directory:" lines from the device table, for re-emitting the
 # armored block on save (read straight from disk, never from the form).
+#
+# Parameters: none
+################################################################################
 sub directory_raw_block {
     my @raw;
     if (open(my $fh, '<', $DEVICE_TABLE)) {
@@ -15338,9 +17998,17 @@ sub directory_raw_block {
     return \@raw;
 }
 
+################################################################################
+# resolve_allowed_path
+#
 # Resolve a stored repository/template/fetch_run directory value (a $alias or a
 # literal path) to its expanded path. Returns the path, or undef if it is not an
 # allowed entry for $kind.
+#
+# Parameters:
+#   $kind
+#   $val
+################################################################################
 sub resolve_allowed_path {
     my ($kind, $val) = @_;
     return undef unless defined $val && $val ne '';
@@ -15360,9 +18028,17 @@ sub resolve_allowed_path {
     return undef;
 }
 
+################################################################################
+# alias_for_value
+#
 # Normalise a directory value to its $alias for saving: a literal path that
 # matches an allowed path becomes its alias; a $alias stays; unresolvable stays
 # (validation rejects it). No-op when the allow-list is absent.
+#
+# Parameters:
+#   $kind
+#   $val
+################################################################################
 sub alias_for_value {
     my ($kind, $val) = @_;
     return $val unless defined $val && $val ne '';
@@ -15377,9 +18053,15 @@ sub alias_for_value {
     return $val;
 }
 
+################################################################################
+# allowed_dirs_error_html
+#
 # If `--list-allowed-dirs` reported a missing directory (rc 2) or could not run,
 # return an error message + raw output to show instead of the editor / list.
 # Returns '' when ok.
+#
+# Parameters: none
+################################################################################
 sub allowed_dirs_error_html {
     my $al = read_allowed_dirs();
     return '' unless $al->{present};
@@ -15396,12 +18078,19 @@ sub allowed_dirs_error_html {
     return '';
 }
 
+################################################################################
+# validate_table_with_fetchconfig
+#
 # Validate a prospective device-table (the exact content about to be written)
 # by having fetchconfig parse it: run `-t` and `--list-allowed-dirs` against a
 # temporary copy. Returns an error string (message + fetchconfig output) if
 # either aborts (rc > 0) or cannot run, or undef if both succeed. This is what
 # stops an invalid table (missing/renamed directory, unusable template) from
 # being written to disk.
+#
+# Parameters:
+#   $content
+################################################################################
 sub validate_table_with_fetchconfig {
     my ($content) = @_;
     my ($tfh, $tmp) = eval {
@@ -15430,10 +18119,18 @@ sub validate_table_with_fetchconfig {
     return $err;
 }
 
+################################################################################
+# resolve_dir_alias
+#
 # Expand a directory value to a real filesystem path: a $alias becomes its
 # allowed path (if resolvable); anything else is returned unchanged. Used
 # wherever the web code accesses a repository/template/fetch_run directory
 # directly on disk, since the stored value may be an allow-list alias.
+#
+# Parameters:
+#   $kind
+#   $val
+################################################################################
 sub resolve_dir_alias {
     my ($kind, $val) = @_;
     return $val unless defined $val && $val ne '' && $val =~ /^\$/;
@@ -15441,16 +18138,31 @@ sub resolve_dir_alias {
     return defined $p ? $p : $val;
 }
 
+################################################################################
+# expanded_path_for
+#
 # The expanded path for display (gray) beside a value, or '' if not resolvable.
+#
+# Parameters:
+#   $kind
+#   $val
+################################################################################
 sub expanded_path_for {
     my ($kind, $val) = @_;
     my $p = resolve_allowed_path($kind, $val);
     return defined $p ? $p : '';
 }
 
+################################################################################
+# split_fetch_run
+#
 # on_fetch_run is "<dir>/<command with options>". Split it into (dir, cmd):
 # dir = the leading directory (alias or path), cmd = the command + options after
 # the first "/" that ends the directory. Returns ('','') if empty.
+#
+# Parameters:
+#   $val
+################################################################################
 sub split_fetch_run {
     my ($val) = @_;
     return ('', '') unless defined $val && $val ne '';
@@ -15467,8 +18179,16 @@ sub split_fetch_run {
     return ('', $val);
 }
 
+################################################################################
+# join_fetch_run
+#
 # Join a fetch_run directory (alias/path) and command+options back into the
 # stored value "<dir>/<cmd>".
+#
+# Parameters:
+#   $dir
+#   $cmd
+################################################################################
 sub join_fetch_run {
     my ($dir, $cmd) = @_;
     $dir = '' unless defined $dir; $cmd = '' unless defined $cmd;
@@ -15477,7 +18197,14 @@ sub join_fetch_run {
     return "$dir/$cmd";
 }
 
+################################################################################
+# alias_for_fetch_run
+#
 # Reduce an on_fetch_run value's directory part to its $alias for saving.
+#
+# Parameters:
+#   $val
+################################################################################
 sub alias_for_fetch_run {
     my ($val) = @_;
     return $val unless defined $val && $val ne '';
@@ -15490,6 +18217,11 @@ sub alias_for_fetch_run {
     return join_fetch_run($alias, $cmd);
 }
 
+################################################################################
+# find_directive_lines
+#
+# Parameters: none
+################################################################################
 sub find_directive_lines {
     my @lines;
     open(my $fh, '<', $DEVICE_TABLE)
@@ -15506,6 +18238,9 @@ sub find_directive_lines {
     return (\@lines, undef);
 }
 
+################################################################################
+# collapse_model_registration
+#
 # Run fetchconfig.pl with the given args, capturing stdout and stderr
 # SEPARATELY (never merged) so that fetchconfig.pl's own "info:"/"debug:"
 # diagnostic lines -- which it writes to stderr -- never leak into parsed
@@ -15522,6 +18257,10 @@ sub find_directive_lines {
 #   <prefix>debug: NN models registered
 # where NN is the number collapsed. Non-registration lines pass through
 # untouched, and the surrounding order is preserved.
+#
+# Parameters:
+#   $text
+################################################################################
 sub collapse_model_registration {
     my ($text) = @_;
     return $text unless defined $text && $text ne '';
@@ -15561,9 +18300,17 @@ sub collapse_model_registration {
 # the require() cost on every request.
 # --------------------------------------------------------------------------
 
+################################################################################
+# version_cmp
+#
 # Numeric-tuple compare of two dotted version strings. Each component's
 # leading integer is used (so "9.44-ACME" -> (9,44)). Returns -1/0/1 like
 # the spaceship operator.
+#
+# Parameters:
+#   $a
+#   $b
+################################################################################
 sub version_cmp {
     my ($a, $b) = @_;
     my @a = map { /^(\d+)/ ? $1 : 0 } split /\./, ($a // '');
@@ -15576,9 +18323,15 @@ sub version_cmp {
     return 0;
 }
 
+################################################################################
+# fetchconfig_installed_version
+#
 # Read the installed fetchconfig version from its Constants.pm. Returns the
 # version string, or undef if the module can't be found/loaded or doesn't
 # expose version(). Never dies.
+#
+# Parameters: none
+################################################################################
 sub fetchconfig_installed_version {
     return undef unless defined $FETCHCONFIG_PATH && $FETCHCONFIG_PATH ne '';
     my $mod = "$FETCHCONFIG_PATH/fetchconfig/Constants.pm";
@@ -15597,9 +18350,15 @@ sub fetchconfig_installed_version {
     return $ver ne '' ? $ver : undef;
 }
 
+################################################################################
+# fetchconfig_version_cached
+#
 # Return the fetchconfig version, cached in a small file under $SESSION_DIR
 # and refreshed whenever Constants.pm's path or mtime changes. Returns undef
 # if the version can't be determined.
+#
+# Parameters: none
+################################################################################
 sub fetchconfig_version_cached {
     my $mod = (defined $FETCHCONFIG_PATH && $FETCHCONFIG_PATH ne '')
             ? "$FETCHCONFIG_PATH/fetchconfig/Constants.pm" : '';
@@ -15640,6 +18399,11 @@ sub fetchconfig_version_cached {
 #     fallback, so no device can be backed up, listed or shown.
 # Computed once per request ($_fatal_error_cache).
 
+################################################################################
+# fatal_error_text
+#
+# Parameters: none
+################################################################################
 sub fatal_error_text {
     return $_fatal_error_cache if defined $_fatal_error_cache;
     my $msg = '';
@@ -15664,14 +18428,25 @@ sub fatal_error_text {
     return $_fatal_error_cache = $msg;
 }
 
+################################################################################
+# fatal_error_banner
+#
+# Parameters: none
+################################################################################
 sub fatal_error_banner {
     my $t = fatal_error_text();
     return '' if $t eq '';
     return qq{<div class="fatal-error"><strong>FATAL ERROR:</strong> } . esc($t) . qq{</div>};
 }
 
+################################################################################
+# fetchconfig_version_warning
+#
 # Build the version-warning HTML shown in the page header (or '' if the
 # installed version is OK). Returns an HTML snippet (already escaped/safe).
+#
+# Parameters: none
+################################################################################
 sub fetchconfig_version_warning {
     my $installed = fetchconfig_version_cached();
     my $min = MIN_FETCHCONFIG_VERSION;
@@ -15692,6 +18467,12 @@ sub fetchconfig_version_warning {
     return '';
 }
 
+################################################################################
+# run_fetchconfig
+#
+# Parameters:
+#   @args
+################################################################################
 sub run_fetchconfig {
     my (@args) = @_;
 
@@ -15750,8 +18531,15 @@ sub run_fetchconfig {
     return ($buf{$stdout}, $buf{$stderr}, $status, undef);
 }
 
+################################################################################
+# list_backups
+#
 # Run `fetchconfig.pl -l dev_id` and parse its tab-separated stdout
 # (index, size, full path -- newest first).
+#
+# Parameters:
+#   $dev
+################################################################################
 sub list_backups {
     my ($dev) = @_;
     my ($out, $err, $status, $fork_err) =
@@ -15786,6 +18574,9 @@ sub list_backups {
     return (\@backups, undef);
 }
 
+################################################################################
+# device_backup_status
+#
 # Lightweight per-device "does this device have any backups?" check for the
 # "Devices without backups" tool. Runs `fetchconfig.pl -l <dev>` and
 # classifies the result without parsing every line:
@@ -15793,6 +18584,10 @@ sub list_backups {
 #   'has'   -> at least one backup line on stdout (exit 0)
 #   'error' -> anything else (with $detail)
 # Returns ($status_word, $detail).
+#
+# Parameters:
+#   $dev
+################################################################################
 sub device_backup_status {
     my ($dev) = @_;
     my ($out, $err, $status, $fork_err) =
@@ -15812,12 +18607,19 @@ sub device_backup_status {
     return ('none', undef);
 }
 
+################################################################################
+# run_check_empty
+#
 # Run `fetchconfig.pl -z dev_id` to check for empty backup files on disk.
 # Read-only (inspects existing files), so it uses the same non-sudo
 # run_fetchconfig() path as -l/-g. Unlike list_backups(), the output here
 # is a human-readable report shown verbatim, not parsed -- so we combine
 # stdout and stderr (fetchconfig may write its findings to either) into a
 # single transcript. Returns ($output, $status, $error).
+#
+# Parameters:
+#   $dev
+################################################################################
 sub run_check_empty {
     my ($dev) = @_;
     my ($out, $err, $status, $fork_err) =
@@ -15840,6 +18642,9 @@ sub run_check_empty {
     return (collapse_model_registration($combined), $status, undef);
 }
 
+################################################################################
+# device_suffix_status
+#
 # Check a device's backups for CONSISTENT file extensions via
 # `fetchconfig.pl -s dev_id`. fetchconfig exits 0 when all of a device's
 # backup filenames share the same extension/suffix, and 1 when they differ
@@ -15860,6 +18665,10 @@ sub run_check_empty {
 #                   which kind)
 #   'error'      -- fork failure or an unexpected exit code
 # (The per-device page uses run_check_suffix + suffix_rc_message for detail.)
+#
+# Parameters:
+#   $dev
+################################################################################
 sub device_suffix_status {
     my ($dev) = @_;
     my ($out, $err, $status, $fork_err) =
@@ -15884,7 +18693,14 @@ sub device_suffix_status {
                    . ": " . ($err ne '' ? $err : $out));
 }
 
+################################################################################
+# suffix_rc_message
+#
 # Human-readable interpretation of the -s exit code, for the per-device page.
+#
+# Parameters:
+#   $rc
+################################################################################
 sub suffix_rc_message {
     my ($rc) = @_;
     return ('success', 'Backup suffixes are consistent and match the configured suffix (exit 0).')
@@ -15896,9 +18712,16 @@ sub suffix_rc_message {
     return ('error', 'Check exited with status ' . (defined $rc ? $rc : '?') . ' -- see output below.');
 }
 
+################################################################################
+# run_check_suffix
+#
 # Run `fetchconfig.pl -s dev_id` and return its full combined transcript
 # (stderr log first, then stdout results -- same reading order as the empty
 # check), the exit status, and any fork error. Used by the per-device page.
+#
+# Parameters:
+#   $dev
+################################################################################
 sub run_check_suffix {
     my ($dev) = @_;
     my ($out, $err, $status, $fork_err) =
@@ -15913,12 +18736,18 @@ sub run_check_suffix {
     }
     return (collapse_model_registration($combined), $status, undef);
 }
+################################################################################
+# run_orphan_check
+#
 # (it scans the repository and lists device directories on disk that no
 # longer match a device in the table), so it uses the same non-sudo
 # run_fetchconfig() path as -z. Like -z, results go to stdout and the
 # progress/diagnostic log to stderr; we reassemble log-then-results so the
 # summary/result lines read last, as on a terminal. Returns
 # ($output, $status, $error).
+#
+# Parameters: none
+################################################################################
 sub run_orphan_check {
     my ($out, $err, $status, $fork_err) =
         run_fetchconfig('-devices=' . $DEVICE_TABLE, '-o');
@@ -15949,6 +18778,11 @@ sub run_orphan_check {
 #   rows : [ { section, path, model, dir } ]
 #   raw  : combined stdout+stderr, for display when rc is 1 or 2.
 
+################################################################################
+# run_templates_t
+#
+# Parameters: none
+################################################################################
 sub run_templates_t {
     return $_templates_t_cache if defined $_templates_t_cache;
     my ($out, $err, $status, $fork_err) =
@@ -15974,8 +18808,15 @@ sub run_templates_t {
     return $_templates_t_cache;
 }
 
+################################################################################
+# template_t_raw_html
+#
 # Render the raw `fetchconfig.pl -t` output (stdout+stderr) in a config box,
 # shown to the operator when -t fails (rc 1 or 2) so they can see why.
+#
+# Parameters:
+#   $t
+################################################################################
 sub template_t_raw_html {
     my ($t) = @_;
     my $raw = defined $t->{raw} ? $t->{raw} : '';
@@ -15983,10 +18824,17 @@ sub template_t_raw_html {
     return qq{<div class="config-wrap"><pre class="config">} . esc($raw) . qq{</pre></div>\n};
 }
 
+################################################################################
+# template_t_error_html
+#
 # If `fetchconfig -t` failed (could not run, rc 2 = missing dir, rc 1 = none
 # found), return the error message + raw output to show instead of a template
 # list / the device-table editor. Returns '' when -t is ok (rc 0). The message
 # matches the template viewer's wording.
+#
+# Parameters:
+#   $t
+################################################################################
 sub template_t_error_html {
     my ($t) = @_;
     if (!defined $t->{rc}) {
@@ -16006,8 +18854,14 @@ sub template_t_error_html {
     return '';
 }
 
+################################################################################
+# template_default_dir
+#
 # The single default-section directory (Q-A: the default section is always
 # exactly one directory), or '' if there is none.
+#
+# Parameters: none
+################################################################################
 sub template_default_dir {
     my $t = run_templates_t();
     for my $r (@{ $t->{rows} }) {
@@ -16016,12 +18870,19 @@ sub template_default_dir {
     return '';
 }
 
+################################################################################
+# scan_dir_models
+#
 # Scan a template directory directly for *.tmpl files and return the sorted,
 # distinct model names (filename without the .tmpl suffix). Used to discover
 # the models in a directory the user just typed, which `fetchconfig -t` does
 # not yet know about (it only lists configured directories). Non-plain files
 # (symlinks, hard links) are skipped for safety, as in the viewer/editor.
 # Rejects a path containing ".." and any non-absolute path.
+#
+# Parameters:
+#   $dir
+################################################################################
 sub scan_dir_models {
     my ($dir) = @_;
     return [] unless defined $dir && $dir ne '';
@@ -16045,8 +18906,16 @@ sub scan_dir_models {
     return [ sort keys %seen ];
 }
 
+################################################################################
+# template_models_for
+#
 # Distinct model names available for a given section + directory, sorted. When
 # $dir is undef/empty the filter is section-only.
+#
+# Parameters:
+#   $section
+#   $dir
+################################################################################
 sub template_models_for {
     my ($section, $dir) = @_;
     my $t = run_templates_t();
@@ -16064,11 +18933,18 @@ sub template_models_for {
     return [ sort keys %seen ];
 }
 
+################################################################################
+# template_file_problem
+#
 # Is $path a template file the viewer/editor may touch? It must be a plain
 # regular file -- NOT a symlink (which could point outside the template
 # directories) and NOT hard-linked (link count > 1 means the same inode is
 # reachable under another name, so writing/backing it up would affect that
 # other name too). Returns '' if ok, else a short human-readable reason.
+#
+# Parameters:
+#   $path
+################################################################################
 sub template_file_problem {
     my ($path) = @_;
     return 'symbolic link'            if -l $path;       # lstat: link itself
@@ -16079,12 +18955,18 @@ sub template_file_problem {
     return '';
 }
 
+################################################################################
+# list_template_files
+#
 # Template list for the viewer, built from the -t rows and de-duplicated by
 # full_path (Q4/Q5) -- a template that appears in both the default and device
 # sections is listed once. Returns an arrayref of hashrefs
 # { name, dir, path, size, mtime, problem }, sorted by name then dir. Non-plain
 # files (symlinks, hard links) are listed with `problem` set so the operator
 # sees the warning; the viewer and editor refuse to open them.
+#
+# Parameters: none
+################################################################################
 sub list_template_files {
     my $t = run_templates_t();
     my (@files, %seen);
@@ -16108,8 +18990,15 @@ sub list_template_files {
     return \@files;
 }
 
+################################################################################
+# template_path_ok
+#
 # True if $path is a known template (member of the current -t list) and has no
 # ".." -- the whitelist the editor uses before reading/writing a template.
+#
+# Parameters:
+#   $path
+################################################################################
 sub template_path_ok {
     my ($path) = @_;
     return 0 unless defined $path && $path ne '';
@@ -16121,8 +19010,15 @@ sub template_path_ok {
     return template_file_problem($path) eq '' ? 1 : 0;
 }
 
+################################################################################
+# template_refusal_message
+#
 # Why a template path was refused: names the link/file problem when that is
 # the cause (so the operator understands the warning), else a generic message.
+#
+# Parameters:
+#   $path
+################################################################################
 sub template_refusal_message {
     my ($path) = @_;
     if (defined $path && $path ne '' && $path !~ /\.\./ && -e $path) {
@@ -16134,16 +19030,30 @@ sub template_refusal_message {
     return 'Template not found, or not an allowed template path.';
 }
 
+################################################################################
+# template_backup_path
+#
 # The single backup file for a template (<target>.bak), or undef if none.
+#
+# Parameters:
+#   $path
+################################################################################
 sub template_backup_path {
     my ($path) = @_;
     my $bak = "$path.bak";
     return (-f $bak) ? $bak : undef;
 }
 
+################################################################################
+# run_check_template
+#
 # Structural syntax check via `fetchconfig.pl --check-template <file>` (no
 # -devices, no sudo -- it only reads). Returns (ok, detail): ok is 1 (rc 0),
 # 0 (rc 1 = NOT ok), or undef (fork/other error); detail is the info/error text.
+#
+# Parameters:
+#   $file
+################################################################################
 sub run_check_template {
     my ($file) = @_;
     my ($out, $status, $err) = run_command_capture($FETCHCONFIG_BIN_FULL, '--check-template', $file);
@@ -16154,9 +19064,17 @@ sub run_check_template {
     return ($ok, defined $out ? $out : '');
 }
 
+################################################################################
+# save_template
+#
 # Install $content as the template at $target: write a temp file, then either
 # run the sudo helper (TEMPLATE_HELPER set) or, as a fallback, do the backup +
 # atomic write directly (needs a web-writable directory). Returns (ok, msg).
+#
+# Parameters:
+#   $target
+#   $content
+################################################################################
 sub save_template {
     my ($target, $content) = @_;
     my ($tfh, $tmp) = eval { tempfile('fcweb-tmpl-XXXXXXXX', DIR => $BACKUP_TMP_DIR) };
@@ -16191,7 +19109,14 @@ sub save_template {
     return ($ok, $msg);
 }
 
+################################################################################
+# revert_template
+#
 # Restore $target from its single <target>.bak. Returns (ok, msg).
+#
+# Parameters:
+#   $target
+################################################################################
 sub revert_template {
     my ($target) = @_;
     my $bak = "$target.bak";
@@ -16208,7 +19133,15 @@ sub revert_template {
         : (0, "cannot restore $target: $!");
 }
 
+################################################################################
+# _atomic_copy_file
+#
 # Atomic file copy (temp in the destination's directory, then rename).
+#
+# Parameters:
+#   $src
+#   $dst
+################################################################################
 sub _atomic_copy_file {
     my ($src, $dst) = @_;
     my $dir = $dst; $dir =~ s{/[^/]*$}{}; $dir = '.' if $dir eq '';
@@ -16221,9 +19154,15 @@ sub _atomic_copy_file {
     return 1;
 }
 
+################################################################################
+# run_empty_check
+#
 # Empty-directory check: `fetchconfig.pl -devices=<table> -e`. Read-only; lists
 # empty date/device directories in the repository. Like -o, it exits 0 when
 # none are found and 1 when some are (an expected result, not an error).
+#
+# Parameters: none
+################################################################################
 sub run_empty_check {
     my ($out, $err, $status, $fork_err) =
         run_fetchconfig('-devices=' . $DEVICE_TABLE, '-e');
@@ -16236,6 +19175,9 @@ sub run_empty_check {
     }
     return (collapse_model_registration($combined), $status, undef);
 }
+################################################################################
+# run_orphan_delete
+#
 # deletes orphaned device directories in the repository, so -- like Backup
 # Now -- it runs through sudo (the web-server user typically can't write the
 # repository directly). fetchconfig deletes each file with its own
@@ -16244,6 +19186,9 @@ sub run_empty_check {
 # two streams (via run_command_capture) so the full transcript -- what was
 # found and what was removed -- is shown together, exactly like a Backup Now
 # run. Returns ($output, $status, $error).
+#
+# Parameters: none
+################################################################################
 sub run_orphan_delete {
     my @cmd = $USE_SUDO_FOR_BACKUP_NOW
         ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-o', '-D')
@@ -16251,9 +19196,15 @@ sub run_orphan_delete {
     return run_command_capture(@cmd);
 }
 
+################################################################################
+# run_empty_delete
+#
 # Empty-directory DELETE: `fetchconfig.pl -devices=<table> -e -D`. Writes into
 # the repository, so it runs via sudo -n when USE_SUDO_FOR_BACKUP_NOW is set,
 # exactly like the orphaned-backup delete.
+#
+# Parameters: none
+################################################################################
 sub run_empty_delete {
     my @cmd = $USE_SUDO_FOR_BACKUP_NOW
         ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-e', '-D')
@@ -16261,17 +19212,29 @@ sub run_empty_delete {
     return run_command_capture(@cmd);
 }
 
+################################################################################
+# run_empty_bk_check
+#
 # Empty-BACKUP (0-byte file) check: `fetchconfig.pl -devices=<table> -Z`. The
 # fast all-device scan for zero-byte backup files. Read-only. Note: fetchconfig
 # exits 1 when it FINDS zero-byte backups and 0 when none -- not an error, so
 # callers judge from the output summary, not the exit status.
+#
+# Parameters: none
+################################################################################
 sub run_empty_bk_check {
     return run_command_capture($FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-Z');
 }
 
+################################################################################
+# run_empty_bk_delete
+#
 # Empty-BACKUP DELETE: `fetchconfig.pl -devices=<table> -Z -D`. Removes the
 # zero-byte backup files; writes into the repository, so it uses sudo when
 # USE_SUDO_FOR_BACKUP_NOW is set.
+#
+# Parameters: none
+################################################################################
 sub run_empty_bk_delete {
     my @cmd = $USE_SUDO_FOR_BACKUP_NOW
         ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-Z', '-D')
@@ -16279,6 +19242,9 @@ sub run_empty_bk_delete {
     return run_command_capture(@cmd);
 }
 
+################################################################################
+# parse_backup_timestamp
+#
 # fetchconfig names each saved config in the repository as
 # "<dev_id>.<tag>.YYYYMMDD.HHMMSS<TZ>" -- e.g.
 #   .../202608/20260825/V1-SW1/V1-SW1.run.20260825.143556CEST
@@ -16292,6 +19258,10 @@ sub run_empty_bk_delete {
 # appended when present (e.g. "14:35:56 CEST"). Returns two empty strings
 # if the name carries no recognisable timestamp, so an unexpected filename
 # just shows blank date/time cells rather than a wrong value.
+#
+# Parameters:
+#   $path
+################################################################################
 sub parse_backup_timestamp {
     my ($path) = @_;
     return ('', '') unless defined $path;
@@ -16312,8 +19282,16 @@ sub parse_backup_timestamp {
     return ('', '');
 }
 
+################################################################################
+# get_backup_content
+#
 # Run `fetchconfig.pl -g dev_id -n idx` and return its stdout (the backed
 # up config file content) untouched.
+#
+# Parameters:
+#   $dev
+#   $idx
+################################################################################
 sub get_backup_content {
     my ($dev, $idx) = @_;
     my ($out, $err, $status, $fork_err) =
@@ -16334,6 +19312,9 @@ sub get_backup_content {
     return ($out, undef);
 }
 
+################################################################################
+# compare_backups
+#
 # Run `fetchconfig.pl -g dev_id -n N -m M` -- the CLI's own native compare
 # mode -- and return its stdout directly. No temp files are created on the
 # web server; both the retrieval and the diff happen inside fetchconfig.pl
@@ -16341,6 +19322,12 @@ sub get_backup_content {
 # M (M must be > N); output is a diff", propagating the underlying diff's
 # exit code: 0 = identical, 1 = differs, >1 = error).
 # Returns ($diff_text, $exit_status, $error).
+#
+# Parameters:
+#   $dev
+#   $n
+#   $m
+################################################################################
 sub compare_backups {
     my ($dev, $n, $m) = @_;
     my ($out, $err, $status, $fork_err) =
@@ -16353,6 +19340,9 @@ sub compare_backups {
     return ($out, $status, undef);
 }
 
+################################################################################
+# run_backup_now
+#
 # Run a live backup for $dev right now: a minimal temporary device table
 # (all directive lines + this one device line) is passed via -devices=.
 #
@@ -16362,6 +19352,10 @@ sub compare_backups {
 # connected to, what happened, whether it succeeded), not noise to filter
 # out the way it is for the backup listing.
 # Returns ($output, $exit_status, $error, $aborted).
+#
+# Parameters:
+#   $dev
+################################################################################
 sub run_backup_now {
     my ($dev) = @_;
 
@@ -16421,6 +19415,9 @@ sub run_backup_now {
     return ($out, $status, $err, $aborted);
 }
 
+################################################################################
+# run_command_capture
+#
 # Fork/exec an arbitrary external command (list-form -- never a shell) with
 # stdout and stderr MERGED, and return ($output, $exit_status, $error, $aborted).
 # Used by run_backup_now(), which wants a live command's full merged
@@ -16439,6 +19436,10 @@ sub run_backup_now {
 # still remove temp files and audit; $aborted is then true. SIGPIPE is ignored
 # while the command runs so a keepalive write to a vanished client fails
 # instead of killing the process. The child gets all four back at default.
+#
+# Parameters:
+#   @cmd
+################################################################################
 sub run_command_capture {
     my (@cmd) = @_;
     my $keepalive = $RUN_KEEPALIVE;
@@ -16566,20 +19567,32 @@ sub run_command_capture {
     return (collapse_model_registration($out), $status, $err, $aborted);
 }
 
+################################################################################
+# html_keepalive
+#
 # Keepalive writer for $RUN_KEEPALIVE: writes an HTML comment to the currently
 # selected output handle and flushes it (setting $| flushes pending output, so
 # the first call also pushes the header and page start to the web server).
 # Valid only after the HTTP header has been printed: the bytes are body
 # content. Returns print's result (false when the client is gone).
+#
+# Parameters: none
+################################################################################
 sub html_keepalive {
     return sub { local $| = 1; return print "<!-- keepalive -->\n"; };
 }
 
+################################################################################
+# sweep_stale_backup_tables
+#
 # Remove Backup Now temp device tables (cleartext credentials) left behind by a
 # run that was killed before it could unlink its own (e.g. SIGKILL). Only our
 # own fcweb-dev-XXXXXXXX.tbl regular files, and only once they are older than
 # any run can be (BACKUP_TIMEOUT + 300 s; 24 h when BACKUP_TIMEOUT is 0).
 # fetchconfig.pl reads the table at start-up, so this never affects a live run.
+#
+# Parameters: none
+################################################################################
 sub sweep_stale_backup_tables {
     my $max_age = ($BACKUP_TIMEOUT && $BACKUP_TIMEOUT > 0) ? $BACKUP_TIMEOUT + 300 : 86400;
     opendir(my $dh, $BACKUP_TMP_DIR) or return;
@@ -16599,6 +19612,9 @@ sub sweep_stale_backup_tables {
 # Output sanitization
 # =============================================================================
 
+################################################################################
+# mask_secrets
+#
 # Mask credential values before they ever reach the browser. The main risk
 # is Backup Now: fetchconfig.pl's own debug output echoes the exact -line=
 # argument it was given verbatim, and once $DEVICE_TABLE's "default:"
@@ -16616,6 +19632,10 @@ sub sweep_stale_backup_tables {
 # key=value pairs into one field separated by commas, e.g.
 # "user=admin,pass=X,enable=Y" -- stopping only at whitespace would treat
 # everything after "pass=" as one value and swallow the following fields.
+#
+# Parameters:
+#   $text
+################################################################################
 sub mask_secrets {
     my ($text) = @_;
     return $text unless defined $text;
@@ -16666,30 +19686,51 @@ sub mask_secrets {
     return $text;
 }
 
+################################################################################
+# esc
+#
 # HTML-escape dynamic content for output. Every place in this script that
 # prints a value derived from the device table, fetchconfig.pl output, or
 # other external data goes through this (instead of calling
 # CGI::escapeHTML directly) so credential masking is never accidentally
 # skipped at a call site.
+#
+# Parameters:
+#   $text
+################################################################################
 sub esc {
     my ($text) = @_;
     return CGI::escapeHTML(mask_secrets($text));
 }
 
+################################################################################
+# valid_id
+#
 # Validate a device id or username. Word chars, dots and dashes only, and the
 # FIRST character may not be a dash: ids are passed to fetchconfig.pl as
 # positional arguments, so a leading "-" could otherwise be mistaken for an
 # option (e.g. "-D"). Used at every entry point that accepts an id.
+#
+# Parameters:
+#   $id
+################################################################################
 sub valid_id {
     my ($id) = @_;
     return defined $id && $id =~ /^[\w.][\w.\-]*$/;
 }
 
+################################################################################
+# normalize_email
+#
 # Normalise a user-supplied email address. Returns '' for an empty/undef input
 # (email is optional), the trimmed lowercased address if it passes a
 # conservative syntactic check, or undef if it is non-empty but invalid. The
 # check is deliberately simple (local@domain.tld, no spaces, one @, a dotted
 # domain) and length-capped -- it is a sanity filter, not RFC 5322.
+#
+# Parameters:
+#   $e
+################################################################################
 sub normalize_email {
     my ($e) = @_;
     return '' unless defined $e;
@@ -16700,6 +19741,9 @@ sub normalize_email {
     return lc($e);
 }
 
+################################################################################
+# json_string
+#
 # Minimal JSON string escaper for the small hand-built JSON the scan endpoints
 # emit. Escapes the characters JSON requires (", \, control chars) AND every
 # non-ASCII byte (>= 0x7F) as \uXXXX, so the result is pure 7-bit ASCII and
@@ -16708,6 +19752,10 @@ sub normalize_email {
 # contain stray non-UTF-8 bytes (e.g. a Latin-1 character in a hostname or
 # banner); emitting those raw produced an invalid-UTF-8 body that the
 # browser's JSON.parse rejected ("invalid response").
+#
+# Parameters:
+#   $s
+################################################################################
 sub json_string {
     my ($s) = @_;
     $s = '' unless defined $s;
@@ -16725,10 +19773,17 @@ sub json_string {
     return "\"$s\"";
 }
 
+################################################################################
+# color_comment_lines
+#
 # Escape a config blob for a <pre> block (via esc(), so secrets are still
 # masked) and wrap comment lines -- those whose first non-space character is
 # '#' -- in a span so they can be coloured (the Setup raw-table view). The
 # copy button copies pre.textContent, so the spans don't affect copied text.
+#
+# Parameters:
+#   $text
+################################################################################
 sub color_comment_lines {
     my ($text) = @_;
     return '' unless defined $text;
@@ -16751,11 +19806,17 @@ sub color_comment_lines {
 # HTML chrome
 # =============================================================================
 
+################################################################################
+# std_header
+#
 # Wrapper around $cgi->header that adds the standard security response headers
 # to every response (H1): clickjacking, MIME-sniffing and referrer-leak
 # defences. All handlers call std_header(...) instead of std_header(...) so
 # the headers are applied in one place. Any -Key => value pairs are forwarded
 # to CGI->header unchanged (type, charset, cookie, location, status, ...).
+#
+# Parameters: reads @_ directly
+################################################################################
 sub std_header {
     my @args = @_;
     # A single positional arg is CGI.pm's shorthand for the content type.
@@ -16775,6 +19836,14 @@ sub std_header {
     return $cgi->header(%h);
 }
 
+################################################################################
+# page_head
+#
+# Parameters:
+#   $title
+#   $user
+#   $main_class
+################################################################################
 sub page_head {
     my ($title, $user, $main_class) = @_;
     my $t = esc("$APP_TITLE - $title");
@@ -16823,25 +19892,26 @@ sub page_head {
             my $id = 'menu-' . lc($label); $id =~ s/[^a-z0-9]+/-/g;
             return qq{<div class="menu-group">}
                  . qq{<button type="button" class="menu-trigger" aria-haspopup="true" aria-expanded="false">}
-                 . esc($label) . qq{ <span class="menu-caret">&#9662;</span></button>}
+                 . qq{<span class="menu-label">} . esc($label) . qq{</span>}
+                 . qq{ <span class="menu-caret">&#9662;</span></button>}
                  . qq{<div class="menu-dropdown" role="menu">} . join('', @items) . qq{</div></div>};
         };
 
         # Devices
         my $devices_menu = $group->('Devices',
-            $su->('Device list',    script_url()),
-            $su->('Backup status',  '?action=status'),
+            $su->('Devices',        script_url()),
+            $su->('Device backup status', '?action=status'),
             $su->('Backup reports', '?action=report'),
-            $su->('Notes',          '?action=tool_notes'));
+            $su->('Device notes',   '?action=tool_notes'));
 
         # Setup devices (only if allowed to edit). Admin/unrestricted: full set;
         # a site-limited editor: only "Edit device table".
         my $setup_menu = '';
         if ($may_edit) {
             my @items = $unrestricted
-                ? ($su->('Show device table', '?action=setup'),
+                ? ($su->('Device table',      '?action=setup'),
                    $su->('Edit device table', '?action=edit_table'),
-                   $su->('Bulk edit',         '?action=bulk_edit'))
+                   $su->('Bulk edit devices', '?action=bulk_edit'))
                 : ($su->('Edit device table', '?action=setup'));  # routes to editor
             $setup_menu = $group->('Setup devices', @items);
         }
@@ -16864,14 +19934,14 @@ sub page_head {
                 $su->('Restore device table',                         '?action=tool_restore'),
                 $su->('Show fetchconfig-web.cfg',                     '?action=tool_show_cfg'),
                 $su->('Verify email setup',                          '?action=tool_verify_email'),
-                $su->('Template viewer',                              '?action=view_templates'),
+                $su->('Templates',                                    '?action=view_templates'),
                 $su->('Upload report logo',                           '?action=tool_logo'),
                 $su->('View fetchconfig log',                         '?action=view_log'));
         }
 
         # User: Change your password for all; admin extras. Each is its own page.
         my @user_items = ();
-        push @user_items, $su->('Users list', '?action=user_list'),
+        push @user_items, $su->('Users', '?action=user_list'),
                           $su->('Add user',   '?action=user_add') if $is_admin;
         push @user_items, $su->('Change your password', '?action=change_password_form');
         push @user_items, $su->('Change your email',    '?action=change_email_form');
@@ -16998,8 +20068,14 @@ sub page_head {
     my $backdrop_css = defined $user ? '' : qq{
   body.login-body { background: #23303d url('$IMAGE_BASE_URL/back.jpg') center center / cover no-repeat fixed;
                     min-width: 0; }
-  body.login-body main { min-height: calc(100vh - 3.2em); min-width: 0;
-    display: flex; align-items: flex-start; justify-content: center; padding-top: 6vh; }
+  /* The login page must fit the viewport without scrollbars (down to
+     1024x768). The body is a full-height flex column (header, main, footer);
+     main simply takes the remaining space and centres the box, so header +
+     main + fixed footer never exceed 100vh. No extra vh padding here -- that
+     was pushing the total past 100vh and forcing a scrollbar. */
+  body.login-body main { min-height: 0; min-width: 0;
+    display: flex; align-items: center; justify-content: center;
+    padding: 2vh 1em; overflow: hidden; }
   body.login-body .login-box { margin: 0; flex: none; width: 320px; max-width: 90%; }
   body.login-body header.app-titlebar { background: #fff; }
   body.login-body footer.app-footer { position: fixed; left: 0; right: 0; bottom: 0; text-align: center;
@@ -17041,8 +20117,8 @@ $backdrop_css
   .menu-trigger { background: none; border: none; cursor: pointer; font: inherit;
     color: #1a5fb4; font-weight: 500; font-size: 0.95em; padding: 0.2em 0.1em;
     display: inline-flex; align-items: center; gap: 0.25em; }
-  .menu-trigger:hover { text-decoration: underline; }
-  .menu-caret { font-size: 0.7em; opacity: 0.8; }
+  .menu-trigger:hover .menu-label { text-decoration: underline; }
+  .menu-caret { font-size: 0.7em; opacity: 0.8; text-decoration: none; }
   .menu-dropdown { display: none; position: absolute; top: 100%; left: 0; z-index: 1000;
     min-width: 13em; margin-top: 0.3em; background: #fff; border: 1px solid #cdeede;
     border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.14); padding: 0.3em 0; }
@@ -17173,12 +20249,15 @@ $backdrop_css
      for the 0.6em horizontal cell padding, so config lines up to 90 chars
      wide never wrap. Longer lines still wrap (pre-wrap) within the column. */
   table.sbs { border-collapse: collapse; width: max-content; table-layout: fixed;
+              background: #fff;   /* white base so the green tool-section box does
+                                     not bleed through and mute the diff colours */
               font-family: Consolas, Menlo, "Courier New", monospace; font-size: 0.85em; }
   table.sbs col.gutter { width: 3.5em; }
   table.sbs col.side { width: 92ch; }
   table.sbs th { background: #eaecef; border: 1px solid #ddd; padding: 0.4em 0.6em;
                  text-align: left; font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; }
   table.sbs td { border: 1px solid #e3e3e3; padding: 0.1em 0.6em; vertical-align: top;
+                 background: #fff;   /* explicit white; the d-add/d-del/d-chg rules override */
                  white-space: pre-wrap; word-break: break-all; }
   table.sbs td.ln { text-align: right; color: #999; background: #f6f8fa; white-space: nowrap;
                     user-select: none; -webkit-user-select: none; }
@@ -17247,10 +20326,11 @@ $backdrop_css
   /* In the "Backups for <device>" heading the icon follows the h1 text; nudge
      it onto the text's optical centre. */
   h1 .note-icon { vertical-align: 0.05em; }
-  .fc-note-box { width: 32em; max-width: 92vw; text-align: left; }
+  .fc-note-box { width: 32em; max-width: 92vw; max-height: 90vh; overflow: auto; text-align: left; }
   .fc-note-title { margin: 0 0 0.2em; }
   .fc-note-dev { margin: 0 0 0.6em; font-family: monospace; }
-  .fc-note-text { width: 100%; box-sizing: border-box; font-family: monospace; font-size: 0.9em; }
+  .fc-note-text { width: 100%; box-sizing: border-box; font-family: monospace; font-size: 0.9em;
+                  resize: vertical; max-height: 55vh; min-height: 6em; }
   .fc-note-keep { display: block; margin: 0.5em 0; font-size: 0.9em; }
   .fc-note-status { min-height: 1.2em; margin: 0.2em 0 0.6em; font-size: 0.85em; }
   .fc-modal-box { background: #fff; border-radius: 10px; padding: 1.8em 2em 1.5em;
@@ -17461,6 +20541,11 @@ $backdrop_css
   .user-section > h2 { margin: 0 -1.1em 0.8em; font-size: 1.15em; background: #b7e6cd;
                        border-bottom: 1px solid #a9dcc2; padding: 0.45em 1.1em;
                        border-radius: 5px 5px 0 0; }
+  /* Blue variant of the tool-section box, used on the Devices page so the
+     device list is visually distinct from the green statistics panel. */
+  .tool-section-blue { background: #eaf2fb; border: 1px solid #c7dcf2; border-radius: 6px;
+                       box-sizing: border-box; padding: 0 1.1em 1em; margin: 1em 0; }
+  .tool-section-blue > .tool-section-title { background: #bcd6f5; }
   .tool-section-title { margin: 0 -1.1em 0.8em; font-size: 1.15em; background: #b7e6cd;
                         border-bottom: 1px solid #a9dcc2; padding: 0.45em 1.1em;
                         border-radius: 5px 5px 0 0; }
@@ -17521,25 +20606,43 @@ $backdrop_css
   /* main.full already provides the 5% free margins on the left and right;
      here we just place the table (variable width) and the statistics box
      with a 5% gap between them. */
-  .dev-layout { display: flex; align-items: flex-start; }
-  /* The page itself scrolls horizontally below the 900px min-width (see the
-     main rule); the device-main column must NOT add its own nested scrollbar,
-     which otherwise cuts off the table and fights the page scroll. */
-  .dev-main { flex: 1 1 auto; min-width: 0; }
-  .dev-main #dev-table { width: 100%; }
-  .dev-stats { flex: 0 0 auto; margin: 0 0 0 5%; align-self: flex-start;
+  /* Both boxes start at the same y (align-items: flex-start). The green box
+     covers only its own content (it is NOT stretched to the blue box's height).
+     The device table is contained inside the blue box and scrolls horizontally
+     there, so it can never spill past the box and slide under the green box. */
+  .dev-layout { display: flex; align-items: flex-start; gap: 1em; flex-wrap: wrap; }
+  .dev-main { flex: 1 1 40em; min-width: 0; margin: 0; display: flex; }
+  /* min-width:0 lets the blue box shrink to its flex track; overflow:hidden
+     clips the box so the inner scroll container is the thing that scrolls. */
+  .dev-main > .tool-section-blue { flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; }
+  /* The table area scrolls horizontally WITHIN the blue box instead of
+     overflowing it and sliding under the statistics box. */
+  #dev-table-scroll { max-width: 100%; overflow-x: auto; }
+  .dev-main #dev-table { width: 100%; min-width: 40em; }
+  /* The stats box keeps its content width and does not shrink; the device
+     column's 40em min-width forces flex-wrap to drop this box onto its own
+     line below the table on narrow windows -- it never overlaps. */
+  .dev-stats { flex: 0 0 auto; width: max-content; max-width: 100%;
                background: #e8faf1; border: 1px solid #cdeede; border-radius: 6px;
                padding: 0.6em 1.1em 1em; }
   .dev-stats h2 { font-size: 1.1em; margin-top: 0.4em; }
   .dev-stats-table { width: auto; min-width: 12em; }
+  /* Site filter is short (site codes), so half the width of the other selects. */
+  #site-filter { max-width: 9em; }
   /* Same small size/colour as the page footer (footer.app-footer). */
   .dev-loadtime { font-size: 0.8em; color: #888; margin: 0.6em 0 0; }
   .render-time { font-size: 0.8em; color: #888; margin: 0.6em 0 0; text-align: right; }
   .render-diag { font-size: 0.8em; color: #888; margin: 0.4em 0 0; font-family: monospace; }
-  /* Stack the stats under the table on narrow screens. */
-  \@media (max-width: 700px) {
-    .dev-layout { flex-direction: column; padding: 0; }
-    .dev-stats { margin: 1.2em 0 0; }
+  /* When the row is too narrow for both boxes, flex-wrap drops the stats box
+     onto its own line; this makes it span the full width there (it is the only
+     item on that line) instead of sitting at its min-width. */
+  /* The page never renders narrower than 900px (min-width floor); below ~940px
+     viewport it starts scrolling horizontally. Force the stats box to stack
+     BELOW the table there -- flex-direction: column is honoured identically by
+     every browser, unlike flex-wrap math at the min-width edge. */
+  \@media (max-width: 940px) {
+    .dev-layout { flex-direction: column; }
+    .dev-main, .dev-stats { flex: 0 0 auto; width: 100%; min-width: 0; max-width: 100%; }
   }
   /* Collapsed device rows in the editor: a compact summary line (Edit button +
      Device-ID / Model / Site) that expands into a full .rec-card on demand. */
@@ -17627,10 +20730,17 @@ $warn_banner
 HTML
 }
 
+################################################################################
+# show_check_site_assignment
+#
 # Title-bar dropdown menu behaviour: click a trigger to open its panel, click
 # elsewhere or press Escape to close, basic keyboard support. Self-contained.
 # Tools (admin only): list devices that have no site= assigned. Site tags are
 # required for the per-site user access model, so this flags any gaps.
+#
+# Parameters:
+#   $user
+################################################################################
 sub show_check_site_assignment {
     my ($user) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
@@ -17641,11 +20751,10 @@ sub show_check_site_assignment {
         return;
     }
     print page_head('Check site assignment', $user, 'full');
-    print qq{<h1>Check site assignment</h1>\n};
 
     my ($content, $err) = slurp_device_table();
     print qq{<div class="tool-section">\n};
-    print qq{<h2 class="tool-section-title">Devices without a site</h2>\n};
+    print qq{<h2 class="tool-section-title">Check site assignment</h2>\n};
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
         print qq{</div>\n}; print page_foot(); return;
@@ -17677,6 +20786,11 @@ sub show_check_site_assignment {
     print page_foot();
 }
 
+################################################################################
+# menu_bar_script
+#
+# Parameters: none
+################################################################################
 sub menu_bar_script {
     return <<'JS';
 <script>
@@ -17713,6 +20827,11 @@ sub menu_bar_script {
 JS
 }
 
+################################################################################
+# page_foot
+#
+# Parameters: none
+################################################################################
 sub page_foot {
     my $name_ver = esc("$APP_TITLE v$APP_VERSION");
     # Append the installed fetchconfig version when it can be determined
@@ -17742,11 +20861,17 @@ sub page_foot {
     return qq{</main>\n<footer class="app-footer">$warn<div class="footer-line">$name_ver &mdash; $cr</div></footer>\n$confirm_html$about_html$note_html</body>\n</html>\n};
 }
 
+################################################################################
+# about_modal_html
+#
 # About dialog: reached from the title-bar program icon. Shows the internal
 # (shipped) version, the configured/effective version (overridable via the
 # config APP_VERSION key), the copyright (config COPYRIGHT or the built-in
 # default), the installed fetchconfig.pl version, and the GPLv3 note. Styled
 # like the confirm modal; OK / x / Esc / backdrop all close it.
+#
+# Parameters: none
+################################################################################
 sub about_modal_html {
     my $internal = esc(APP_VERSION_INTERNAL);
     my $effective = esc($APP_VERSION);
@@ -17809,12 +20934,18 @@ sub about_modal_html {
 HTML
 }
 
+################################################################################
+# note_modal_html
+#
 # A custom confirmation dialog styled like the Backup-Now spinner box (centred
 # white card on a dark overlay), replacing the browser's native confirm().
 # fcConfirm(message, onConfirm, opts) shows it; opts.danger => red Confirm
 # button (destructive actions), opts.confirmLabel overrides the button text.
 # Forms carrying data-confirm="..." (and optional data-confirm-danger) are
 # handled automatically: submit is deferred until the user confirms.
+#
+# Parameters: none
+################################################################################
 sub note_modal_html {
     my $save_url = script_url();
     my $csrf = csrf_token();
@@ -17890,6 +21021,11 @@ sub note_modal_html {
 HTML
 }
 
+################################################################################
+# confirm_modal_html
+#
+# Parameters: none
+################################################################################
 sub confirm_modal_html {
     return <<'HTML';
 <div id="fc-confirm" class="fc-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="fc-confirm-msg">

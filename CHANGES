@@ -1,188 +1,46 @@
-1.63
+2.00
 ====
-User management redesign (no database change).
+Major release consolidating 1.53-1.63. Requires fetchconfig 9.69 or newer.
+Database: adds users.download_full_config and the device_notes table
+(run fetchconfig-web-dbupdate-1.62.sql on an existing install).
 
-* The user list is now a slim table (username, email, Admin, Reset password,
-  Delete); the username opens a per-user edit page with all settings grouped
-  (Identity, Permissions, Site access, Password) and Return / Cancel / Save.
-  Replaces the row of inline permission toggles. Permissions (and Add user) no
-  longer live in two places -- the sites editor and Add user forms dropped their
-  permission checkboxes; Add user creates the account and opens its edit page.
-* Save writes all fields in one request and logs one audit line per CHANGED
-  permission (reusing the set_* action names); unchanged fields are not logged.
-  Administrator greys out the rights it overrides; Cancel/Return/Edit-site-access
-  warn about unsaved changes.
-* Fixed an uninitialized-value warning when uudecoding a binary (web-GUI) config.
-* The device-table editor, bulk editor and the read-only device-table view now
-  use the standard green tool-section box (full width); the editors' amber
-  caution boxes are now plain info text, and the read-only view's heading is
-  "Device table".
-* Hardening: session ids, password-reset tokens and password salts now come
-  from a single /dev/urandom helper that loops on short reads and fails closed
-  (no weak rand() fallback). Reset-token creation returns "no link sent" if the
-  RNG is unavailable rather than issuing a guessable token.
-* Requires fetchconfig 9.68 or newer (MIN_FETCHCONFIG_VERSION bumped from 9.67).
-1.62
-====
-Requires the 1.62 database upgrade (fetchconfig-web-dbupdate-1.62.sql).
-
-* Unmasked config is now a per-user right. The config view is always masked (it
-  was unmasked for models without a highlighter) and carries a "secrets masked"
-  banner. With the new download_full_config right (like Full Report), the Copy
-  button becomes "Copy unmasked" (fetched server-side, never in the DOM) and a
-  Download button appears; without it, only the masked Copy and no download.
-  Download now requires selecting which backup. Unmasked copy and download are
-  audited.
-* Device notes: one free-text note per device, edited in an AJAX modal from a
-  paper-note icon on the device list and the backups page, with a Keep flag.
-  All users, honouring site access. Device -> Notes viewer (filters, paging) and
-  Tools -> Orphaned notes cleanup (admin; removes notes for deleted devices
-  unless Keep is set).
-* DB: fetchconfig-web-dbupdate-1.62.sql adds users.download_full_config and the
-  device_notes table; fetchconfig-web-dbsetup.pl creates them on a fresh install.
-* Notes modal: fixed the save (it posted the wrong CSRF field name, so every
-  save was rejected); note_save now reports the real database error on failure
-  instead of a generic "save failed"; Cancel warns before discarding unsaved
-  changes.
-* Tools menu: tool names use consistent sentence case ("Empty backup cleanup",
-  "Empty directory cleanup", "Orphaned backup cleanup").
-* Backups page: the "select a configuration to download" notice now uses the
-  styled dialog (new fcAlert), and the compare column has a "CMP" header.
-* Fixed: the selected-backup Download served a text config through the
-  uudecoder ("no uuencoded begin header found"); it now serves text configs raw
-  and only uudecodes the binary web-GUI (TP-Link / ProCurve 1700) models.
-* Cosmetic: the paper-note icon is now centred (both axes) in the device-list
-  Note column and aligned with the heading text on the backups page.
-* Binary web-GUI devices (TP-Link / ProCurve 1700) now get the same styled
-  selection-based Download on the backups page as text devices (they had none);
-  compare stays text-only.
-* Masking: SNMP community strings in a switch config ("snmp-server community
-  ..." quoted or bare, e.g. ProCurve) are now masked in the config view, like
-  the device-table community= option; the access level is kept. RADIUS/TACACS
-  shared keys on server lines ("radius-server ... key ...") and WPA passphrases
-  ("wpa-passphrase ...", Aruba CX) are masked too, as are the Aruba CX
-  "virtual-controller-key" and the indented "key" line under a "wlan
-  auth-server" block; unrelated "key" keywords (e.g. "crypto key generate",
-  "key-management", "key-exchange") are left alone. The SNMP community mask is
-  scoped to the "snmp-server/set snmp community" command, so the word
-  "community" in a description or hostname is no longer wrongly masked.
-* Notes viewer: resolve site access and parse the device table once per page
-  instead of once per note row (removes an N+1 of DB connects and table parses).
-* Notes viewer: the note icon is shown bright (has-note), not dimmed -- every
-  row in that table has a note by definition -- and centred like the device list.
-* Notes viewer: fixed two bugs where saved notes did not appear -- a mis-called
-  site-access helper filtered every row out, and csrf_field()'s trailing newline
-  embedded in the viewer's inline JavaScript broke the whole script (now uses an
-  inline csrf token). Orphaned notes cleanup gained a view icon, and note_get
-  lets an admin view a note for a device no longer in the table.
-
-1.61
-====
-Security fixes from the 1.60 audit. No database change. If EMAIL = 1, add
-SITE_URL to the config file (see INSTALL). chmod 0600 the config file.
-
-* Password reset: the reset link is now built only from the new SITE_URL config
-  setting, never from the request's Host header (which an attacker controls and
-  could use to redirect reset links to their own server). Without SITE_URL no
-  reset email is sent. Reset tokens are stored as SHA-256; the reset pages send
-  Referrer-Policy: no-referrer.
-* Forgot-password: every request counts against the per-IP throttle (not only
-  requests for existing accounts, which was an account-enumeration oracle), and
-  the request takes a fixed minimum 0.5 s so timing reveals nothing.
-* Login: the 2-5 s sleep on a failed login is gone (under FastCGI it let a few
-  concurrent bad logins hold every worker); the DB throttle is the rate limit.
-  A nonexistent username now costs the same bcrypt check as a wrong password.
-* Headers: Cache-Control no-store on all responses; Strict-Transport-Security
-  when HTTPS_ENABLED = 1.
-* The configuration file must be mode 0600 (it holds DBpass and SMTP_PASS); a
-  warning is shown on every page until it is. DEFAULT_PASSWORD is masked in the
-  config viewer.
-* login_attempts update is transactional with a retry, so concurrent first
-  failures can no longer lose a count.
-* Footer warnings are now shown on their own line(s) above the copyright line;
-  security warnings (e.g. the config-file mode) in red, operational warnings
-  (audit write failed, tripwire disabled) in amber.
-* fetchconfig-web-dbsetup.pl: the generated config file now includes the
-  password-rules section, the email / password-reset section (incl. SITE_URL)
-  and GENERIC_SYNTAX, so a fresh install's config covers every setting the
-  application knows (a test keeps the generator and the config viewer in sync).
-* Docs: README's annotated configuration section now covers every setting,
-  including the 1.60/1.61 additions (password rules, email / password reset,
-  SITE_URL, GENERIC_SYNTAX, HELP_DIR); a test keeps README in sync with the
-  config-key registry.
-* Tools -> Login failures (admin): a viewer for the login_attempts throttle
-  table, in the audit-log look and with the same controls -- a filter bar (Type
-  IP/Account, From/To date), First/Prev/Next/Last paging top and bottom (100 per
-  page, fetched by AJAX), a Reload button, the floating Top/Bottom nav, and a
-  "Clear all" button guarded by the standard confirmation dialog. Rows show the
-  key (client IP or account), failure count, last-failure time and age, with
-  keys in cooldown highlighted.
-* Version 1.61.
-
-1.60
-====
-Requires fetchconfig 9.67+. New run-time dependency: FCGI (optional, for
-FastCGI); optional Crypt::Bcrypt (bcrypt passwords) and Net::SMTP (password
-reset email). Database upgrade: run fetchconfig-web-dbupdate-1.60.sql.
-
-FastCGI
-* Runs under mod_fcgid using FCGI directly (not CGI::Fast), with automatic
-  fallback to plain CGI: the ~15k-line script is compiled once per worker and
-  DB connections are reused. No config change for a plain-CGI deployment; the
-  About dialog shows the active run mode.
-* Config is re-read each request (edits apply without restarting Apache);
-  clean SIGTERM/USR1/HUP shutdown; a die in one request cannot kill the worker.
-* Reload a new script with "apachectl graceful" (mod_fcgid does not honour
-  touch). See INSTALL.md for the full mod_fcgid setup (socket dir,
-  FcgidProcessTableFile, timeouts > BACKUP_TIMEOUT, worker pool >=
-  MAX_PARALLEL_SCAN).
+Highlights
+----------
+* User management redesigned: slim user list -> per-user edit page (identity,
+  permissions, site access, password); one save writes all fields and logs one
+  audit line per changed permission. Permissions live in one place only.
+* Device notes: a per-device free-text note (optionally "keep"), with a notes
+  viewer and an orphaned-notes cleanup tool.
+* Unmasked-config right: the config view is always masked; a per-user
+  download_full_config right gates the unmasked copy/download, both audited.
+* Device locking (fetchconfig 9.69): lock / lock_dir / lock_retry /
+  lock_retry_time device options, lock_dir resolved against a "directory: lock"
+  allow-list; a lock-skip shows as the "skipped" state.
 
 Security
-* bcrypt ($2b$) password hashing via Crypt::Bcrypt, with transparent upgrade of
-  legacy $apr1$ hashes on next login (unchanged without the module).
-* Online login throttle (login_attempts table): per-IP hard block + per-account
-  soft delay; default 5 failures / 15-min window / 15-min cooldown.
-* Security headers on every response (X-Frame-Options, X-Content-Type-Options,
-  Referrer-Policy); json_string() escapes </script> breakouts; read-error
-  messages no longer leak the raw errno (logged to the audit log instead).
-* Single highest-priority header banner shown instead of stacking several.
-* Password policy: configurable complexity rules -- MIN/MAX length and minimum
-  counts of uppercase/lowercase/digit/special characters, or N-of-4 character
-  classes (PASSWORD_MIN_*); a new password must also differ from the username
-  and DEFAULT_PASSWORD. All default off (length only), enforced at every
-  password-set point, shown on the change-password and reset forms.
+--------
+* Host-header reset-link poisoning fixed: reset links use a configured SITE_URL
+  only; no SITE_URL -> no reset mail.
+* Session ids, reset tokens and password salts come from /dev/urandom with a
+  loop on short reads and fail closed (no weak rand() fallback).
+* Reset tokens hashed with SHA-256; login/reset throttling hardened (no timing
+  oracle, no FastCGI-worker exhaustion); forgot-password audits every outcome.
+* Password policy (length and character classes), config-file permission check,
+  HSTS/Cache-Control headers, and a login-failures viewer.
+* Config masking extended to switch-config secret forms (SNMP community,
+  RADIUS/TACACS keys, WPA passphrases, Aruba CX controller/auth-server keys).
 
-Email / password reset
-* Optional per-user email address (self-service "Change your email", admin edit
-  in the user list).
-* "Forgot password?" self-service reset (EMAIL=1): one-time, 30-minute,
-  single-use hashed token link by Net::SMTP (STARTTLS/SSL/none, optional AUTH),
-  with a uniform no-enumeration response and per-IP rate limit. EMAIL=0 shows a
-  contact-admin note.
-* "Test my email" (user) and Tools -> Verify email setup (admin) send a test
-  message and report the SMTP result.
-* New config section: EMAIL, SMTP_HOST, SMTP_PORT, SMTP_SECURITY, EMAIL_AUTH,
-  SMTP_USER, SMTP_PASS, EMAIL_FROM (SMTP_PASS masked in the config viewer).
-
-Syntax highlighting
-* Template-backed ("generic") devices are highlighted by resolving a scheme
-  from the template's declared syntax_style (fetchconfig --template-syntax),
-  else the GENERIC_SYNTAX config setting, else content auto-detection. New
-  json, xml and generic schemes; certificate hex dumps are left plain.
-  SHOW_RENDER_TIME=1 shows the chosen scheme and template file below the config.
-
-Database / tooling
-* Migration scripts renamed to a per-version series:
-  fetchconfig-web-dbupdate-1.50.sql, -1.51.sql, -1.60.sql. The 1.60 script adds
-  users.email, login_attempts and password_resets (PostgreSQL 8.2-compatible,
-  idempotent); fetchconfig-web-dbsetup.pl creates them on a fresh install.
-* New fetchconfig-web-clean-resets.pl prunes spent reset tokens and stale
-  throttle rows.
-
-Fixes
-* Restore device table no longer trips the external-change banner.
-* render-doc.py: TOC links, indented code fences, and an "Apache config" label.
-* Various test portability and noise fixes (AIX).
+Other
+-----
+* All notification emails (test, password reset, admin verify) share one modern
+  HTML style (program icon via a CID image so Thunderbird/Outlook show it
+  inline) plus a plain-text part; the reset mail has a "Set a new password"
+  button.
+* Consistent UI: every tool/editor/compare/result page uses the green
+  tool-section box; the Devices list uses a blue box with the statistics box
+  beside it; menu labels match the page titles.
+* Ships favicon.ico. FastCGI deployment (FCGI optional). Every function now
+  carries a uniform header block.
 
 1.52
 ====
@@ -198,18 +56,22 @@ Fixes
   call, so the write was silently lost. audit() now detects a dead handle (via
   ping) and opens its own connection, and those callers no longer pass the
   closed handle. The set_user_sites entry now records which site codes were
-  added/removed (and old->new), and the add_user entry spells out the rights. The report-download right change
+  added/removed (and old->new), and the add_user entry spells out the rights.
+  The report-download right change
   now logs grant vs revoke (like the edit/admin right changes) instead of a flat
   "updated" message.
 * The device-table external-change tripwire no longer fails silently: if its
   app_state record cannot be read/written (e.g. the table is missing or not
   granted to the web user), a footer warning is shown instead of the check
   quietly doing nothing. A real content change is logged as external_change on
-  login and editor open; an mtime-only touch is intentionally ignored. The detection now also shows
+  login and editor open; an mtime-only touch is intentionally ignored. The
+  detection now also shows
   the user a visible amber banner (on editor open, and once on the first page
-  after login via a one-shot app_state notice), not just an audit-log row. The banner links to the audit log only for admins
+  after login via a one-shot app_state notice), not just an audit-log row. The
+  banner links to the audit log only for admins
   (a user with just the edit-device-table right sees the notice without the
-  link, since they cannot open the audit log). On the device-table editor the banner
+  link, since they cannot open the audit log). On the device-table editor the
+  banner
   also notes that the editor has loaded the changed table, so the user is
   editing the current on-disk content (not a stale copy). The bulk editor does
   the same: it now runs the tripwire on a fresh open and carries the same
@@ -235,7 +97,8 @@ Fixes
   filters (user/action/object/text/date range) and CSV export.
 * New standalone PostgreSQL 8.2-compatible script fetchconfig-web-audit.sql to
   add the audit tables to an existing database (also folded into
-  fetchconfig-web-dbupdate.sql); fresh installs get them via fetchconfig-web-dbsetup.pl.
+  fetchconfig-web-dbupdate.sql); fresh installs get them via
+  fetchconfig-web-dbsetup.pl.
 * Fixed: audit entries for actions that did not pass an explicit user (e.g.
   empty/orphan cleanup, backup_now) logged the session id instead of the
   username -- current_user() returned the session id (current_session's first
@@ -249,7 +112,8 @@ Fixes
   law) and PRIVACY.md/.html (GDPR notes; the software runs on the operator's own
   system and the operator is the data controller; the provider stores no data).
 * New fetchconfig-web-clean-audit.pl: prune old audit-log rows with a privileged
-  DB role (-t days to keep, -l preview, -s print the create-role SQL, -l requires -t, -u/-p or
+  DB role (-t days to keep, -l preview, -s print the create-role SQL, -l
+  requires -t, -u/-p or
   prompt for credentials, -v/-h). The prune is itself recorded in the audit log
   (action audit_prune, including the -t value), so the create-role SQL grants
   SELECT + INSERT + DELETE on audit_log (and the id sequence). The prune never
@@ -257,7 +121,8 @@ Fixes
   and it writes a prune record only when rows were actually deleted (a run that
   removed nothing logs nothing). A failure to WRITE that prune record (e.g. the
   role was granted INSERT on audit_log but not USAGE on audit_log_id_seq) is now
-  reported instead of being silent: the delete still succeeds and a warning names
+  reported instead of being silent: the delete still succeeds and a warning
+  names
   the missing grant. Version/copyright follow the config overrides.
 * Added cpanfile (mirrors Makefile.PL prerequisites) to document the Perl module
   dependencies and support `cpanm --installdeps .`. (GitHub's dependency graph
@@ -269,7 +134,8 @@ Fixes
   LICENSE.html (preformatted, not reflowed).
 * The Help menu is now a dropdown: Help (help.html or internal), Documentation
   fetchconfig-web, Documentation fetchconfig, GNU GPL v3, Additional terms, and
-  Privacy policy -- each static doc shown only if present in the help directory and opened in a
+  Privacy policy -- each static doc shown only if present in the help directory
+  and opened in a
   new browser tab (the Help page itself opens in the same tab).
   Help config split: HELP_DIR (filesystem dir, for the existence check) +
   HELP_FILE (filename) + HELP_BASE_URL (URL base, for the menu links), with the
@@ -288,19 +154,24 @@ Fixes
   The Backup Now page now shows the tool output whenever there is any -- even
   on an error/timeout (previously output was hidden on any error). Success is
   judged from the output (fetchconfig always exits 0): an "error:" line, or a
-  "backup_state=failed" line in the stats block, means FAILED. The audit log records OK/FAILED accordingly; the meaningless exit
+  "backup_state=failed" line in the stats block, means FAILED. The audit log
+  records OK/FAILED accordingly; the meaningless exit
   status is no longer logged.
 * Replaced the per-device "Check devices for empty backups" tool with an
   "Empty Backup Cleanup" tool (modelled on Empty Directory Cleanup): a Check
   (fetchconfig.pl -Z) and a Delete (-Z -D) that scan all devices at once for
-  zero-byte backups, with a spinner and the tools output layout. The spinner now stays on the
+  zero-byte backups, with a spinner and the tools output layout. The spinner now
+  stays on the
   result page until the (slow) -Z scan finishes: the page renders the spinner
-  immediately and fetches the result fragment by AJAX (with a no-JS fallback). The delete does
-  the same -- its AJAX POST carries the CSRF token (and the action in the body, so the
+  immediately and fetches the result fragment by AJAX (with a no-JS fallback).
+  The delete does
+  the same -- its AJAX POST carries the CSRF token (and the action in the body,
+  so the
   multipart POST reaches the right handler instead of falling through to the
   Devices page), and its no-JS fallback is a POST form. Success is
   taken from the summary line (rc 1 = "found some", not an error). The delete
-  is audited. The per-device -z check remains on each device's backup page. (The old
+  is audited. The per-device -z check remains on each device's backup page. (The
+  old
   all-device scan code -- check_empty_one / device_empty_status -- was removed.)
   Help and README updated accordingly (empty backups is a cleanup, not a scan;
   dropped from the MAX_PARALLEL_SCAN tool list). The Tools menu entry is now
@@ -319,14 +190,16 @@ Fixes
 ====
 * New Tools -> Disk space page: free/total space and use% for every repository
   directory (global REPOSITORY + per-device/default repository=) and the
-  report_dir, grouped by filesystem (one table per filesystem, "Filesystem 1/2/..."); the
+  report_dir, grouped by filesystem (one table per filesystem, "Filesystem
+  1/2/..."); the
   size figures are read once per filesystem and shown black on the first
   directory and gray on the rest (the device id is no longer shown -- it is not
   useful across AIX/Linux). "unknown" when a filesystem can't be read; missing
   directories listed under "Unavailable". The tool now also lists the
   directory: allow-list repository/report directories (not just the ones in
   use), with a Source column: configured / allowed / allowed and configured
-  ($aliases expanded to real paths for matching). Uses the optional Filesys::Df module (loaded lazily;
+  ($aliases expanded to real paths for matching). Uses the optional Filesys::Df
+  module (loaded lazily;
   the tool shows an install hint if it is absent, the app is unaffected).
 * The title-bar program icon now opens an About dialog (program name, internal
   version APP_VERSION_INTERNAL, configured/effective version, copyright [config
@@ -337,7 +210,8 @@ Fixes
 * Report logo handling. The report_logo editor option is now a drop-down of the
   image files (.png/.jpg/.gif, up to 25, case-sensitive) in the report_dir, with
   a red warning if the directory holds more than 25. New Tools -> Upload report
-  logo page uploads a logo into the report_dir (<=100KB, PNG/JPEG/GIF verified by
+  logo page uploads a logo into the report_dir (<=100KB, PNG/JPEG/GIF verified
+  by
   magic bytes, safe case-preserved filename) and lists existing logos with a
   Delete button and an inline base64 preview (the report directory is not
   web-served, so previews are embedded as data: URIs). The stored value is the
@@ -414,7 +288,8 @@ Fixes
 * The editor Defaults tab now shows "No per-model defaults are defined" when the
   device table has no default: lines, instead of appearing completely empty
   (notably for a site-limited read-only user).
-* CRITICAL FIX: Preview -> Back to editor could wipe default-definition passwords
+* CRITICAL FIX: Preview -> Back to editor could wipe default-definition
+  passwords
   and drop devices. The rebuilt records could be compacted, so field indices no
   longer matched the on-disk table: the masked-secret write-back read the wrong
   record (wiping passwords, defaults included) and a too-small rec_count dropped
@@ -423,7 +298,8 @@ Fixes
 * Device editor: when SHOW_RENDER_TIME=1, expanding a device now shows the
   per-card AJAX timing below the table ("Last card: N ms (server M ms) - K cards
   loaded"); edit_card returns its server render time in an X-Render-Time header.
-* Fixed: a freshly-added template_dir / repository / on_fetch_run option now gets
+* Fixed: a freshly-added template_dir / repository / on_fetch_run option now
+  gets
   the blue "default" flag and option colouring (previously only options present
   when the card was opened were tagged, and an added generic template_dir did
   not highlight the default directory because its default is reported as a
@@ -438,7 +314,8 @@ Fixes
   (carrying the submitted values); the rest stay collapsed. Nothing is lost or
   mis-indexed.
 * The generic model= option is labelled "model template" (vs the device Model).
-* New config key SHOW_RENDER_TIME (0|1, default 0): when 1, it shows the load/render-time lines
+* New config key SHOW_RENDER_TIME (0|1, default 0): when 1, it shows the
+  load/render-time lines
   across the UI (device list, status, log, template list, and the device-table
   editor render time). Off by default, so these are now hidden unless enabled.
 * Device editor: when a device's repository=, on_fetch_run= (directory part),
@@ -458,9 +335,11 @@ Fixes
 * Editor collapsed rows now show a Comment column after Site, and the device
   filter gains a searchable Site drop-down (alongside Device-ID and comment).
   Fixed: collapsing a previously-expanded device left the row blank -- the
-  summary line (ID/Model/Site/Comment) now stays and the card is hidden below it.
+  summary line (ID/Model/Site/Comment) now stays and the card is hidden below
+  it.
 * New config key HTTPS_ENABLED (0|1, default 0, in the misc section of
-  /etc/fetchconfig-web.cfg and the fetchconfig-web-dbsetup.pl template): set to 1 to add the Secure
+  /etc/fetchconfig-web.cfg and the fetchconfig-web-dbsetup.pl template): set to
+  1 to add the Secure
   flag to the session cookie when served over HTTPS, instead of editing the
   source. Documented in README.
 * The HTML documentation sidebar is now built from the actual document
@@ -486,11 +365,13 @@ Fixes
   Editor field indices now use the record's real table position, so masked
   passwords are always restored to their correct value on save.
 * Users table: the Grant/Revoke and Edit sites buttons now come first in their
-  cell, before the current-state text / site list, and the yes/no tag matches the button height.
+  cell, before the current-state text / site list, and the yes/no tag matches
+  the button height.
 * Fixed narrow-window layout: the 900px minimum is now enforced on the body (so
   the whole page scrolls horizontally below 900px instead of clipping); green
   section boxes now grow (fit-content) to fully contain a wide table instead of
-  the table spilling past the box edge, and no longer clip content that is wider (the box grows and the whole page scrolls horizontally),
+  the table spilling past the box edge, and no longer clip content that is wider
+  (the box grows and the whole page scrolls horizontally),
   and a red banner appears below the menu when the window is under 900px.
 * Fixed: the "Users list" menu item (and the redirects after user-management
   actions) now show the users table again instead of the "pick from the menu"
@@ -505,7 +386,8 @@ Fixes
   fails with "device not available" (the per-device guard applied only when a
   device is actually referenced). Dropdown menus now float above page content;
   the orphan/empty-cleanup result
-  pages use a green "<- <tool>" breadcrumb at the top instead of a bottom button and
+  pages use a green "<- <tool>" breadcrumb at the top instead of a bottom button
+  and
   the restore compare/view pages label their back button "Restore device table".
   The copyright footer sticks to the bottom of short pages and follows the
   content on long pages.
@@ -517,7 +399,8 @@ Fixes
   assignment, log/template viewers).
 * The title bar now uses application-style drop-down menus (Devices, Setup
   devices, Tools, User); Status/Reports moved under Devices; the Setup page is
-  the read-only highlighted view (edit/bulk are menu entries). Each Tools and User
+  the read-only highlighted view (edit/bulk are menu entries). Each Tools and
+  User
   menu item is now its own single-function page (one page per tool / per user
   action, no overview page, no back buttons). New Tools entry "Check site
   assignment" lists devices with no site=. Edit device table and Bulk edit lost
@@ -535,7 +418,8 @@ Fixes
   longer flush/clipped on the right. The User page also uses the full-width
   layout.
 * The User page Users table has a "Full Report" column (the download-full-report
-  right, with a grant/revoke toggle for site-limited users) between "Edit device"
+  right, with a grant/revoke toggle for site-limited users) between "Edit
+  device"
   and "Sites"; the edit-right heading is shortened to "Edit device". (Fixed the
   column so the granted state is actually shown.)
 * The Status page shows the site code as its first column; the Devices page
@@ -543,7 +427,10 @@ Fixes
   model filter), with a "(no site)" choice.
 * Device editor: site= is a drop-down (code + description). Devices without a
   site show a red "no site assigned" and get the option added automatically on
-  load; an unassigned site is not written back. The "no site assigned" entry is a red placeholder shown only until a real site is picked, after which it is no longer selectable; dropdown colours are consistent. The "+ add option" site entry
+  load; an unassigned site is not written back. The "no site assigned" entry is
+  a red placeholder shown only until a real site is picked, after which it is no
+  longer selectable; dropdown colours are consistent. The "+ add option" site
+  entry
   is a drop-down too.
 * Fixed: saving a user's site assignment crashed (undefined redirect helper);
   site_id now uses multi_param and the login "next" is read in scalar context,
@@ -559,10 +446,14 @@ Fixes
   show only the user's device sections, and downloading the full report needs a
   per-user right. Admins manage site codes (add/edit/delete, with atomic code
   rename that updates site= in the device table) and per-user assignments from
-  the User page. The site-management and assign-sites pages use the same green section box as the rest of the User page. Run the PostgreSQL 8.2-compatible fetchconfig-web-dbupdate.sql to enable it on
-  an existing install (all users start unrestricted). fetchconfig.pl ignores site=. The update script grants the web user privileges
+  the User page. The site-management and assign-sites pages use the same green
+  section box as the rest of the User page. Run the PostgreSQL 8.2-compatible
+  fetchconfig-web-dbupdate.sql to enable it on
+  an existing install (all users start unrestricted). fetchconfig.pl ignores
+  site=. The update script grants the web user privileges
   on the new tables, and site add/edit/delete now report database errors (and
-  recreate a missing sites_id_seq) instead of failing silently. The initial setup
+  recreate a missing sites_id_seq) instead of failing silently. The initial
+  setup
   script also grants the web user access to the new site tables.
 
 1.15
@@ -578,7 +469,8 @@ Fixes
   Download/Delete as buttons.
 + New "Reports" page (top menu, between Status and Setup): lists the HTML
   change-reports fetchconfig writes into the email: report_dir, newest first,
-  with styled table and button actions; View (collapsible per-device diffs, parsed and escaped, Expand/Collapse
+  with styled table and button actions; View (collapsible per-device diffs,
+  parsed and escaped, Expand/Collapse
   all), Download (streamed as an attachment through the CGI), Delete, and a
   "delete reports older than N days" prune. All file access goes through the
   login since the web server cannot read the report directory directly.
@@ -596,7 +488,8 @@ Fixes
   (fetchconfig-web-install-template.pl, run via sudo, configured by
   TEMPLATE_HELPER); non-regular files (symlinks, hard links) are refused.
 + Directory allow-list: the device table may carry "directory:" lines
-  (repository / template / fetch_run / report, each $ALIAS + path), read server-side from
+  (repository / template / fetch_run / report, each $ALIAS + path), read
+  server-side from
   the table so they cannot be forged and written back verbatim, armored with
   "must be edited on the server" comments (shown red in the Setup view). When
   present, the editor's repository=, template_dir= and on_fetch_run fields
@@ -609,7 +502,8 @@ Fixes
 + A device-table save is now validated by fetchconfig (-t and
   --list-allowed-dirs against the exact bytes) before being written, so an
   invalid table never reaches disk; the Bulk edit page runs the same checks.
-+ Added a Makefile.PL and a t/ unit-test suite (Test::More), plus imageconvert.pl
++ Added a Makefile.PL and a t/ unit-test suite (Test::More), plus
+  imageconvert.pl
   (encodes an image as a base64 Perl snippet, with README.imageconvert).
 * Model-option audit against the fetchconfig README (timeout optional
   everywhere, plus per-model option corrections).
