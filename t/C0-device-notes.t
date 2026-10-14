@@ -1,7 +1,7 @@
 use strict; use warnings;
 use Test::More;
 use FindBin; use lib "$FindBin::Bin/lib";
-use FCWebTest qw(load_cgi make_config cgi_path);
+use FCWebTest qw(load_cgi make_config cgi_path css_source state_changing_actions);
 
 my ($c) = make_config(); load_cgi($c); main::read_config();
 no warnings 'once', 'redefine';
@@ -58,6 +58,7 @@ no warnings 'once', 'redefine';
 }
 {
     my $src = do { open(my $fh,'<',cgi_path()) or die $!; local $/; <$fh> };
+    my $css = css_source();
     like($src, qr/action eq 'note_get'/,            'note_get dispatched');
     like($src, qr/action eq 'note_save'/,           'note_save dispatched');
     like($src, qr/action eq 'note_delete'/,         'note_delete dispatched');
@@ -65,12 +66,14 @@ no warnings 'once', 'redefine';
     like($src, qr/action eq 'tool_notes'/,          'tool_notes dispatched');
     like($src, qr/action eq 'tool_notes_orphans'/,  'orphan page dispatched');
     like($src, qr/action eq 'notes_orphan_delete'/, 'orphan delete dispatched');
-    like($src, qr/note_save note_delete notes_orphan_delete/, 'note POST actions are state-changing');
+    { my $sc = state_changing_actions($src);
+      ok($sc->{note_save} && $sc->{note_delete} && $sc->{notes_orphan_delete},
+         'note POST actions are state-changing'); }
     like($src, qr/\$su->\('Device notes',\s*'\?action=tool_notes'\)/, 'Device -> Device notes menu entry');
     like($src, qr/\$su->\('Orphaned notes cleanup',/, 'Tools -> Orphaned notes cleanup entry');
     like($src, qr/&#x1F4DD;/, 'paper-note icon (U+1F4DD, HTML entity) used');
     like($src, qr/sub note_modal_html/, 'note modal present');
-    like($src, qr/\.fc-note-text \{[^}]*resize: vertical/s, 'note textarea resizes vertically only (not wider than the dialog)');
+    like($css, qr/\.fc-note-text \{[^}]*resize: vertical/s, 'note textarea resizes vertically only (not wider than the dialog)');
     like($src, qr/'action=note_save&csrf='/, 'note save posts the csrf param (not csrf_token)');
     unlike($src, qr/csrf_token='\+encodeURIComponent/, 'no stale csrf_token param name');
     like($src, qr/function isDirty\(\)/, 'modal has an unsaved-changes check');

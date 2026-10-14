@@ -64,7 +64,7 @@ The release archive `fetchconfig-web-1.50.tar` unpacks to a directory
 | `imageconvert.pl`, `README.imageconvert` | Optional helper for preparing the login backdrop image. |
 | `images/back.jpg` | Login-page backdrop image. |
 | `favicon.ico` | Browser tab/bookmark icon. Optional; copy to the web server's document root (see Step 4) when the application runs on its own vhost or dedicated server. |
-| `help.html` | The in-application Help page (served by the web server, path set by `HELP_FILE` / `HELP_BASE_URL`). |
+| `help.html` | The in-application Help page (served from `WEB_DIR`, linked at `BASE_URL`). |
 | `README.md`, `fetchconfig-web-documentation.html` | Full reference documentation (Markdown and rendered HTML). |
 | `INSTALL.md`, `INSTALL.html` | This guide (Markdown and rendered HTML). |
 | `render-doc.py`, `render-doc.md` | Renders the Markdown documents to HTML. |
@@ -153,8 +153,8 @@ in Step 3. The defaults match a typical fetchconfig install.
 | `BACKUP_DEVICE_TABLE` | `/usr/local/fetchconfig/backup` | Where the editor keeps timestamped `.bak` copies of the device table. Must be writable by the web user. |
 | `SESSION_DIR` | `/var/lib/fetchconfig-web/sessions` | Login sessions (mode 0700, files 0600). Must be writable by the web user. |
 | `BACKUP_TMP_DIR` | same as `SESSION_DIR` | Scratch space for *Backup Now* and the device-table writer lock. Must be writable by the web user. |
-| `HELP_FILE` | `/www/pub/fetchconfig-web/help.html` | Filesystem path of the Help page. |
-| `IMAGE_BASE_URL`, `FONT_BASE_URL`, `HELP_BASE_URL` | `/fetchconfig-web/...` | **URL paths** (not filesystem paths) under which the web server serves the images, fonts and help. |
+| `WEB_DIR` | `/www/virtual/fetchconfig/htdocs` | **Filesystem** directory holding the static assets (css, fonts, images, help/docs); used for on-disk presence checks. |
+| `BASE_URL`, `CSS_BASE_URL`, `FONT_BASE_URL`, `IMAGE_BASE_URL` | `/`, `/css`, `/fonts`, `/images` | **URL paths** under which the web server serves `WEB_DIR` and its sub-directories. |
 
 You also need the identity of the **web-server user** (Apache's `User`
 directive, or `ps -ef` while a request is running). On the reference
@@ -295,10 +295,11 @@ SHOW_RENDER_TIME        = 0
 # does not declare a syntax_style. auto = detect from content (default);
 # none = plain text; or a scheme name (cisco-ios, json, xml, generic, ...).
 GENERIC_SYNTAX          = auto
-HELP_FILE               = /www/pub/fetchconfig-web/help.html
-HELP_BASE_URL           = /pub/fetchconfig-web
-IMAGE_BASE_URL          = /pub/fetchconfig-web/images
-FONT_BASE_URL           = /pub/fetchconfig-web/fonts
+WEB_DIR                 = /www/virtual/fetchconfig/htdocs
+BASE_URL                = /
+CSS_BASE_URL            = /css
+IMAGE_BASE_URL          = /images
+FONT_BASE_URL           = /fonts
 COPYRIGHT               = 2026 (c) Your Organisation
 ```
 
@@ -330,25 +331,28 @@ cp fetchconfig-web.cgi /www/cgi-bin/
 chmod 755 /www/cgi-bin/fetchconfig-web.cgi
 ```
 
-Install the static files where the web server serves the URL paths you set
-for `IMAGE_BASE_URL`, `HELP_BASE_URL` and `FONT_BASE_URL` (the example uses
-`/www/pub/fetchconfig-web` served as `/pub/fetchconfig-web`):
+Install the static files into `WEB_DIR` (the filesystem directory the web
+server serves at `BASE_URL`). **The stylesheet is required** -- it must exist at
+`<WEB_DIR><CSS_BASE_URL>/fetchconfig-web.css`, or every page is unstyled and a
+red "directories not configured" banner is shown:
 
 ```sh
-mkdir -p /www/pub/fetchconfig-web/images
-cp images/back.jpg /www/pub/fetchconfig-web/images/
-cp help.html       /www/pub/fetchconfig-web/
+WEB=/www/virtual/fetchconfig/htdocs
+mkdir -p $WEB/css $WEB/images
+cp fetchconfig-web.css $WEB/css/           # REQUIRED stylesheet
+cp images/back.jpg     $WEB/images/        # optional login backdrop
+cp help.html           $WEB/
 # Documentation/licence pages shown in the Help menu. Each menu entry appears
-# only if its file is present in this directory (HELP_DIR), so copy the ones
-# you want listed:
-cp fetchconfig-web-documentation.html /www/pub/fetchconfig-web/   # "Documentation fetchconfig-web"
-cp INSTALL.html                       /www/pub/fetchconfig-web/   # "Installation fetchconfig-web"
-cp LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html /www/pub/fetchconfig-web/
+# only if its file is present in WEB_DIR, so copy the ones you want listed:
+cp fetchconfig-web-documentation.html $WEB/   # "Documentation fetchconfig-web"
+cp INSTALL.html                       $WEB/   # "Installation fetchconfig-web"
+cp LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html $WEB/
 # Optional: the fetchconfig (CLI) manual, if you have it rendered as HTML:
-# cp fetchconfig-documentation.html   /www/pub/fetchconfig-web/   # "Documentation fetchconfig"
+# cp fetchconfig-documentation.html   $WEB/   # "Documentation fetchconfig"
 ```
 
-The backdrop image is optional (the login page shows a plain background
+The web server must serve `$WEB` at `BASE_URL` (e.g. the vhost DocumentRoot at
+`/`). The backdrop image is optional (the login page shows a plain background
 without it).
 
 **Favicon (optional).** `favicon.ico` is the icon browsers show on the tab and
@@ -362,10 +366,9 @@ cp favicon.ico /www/virtual/fetchconfig/htdocs/   # the vhost's DocumentRoot
 
 If the application is instead served from a sub-path of a shared server, place
 `favicon.ico` at that server's document root (or leave it out -- a missing
-favicon only means the browser shows its default tab icon). The Help page is read from `HELP_FILE` on the filesystem and
-also linked at `HELP_BASE_URL`; both must point at the same file. The Help
-menu lists each documentation/licence page only when its `.html` file exists
-in `HELP_DIR`, so a page you do not copy simply does not appear.
+favicon only means the browser shows its default tab icon). The Help page (`help.html`) is read from `WEB_DIR` on the filesystem and linked
+at `BASE_URL`. The Help menu lists each documentation/licence page only when its
+`.html` file exists in `WEB_DIR`, so a page you do not copy simply does not appear.
 
 Install the root-side template helper next to fetchconfig so the template
 editor can save files it cannot write directly (only needed if you use the
@@ -870,7 +873,7 @@ discards the `Secure` cookie). Check `SESSION_DIR` permissions and the
 `HTTPS_ENABLED` value.
 
 **"Configuration error" on the login page.** One of the URL-path keys
-(`IMAGE_BASE_URL`, `FONT_BASE_URL`, `HELP_BASE_URL`) is not an absolute URL
+(`BASE_URL`, `CSS_BASE_URL`, `FONT_BASE_URL`, `IMAGE_BASE_URL`) is not an absolute URL
 path, or a required key is missing. The message names the key.
 
 **The editor opens but Save fails with "could not open ... for writing".**

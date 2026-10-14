@@ -28,7 +28,10 @@ Security
 * Password policy (length and character classes), config-file permission check,
   HSTS/Cache-Control headers, and a login-failures viewer.
 * Config masking extended to switch-config secret forms (SNMP community,
-  RADIUS/TACACS keys, WPA passphrases, Aruba CX controller/auth-server keys).
+  RADIUS/TACACS keys, WPA passphrases, Aruba CX controller/auth-server keys)
+  and to Cisco IOS hashed secrets -- "secret <type> <hash>" and
+  "password <type> <hash>" (enable secret, username secret/password), in both
+  the plain and syntax-highlighted backup views.
 
 Other
 -----
@@ -39,6 +42,27 @@ Other
 * Consistent UI: every tool/editor/compare/result page uses the green
   tool-section box; the Devices list uses a blue box with the statistics box
   beside it; menu labels match the page titles.
+* The stylesheet moved out of the CGI into an external, cacheable file,
+  fetchconfig-web.css, linked with a ?v=<version> cache-buster and served from
+  WEB_DIR via CSS_BASE_URL. Config reworked into web paths: WEB_DIR (filesystem
+  root, presence checks), BASE_URL (URL root), and CSS_BASE_URL/FONT_BASE_URL/
+  IMAGE_BASE_URL sub-paths (defaults /css, /fonts, /images). HELP_DIR,
+  HELP_FILE and HELP_BASE_URL are removed (help.html is a fixed name under
+  WEB_DIR); a missing stylesheet shows a red "directories not configured"
+  banner. The login backdrop image loads from BASE_URL + IMAGE_BASE_URL +
+  /back.jpg. Ship fetchconfig-web.css into WEB_DIR/css (see INSTALL).
+* Removed the DEVICE_ID_FIELD config key: the Device-ID is always the second
+  column of a device-table line, so the knob only confused (and the main parser
+  ignored it anyway).
+* The log viewer is renamed "View last fetchconfig schedule log" (menu, page
+  and box title); the box title now shows the log's date and time.
+* Tool-output pages (Backup Now, orphaned/empty backup and directory
+  check/delete) now use the full window width; the dark result box fills it and
+  scrolls long lines internally instead of forcing the whole page to scroll.
+* The "Backups for <device>" page drops the "Check for empty backups" button
+  (and its now-unused checkempty action); a 0-byte (empty) backup row is
+  highlighted red instead. The site-wide Tools -> Empty backup cleanup is
+  unaffected.
 * Ships favicon.ico. FastCGI deployment (FCGI optional). Every function now
   carries a uniform header block.
 

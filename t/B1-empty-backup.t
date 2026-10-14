@@ -34,7 +34,7 @@ my $found0 = "info: checked 256 device(s)/1498 backup(s), found 0 zero-byte back
 # DELETE: 2 found -> audited with the count
 {
     @A=();
-    local *main::run_empty_bk_delete = sub { ($found2, 1, undef) };
+    local *main::run_scan_delete = sub { ($found2, 1, undef) };
     my $o=''; open(my $c,'>',\$o); my $s=select($c); main::do_empty_bk_delete_data('admin'); select($s); close($c);
     like($A[0], qr/deleted 2 empty .*backup/, 'delete: audits the count');
     like($o, qr/Deleted 2 empty/, 'delete: reports the count');
@@ -45,7 +45,7 @@ my $found0 = "info: checked 256 device(s)/1498 backup(s), found 0 zero-byte back
     my @cap; local *main::run_command_capture = sub { @cap = @_; ('', 0, undef) };
     main::run_empty_bk_check();
     ok((grep { $_ eq '-Z' } @cap) && !(grep { $_ eq '-D' } @cap), 'check runs -Z (no -D)');
-    main::run_empty_bk_delete();
+    main::run_scan_delete("-Z");
     ok((grep { $_ eq '-Z' } @cap) && (grep { $_ eq '-D' } @cap), 'delete runs -Z -D');
 }
 # The spinner shell: delete POSTs with the correct CSRF param ("csrf", not

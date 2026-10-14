@@ -1,7 +1,7 @@
 use strict; use warnings;
 use Test::More;
 use FindBin; use lib "$FindBin::Bin/lib";
-use FCWebTest qw(load_cgi make_config cgi_path);
+use FCWebTest qw(load_cgi make_config cgi_path state_changing_actions);
 
 my ($cfg) = make_config();
 load_cgi($cfg); main::read_config();
@@ -116,7 +116,7 @@ SKIP: {
     my $src = do { local $/; <$fh> }; close($fh);
     like($src, qr{action eq 'change_email'},    'change_email action dispatched');
     like($src, qr{sub do_change_email},          'do_change_email handler present');
-    like($src, qr{change_password change_email}, 'change_email is state-changing (POST-guarded)');
+    ok(state_changing_actions($src)->{change_email}, 'change_email is state-changing (POST-guarded)');
     like($src, qr{Change your email},            'Change your email appears (menu + page)');
     like($src, qr{\$only eq 'password' \|\| \$only eq 'email'},
          'non-admins can reach their own email page');
@@ -167,8 +167,9 @@ SKIP: {
     like($src, qr/sub do_test_my_email/,          'self-service handler present');
     like($src, qr/sub show_verify_email/,         'admin verify page present');
     like($src, qr/sub do_verify_email/,           'admin verify handler present');
-    like($src, qr/change_email test_my_email verify_email/,
-         'test_my_email + verify_email are state-changing (POST-guarded)');
+    { my $sc = state_changing_actions($src);
+      ok($sc->{test_my_email} && $sc->{verify_email},
+         'test_my_email + verify_email are state-changing (POST-guarded)'); }
     like($src, qr/Verify email setup/,            'Tools -> Verify email setup entry present');
 }
 

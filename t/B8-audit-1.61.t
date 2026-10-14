@@ -117,7 +117,8 @@ like($src, qr/use constant APP_VERSION => '2\.00';/, 'version bumped to 2.00');
 
 
 # --- fetchconfig-web-dbsetup.pl's generated config covers every registered key -------------------
-# (keys only used with EMAIL_AUTH=1 are commented out in the sample, by design)
+# (SMTP_USER/SMTP_PASS are commented out unless EMAIL_AUTH=1; APP_VERSION is
+# commented out so the app reports its own version -- all by design)
 {
     my $ds = do { open(my $fh, '<', "$FindBin::Bin/../fetchconfig-web-dbsetup.pl") or die $!; local $/; <$fh> };
     my ($sub) = $ds =~ /(sub cfg_body \{.*?\nCFG\n\})/s;
@@ -127,7 +128,7 @@ like($src, qr/use constant APP_VERSION => '2\.00';/, 'version bumped to 2.00');
     my $out = cfg_body('fc', 'fcu', 'pw', 'localhost');
     my %gen; $gen{$1} = 1 while $out =~ /^([A-Z_]+)\s*=/mg;
     my %reg; $reg{$1} = 1 while $src =~ /^\s*\[ '([A-Z_]+)',/mg;
-    my %optional = map { $_ => 1 } qw(SMTP_USER SMTP_PASS);
+    my %optional = map { $_ => 1 } qw(SMTP_USER SMTP_PASS APP_VERSION);
     my @missing = grep { !$gen{$_} && !$optional{$_} } sort keys %reg;
     is_deeply(\@missing, [], 'fetchconfig-web-dbsetup.pl: every registered config key is in the generated config')
         or diag("missing: @missing");

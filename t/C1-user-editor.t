@@ -1,7 +1,7 @@
 use strict; use warnings;
 use Test::More;
 use FindBin; use lib "$FindBin::Bin/lib";
-use FCWebTest qw(load_cgi make_config cgi_path);
+use FCWebTest qw(load_cgi make_config cgi_path css_source state_changing_actions);
 
 my ($c) = make_config(); load_cgi($c); main::read_config();
 no warnings 'once', 'redefine';
@@ -88,21 +88,25 @@ no warnings 'once', 'redefine';
 # --- list page: slim columns, username links to edit -------------------------
 {
     my $src = do { open(my $fh,'<',cgi_path()) or die $!; local $/; <$fh> };
+    my $css = css_source();
     like($src, qr/action=user_edit&username=/, 'username links to the edit page');
     like($src, qr/-name => 'email'.*-size => 64/, 'email field widened to size 64');
     like($src, qr/<th>Username<\/th><th>Email<\/th><th>Admin<\/th>.*<th>Password<\/th>/s,
          'list has slim columns (no per-right toggles)');
-    unlike($src, qr/_right_toggle_form\('set_admin_right'/, 'no inline admin toggle in the list');
+    # The old inline per-right toggle (_right_toggle_form) was removed in the
+    # 1.63 user-management redesign; guard against it coming back.
+    unlike($src, qr/_right_toggle_form/, 'no inline right-toggle machinery in the list');
     like($src, qr/action eq 'user_edit'/, 'user_edit dispatched');
     like($src, qr/action eq 'user_save'/, 'user_save dispatched');
-    like($src, qr/set_download_full_report set_download_full_config set_email user_save/,
-         'user_save is state-changing');
+    { my $sc = state_changing_actions($src);
+      ok($sc->{set_download_full_report} && $sc->{set_download_full_config}
+         && $sc->{set_email} && $sc->{user_save}, 'user_save is state-changing'); }
     # Save/Cancel order is consistent (Cancel left, Save right) on the sites page.
     like($src, qr/">Cancel<\/a> .*?<button type="submit" class="btn btn-green">Save<\/button>/s,
          'sites page: Cancel before Save');
     # Compare configurations page uses the green tool-section box.
     like($src, qr/id="compare-section"/, 'compare page wrapped in tool-section');
-    like($src, qr/table\.sbs td \{[^}]*background: #fff/s, 'side-by-side diff cells have a white base (not the green box)');
+    like($css, qr/table\.sbs td \{[^}]*background: #fff/s, 'side-by-side diff cells have a white base (not the green box)');
     # The per-device compare views also use the green tool-section box.
     like($src, qr/id="compare-backups-section"/, 'unified compare page wrapped in tool-section');
     like($src, qr/id="side-by-side-section"/,    'side-by-side page wrapped in tool-section');
@@ -111,7 +115,7 @@ no warnings 'once', 'redefine';
     like($src, qr/compare-backups-section.*?top_bottom_nav\(\)/s, 'compare page has Top/Bottom nav');
     like($src, qr/backup-list-section.*?top_bottom_nav\(\)/s,     'backups-for page has Top/Bottom nav');
     like($src, qr/id="backup-now-section"/,   'Backup Now result page wrapped in tool-section');
-    like($src, qr/id="check-empty-section"/,  'Check-empty result page wrapped in tool-section');
+
     like($src, qr/id="orphan-check-section"/,  'Check-orphaned-backups page wrapped in tool-section');
     like($src, qr/id="orphan-delete-section"/, 'Delete-orphaned-backups page wrapped in tool-section');
     # Orphaned notes cleanup has the Top/Bottom nav.
@@ -121,7 +125,16 @@ no warnings 'once', 'redefine';
     like($src, qr/id="empty-dir-delete-section"/, 'delete empty dirs page wrapped in tool-section');
     like($src, qr/id="empty-bk-check-section"/,   'check empty backups page wrapped in tool-section');
     like($src, qr/id="empty-bk-delete-section"/,  'delete empty backups page wrapped in tool-section');
-    like($src, qr/id="ebk-result" style="min-height:\d+em;width:\d+px;/, 'empty-backup result reserves a fixed size so the box keeps natural proportions');
+    # Tool-output pages use the full window width (not the 1170px checkout cap),
+    # and the dark config box is capped to the page so long lines scroll inside.
+    like($src, qr/page_head\('Check for orphaned backups', \$user, 'full'\)/, 'tool-output page uses full width');
+    like($css, qr/pre\.config \{[^}]*max-width: 100%/s, 'config box capped to its container');
+    like($css, qr/#orphan-check-section[^{]*\{ width: 100%/s, 'tool-output section is full width');
+    # Log viewer: renamed, and the box title carries the log's date.
+    like($src, qr/View last fetchconfig schedule log/, 'log viewer renamed');
+    unlike($src, qr/tool-section-title">View fetchconfig log</, 'old log title gone');
+    like($src, qr/\$log_date = sprintf\(\s*' - %04d-%02d-%02d %02d:%02d:%02d'/s, 'log box title appends the log date and time');
+    like($src, qr/id="ebk-result" style="min-height:\d+em;width:100%;/, 'empty-backup result container uses full width (result box fills it)');
     # View backup now has the green box.
     like($src, qr/id="view-backup-section"/, 'view backup page wrapped in tool-section');
     # Single title: no redundant <h1> above the box on these pages.
@@ -133,14 +146,14 @@ no warnings 'once', 'redefine';
     unlike($src, qr/print qq\{<h1>\} . esc\(\$title\)/, 'show_tools has no redundant <h1> above its box title');
     # Devices page: blue box around the list, green statistics box, no h1.
     like($src,   qr/tool-section-blue" id="devices-section"/, 'devices list in a blue tool-section box');
-    like($src,   qr/\.tool-section-blue \{/,                 'blue tool-section variant defined');
-    like($src,   qr/\.dev-stats \{[^}]*#e8faf1/s,            'statistics box stays green');
+    like($css,   qr/\.tool-section-blue \{/,                 'blue tool-section variant defined');
+    like($css,   qr/\.dev-stats \{[^}]*#e8faf1/s,            'statistics box stays green');
     unlike($src, qr/print qq\{<h1>Devices<\/h1>/,            'no redundant <h1>Devices');
-    like($src, qr/\.dev-layout \{[^}]*align-items: flex-start/s, 'boxes top-aligned; green hugs content');
+    like($css, qr/\.dev-layout \{[^}]*align-items: flex-start/s, 'boxes top-aligned; green hugs content');
     like($src, qr/id="dev-table-scroll"/,                       'device table is in a horizontal-scroll container');
-    like($src, qr/main\.full \{ max-width: none/,              'Devices page uses full window width');
-    like($src, qr/\.dev-stats \{[^}]*width: max-content/s,     'stats box hugs its content, not stretched');
-    like($src, qr/#site-filter \{ max-width/,                  'site filter is narrower');
+    like($css, qr/main\.full \{ max-width: none/,              'Devices page uses full window width');
+    like($css, qr/\.dev-stats \{[^}]*width: max-content/s,     'stats box hugs its content, not stretched');
+    like($css, qr/#site-filter \{ max-width/,                  'site filter is narrower');
     like($src, qr/<option value="40" selected>40<\/option>/,   'per-page default 40');
     like($src, qr/<option value="160">160<\/option>/,          'per-page option 160');
     my ($devsel) = $src =~ /id="dev-page-size".*?<\/select>/s;
@@ -173,6 +186,40 @@ no warnings 'once', 'redefine';
          'add user redirects to the edit page');
     like($src, qr/db_add_user\(\$dbh, \$new_user, password_hash\(\$password\), 0, 0\)/,
          'new user created with no special rights');
+}
+
+# --- Web paths: external CSS + config-sanity banner (2.00) ---
+{
+    # CSS present (make_config sets up WEB_DIR/css/fetchconfig-web.css):
+    my ($cfg) = make_config();
+    load_cgi($cfg); main::read_config();
+    no warnings 'once','redefine';
+    local *main::fatal_error_banner          = sub { '' };
+    local *main::fetchconfig_version_warning = sub { '' };
+    my $h = main::page_head('Devices', 'admin');
+    like($h, qr{<link rel="stylesheet" href="[^"]*fetchconfig-web\.css\?v=},
+         'page links the external stylesheet with a cache-buster');
+    # The dynamic login backdrop stays inline (depends on logged-in state).
+    my $login = main::page_head('Login');
+    like($login, qr{url\('[^']*images/back\.jpg'\)}, 'login page keeps the backdrop image');
+    unlike($h,   qr/back\.jpg/, 'logged-in pages have no backdrop');
+    unlike($h, qr/not configured correctly/,
+           'no config-error banner when the stylesheet is present');
+
+    # CSS missing -> the big red config-error banner.
+    my ($cfg2) = make_config(WEB_DIR => '/nonexistent/path/xyz');
+    load_cgi($cfg2); main::read_config();
+    my $h2 = main::page_head('Devices', 'admin');
+    like($h2, qr/<div class="fatal-error">.*not configured correctly/s,
+         'missing stylesheet raises the red config-error banner');
+}
+# The old help-path keys are gone from the registry; the new ones are present.
+{
+    my $src = do { open(my $fh,'<',cgi_path()) or die $!; local $/; <$fh> };
+    unlike($src, qr/\[ 'HELP_(DIR|FILE|BASE_URL)'/, 'old help keys removed from registry');
+    like($src,   qr/\[ 'WEB_DIR',/,      'WEB_DIR registered');
+    like($src,   qr/\[ 'BASE_URL',/,     'BASE_URL registered');
+    like($src,   qr/\[ 'CSS_BASE_URL',/, 'CSS_BASE_URL registered');
 }
 
 done_testing();

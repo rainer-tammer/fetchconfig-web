@@ -3,27 +3,27 @@ use Test::More;
 use FindBin; use lib "$FindBin::Bin/lib";
 use FCWebTest qw(load_cgi make_config);
 
-# The help path globals are file-lexical; observe them via help_file_path().
-# New style: HELP_DIR + HELP_FILE (filename).
+# help.html now lives at WEB_DIR/help.html (fixed filename); help_file_path()
+# builds that on-disk path for the presence check and the fallback reader.
 {
-    my ($cfg) = make_config(HELP_DIR => '/opt/help', HELP_FILE => 'help.html');
+    my ($cfg) = make_config(WEB_DIR => '/opt/help');
     load_cgi($cfg); main::read_config();
-    is(main::help_file_path(), '/opt/help/help.html', 'new style: dir + filename joined');
+    is(main::help_file_path(), '/opt/help/help.html', 'WEB_DIR + help.html joined');
 }
-# Backward compatible: HELP_FILE as a full path, no HELP_DIR.
+# A trailing slash on WEB_DIR is trimmed.
 {
-    my ($cfg) = make_config(HELP_FILE => '/var/www/fcw/help.html');
+    my ($cfg) = make_config(WEB_DIR => '/srv/docs/');
     load_cgi($cfg); main::read_config();
-    is(main::help_file_path(), '/var/www/fcw/help.html', 'old full-path HELP_FILE still works');
+    is(main::help_file_path(), '/srv/docs/help.html', 'trailing slash on WEB_DIR trimmed');
 }
-# HELP_DIR wins, basename stripped from a full HELP_FILE.
+# help_doc_dir() is WEB_DIR (the directory the Help-menu docs are checked in).
 {
-    my ($cfg) = make_config(HELP_DIR => '/srv/docs', HELP_FILE => '/ignored/dir/help.html');
+    my ($cfg) = make_config(WEB_DIR => '/srv/docs');
     load_cgi($cfg); main::read_config();
-    is(main::help_file_path(), '/srv/docs/help.html', 'HELP_DIR overrides; basename kept');
+    is(main::help_doc_dir(), '/srv/docs', 'help_doc_dir() is WEB_DIR');
 }
-# Every registered config key is mentioned in README.md and in the config that
-# fetchconfig-web-dbsetup.pl generates, so no setting ships undocumented.
+# Every registered config key is mentioned in README.md, so no setting ships
+# undocumented.
 {
     my $root = "$FindBin::Bin/..";
     my $cgi  = do { open(my $f,'<',"$root/fetchconfig-web.cgi") or die $!; local $/; <$f> };

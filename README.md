@@ -330,9 +330,11 @@ DEVICE_TABLE            = /usr/local/fetchconfig/device_table
 FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
 LOG_MAX_DEVICES         = 1000
 MAX_PARALLEL_SCAN       = 1
-FONT_BASE_URL           = /fetchconfig-web/fonts
-IMAGE_BASE_URL          = /fetchconfig-web/images
-HELP_BASE_URL           = /fetchconfig-web
+WEB_DIR                 = /www/virtual/fetchconfig/htdocs
+BASE_URL                = /
+CSS_BASE_URL            = /css
+FONT_BASE_URL           = /fonts
+IMAGE_BASE_URL          = /images
 FETCHCONFIG_PATH        = /usr/local/fetchconfig
 FETCHCONFIG_BIN         = fetchconfig.pl
 BACKUP_DEVICE_TABLE     = /usr/local/fetchconfig/backup
@@ -343,7 +345,6 @@ SESSION_DIR             = /www/fetchconfig-web/sessions
 BACKUP_TMP_DIR          = /www/fetchconfig-web/sessions
 SESSION_TTL             = 28800
 SESSION_MAX_LIFETIME    = 86400
-DEVICE_ID_FIELD         = 1
 DBinst                  = fetchconfig
 DBuser                  = fcweb
 DBpass                  = changeme
@@ -369,9 +370,8 @@ SITE_URL                = https://fetchconfig.example.com
 HTTPS_ENABLED           = 0
 SHOW_RENDER_TIME        = 0
 GENERIC_SYNTAX          = auto
-HELP_FILE               = /www/pub/fetchconfig-web/help.html
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
-APP_VERSION             = 1.61
+APP_VERSION             = 2.00
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 
@@ -501,10 +501,10 @@ it to display something else. `COPYRIGHT` is read from the config file.
   are skipped. A directive line is any whose first token is a keyword
   ending in a colon (e.g. `default:`, `email:`) -- those configure
   fetchconfig rather than declaring a device, so they never appear in the
-  device list. `$DEVICE_ID_FIELD` picks which column (0-based) is the
-  Device-ID -- `1` (the second column) is confirmed correct for the observed
-  `model  device_id  host` layout. If your table uses a different delimiter
-  entirely, adjust `read_device_ids()` -- it's a small, self-contained
+  device list. The Device-ID is always the second column (the model is
+  the first), matching the `model  device_id  host` layout. If your table uses
+  a different delimiter entirely, adjust `read_device_ids()` -- it's a small,
+  self-contained
   function.
 - Backup listing/index numbering is taken verbatim from whatever
   `fetchconfig.pl -l dev_id` prints (tab-separated: index, size, path), and
@@ -704,27 +704,37 @@ chmod 755 /www/cgi-bin/fetchconfig-web.cgi
 
 Point your browser at `https://yourhost/cgi-bin/fetchconfig-web.cgi`.
 
-**Login backdrop and static assets.** `FONT_BASE_URL` (default
-`/fetchconfig-web/fonts`) and `IMAGE_BASE_URL` (default `/fetchconfig-web/images`)
-are the **URL paths** (not filesystem paths) under which the web server serves
-the optional fonts and images. These (and `HELP_BASE_URL`) are validated at
-startup: they must be absolute URL paths made only of letters, digits and
-`. _ ~ - /` -- no scheme, quotes, spaces or parentheses -- because they are
-emitted into links and CSS; an invalid value is reported as a configuration
-error on the login page. The login page shows a full-page backdrop
-image loaded from `<IMAGE_BASE_URL>/back.jpg`; the title bar, login box and
-the (bottom-centred) copyright footer stay legible on top of it. Copy the
-`back.jpg` shipped in the `images/` directory of this package to wherever the
-server serves `IMAGE_BASE_URL`, e.g.:
+**Web paths and static assets.** The application serves its static assets --
+the stylesheet (`fetchconfig-web.css`), the login backdrop and fonts, and the
+help/documentation pages -- from one web-served directory. `WEB_DIR` is the
+**filesystem** path of that directory (used only for on-disk presence checks);
+`BASE_URL` is the **URL** base under which the web server serves it (the browser
+merges it with the site's host name). `CSS_BASE_URL` (default `/css`),
+`FONT_BASE_URL` (default `/fonts`) and `IMAGE_BASE_URL` (default `/images`) are
+the sub-paths -- both the URL sub-path and the on-disk sub-directory under
+`WEB_DIR`. `BASE_URL`, `CSS_BASE_URL`, `FONT_BASE_URL` and `IMAGE_BASE_URL` are
+validated at startup: they must be absolute URL paths made only of letters,
+digits and `. _ ~ - /` -- no scheme, quotes, spaces or parentheses -- because
+they are emitted into links; an invalid value is reported as a configuration
+error on the login page.
+
+The stylesheet is **required**: it must exist at
+`<WEB_DIR><CSS_BASE_URL>/fetchconfig-web.css`. If it is missing, every page is
+unstyled and a red banner "Your fetchconfig-web directories are not configured
+correctly, check your /etc/fetchconfig-web.cfg" is shown. Copy
+`fetchconfig-web.css` (shipped in this package) into `<WEB_DIR>/css/`, and copy
+the other assets similarly, e.g.:
 
 ```sh
-mkdir -p /www/pub/fetchconfig-web/images
-cp images/back.jpg /www/pub/fetchconfig-web/images/
+mkdir -p /www/virtual/fetchconfig/htdocs/css /www/virtual/fetchconfig/htdocs/images
+cp fetchconfig-web.css /www/virtual/fetchconfig/htdocs/css/
+cp images/back.jpg      /www/virtual/fetchconfig/htdocs/images/
 ```
 
-and set `IMAGE_BASE_URL` to the matching URL path (e.g. `/pub/fetchconfig-web/images`).
-If the file is absent the login page simply shows a plain background. Only the
-login page uses the backdrop; the logged-in pages do not.
+The login page shows a full-page backdrop image loaded from
+`<BASE_URL><IMAGE_BASE_URL>/back.jpg`; if the file is absent the login page
+simply shows a plain background. Only the login page uses the backdrop; the
+logged-in pages do not.
 
 **Create the device-table backup directory at install time.** If you use the
 device-table editor, the app needs `$BACKUP_DEVICE_TABLE` (default
@@ -1005,7 +1015,7 @@ and **Delete** per report, and a **"Delete reports older than N days"** control
 Because the web server has no direct access to the report directory, every
 operation is handled by the CGI behind the fetchconfig-web login:
 
-* **View** opens a page (like *View fetchconfig log*) that parses the report's
+* **View** opens a page (like *View last fetchconfig schedule log*) that parses the report's
   `device-diff` blocks and shows each device as a collapsible section
   (collapsed initially, with *Expand all* / *Collapse all*), re-rendering the
   diff with escaped text -- the report's own markup/styles are never injected.
@@ -1627,9 +1637,9 @@ output -- including the per-file suffix breakdown -- in a copyable block and
 spells out which of the three cases applies, the same way the empty-backup
 check does.
 
-#### View fetchconfig log
+#### View last fetchconfig schedule log
 
-The Tools menu has a **View fetchconfig log** tool with a **Display log**
+The Tools menu has a **View last fetchconfig schedule log** tool with a **Display log**
 button that opens the log on its own page (`?action=view_log`, admin only).
 It shows the output written by the scheduled (cron) `fetchconfig.pl` run. The
 log file is set with the optional `FETCHCONFIG_LOG` key in
@@ -1835,14 +1845,12 @@ not that it actually drives your device; always test a changed template against
 the real hardware.
 
 The editor toolbar also has a **Help templates** button that opens
-`<HELP_BASE_URL>/README.template_engine.html` (the template-engine manual) in a
-new browser tab. **`HELP_BASE_URL`** (default `/fetchconfig-web`) is the URL
-base under which that documentation and the Help-menu documents are served; put
-`README.template_engine.html` there (e.g. alongside the other served assets). If
-the file is not installed the button simply leads to a 404. When the application
-is served from the **site root of its own vhost**, set `HELP_BASE_URL = /`; a
-trailing slash (and the bare `/`) is normalised away so links resolve to
-`/<file>` rather than a broken `//<file>`.
+`<BASE_URL>/README.template_engine.html` (the template-engine manual) in a
+new browser tab. **`BASE_URL`** (default `/`) is the URL base under which the
+web-served directory (and the Help-menu documents) is served; put
+`README.template_engine.html` in `WEB_DIR`. If the file is not installed the
+button simply leads to a 404. A trailing slash (and the bare `/`) is normalised
+away so links resolve to `/<file>` rather than a broken `//<file>`.
 
 ### Per-site device access
 
@@ -1969,44 +1977,28 @@ from the default.
 ### Help page
 
 The **Help** menu item shows a short description of the application. It
-reads `$HELP_FILE` as an HTML *fragment* -- no `<html>`/`<head>`/`<body>`
-tags, just the content -- and drops it straight into the page's own title
-bar/nav/footer chrome. A ready-to-use `help.html` is included; deploy it
-with:
+reads `help.html` from `WEB_DIR` as an HTML *fragment* -- no
+`<html>`/`<head>`/`<body>` tags, just the content -- and drops it straight into
+the page's own title bar/nav/footer chrome. A ready-to-use `help.html` is
+included; deploy it, with the stylesheet and the sibling Help-menu documents,
+into `WEB_DIR`:
 
 ```sh
-mkdir -p /www/pub/fetchconfig-web
-cp help.html /www/pub/fetchconfig-web/help.html
+mkdir -p /www/virtual/fetchconfig/htdocs/css
+cp fetchconfig-web.css /www/virtual/fetchconfig/htdocs/css/
+cp help.html \
+   fetchconfig-web-documentation.html INSTALL.html \
+   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html \
+   /www/virtual/fetchconfig/htdocs/
 ```
 
-The help page is addressed by two keys. **`HELP_DIR`** is the filesystem
-directory that holds `help.html` and the sibling Help-menu documents
-(`fetchconfig-web-documentation.html`, `INSTALL.html`, `LICENSE.html`,
-`LICENSE-ADDITIONS.html`, `PRIVACY.html`); each Help-menu entry appears only
-when its file is present there. **`HELP_FILE`** is the help page's filename.
-Two equivalent styles are accepted:
-
-```
-# preferred: explicit directory + bare filename
-HELP_DIR   = /www/pub/fetchconfig-web
-HELP_FILE  = help.html
-
-# legacy: a single full path (its directory becomes HELP_DIR)
-HELP_FILE  = /www/pub/fetchconfig-web/help.html
-```
-
-When `HELP_DIR` is set, `HELP_FILE` is reduced to its basename, so a full path
-there is harmless. When `HELP_DIR` is absent, a `HELP_FILE` containing a `/`
-supplies the directory (the legacy form). `HELP_DIR`/`HELP_FILE` are filesystem
-locations read directly with Perl's `open()`; they are distinct from the
-HTTP-visible location, which is `HELP_BASE_URL` + the filename. The web
-server's existing mapping of the URL path `/fetchconfig-web/` to the
-filesystem directory `/www/pub/fetchconfig-web/` means the same file is
-also reachable in a browser at `/fetchconfig-web/help.html` -- a
-server-relative path with no hostname, since that mapping applies on
-whichever host this is deployed to. `fetchconfig-web.cgi` itself never
-needs that URL (it reads the file from disk, not over HTTP), but it's
-worth knowing if you ever want to link to the raw file directly.
+**`WEB_DIR`** is the filesystem directory that holds `help.html` and the sibling
+Help-menu documents (`fetchconfig-web-documentation.html`, `INSTALL.html`,
+`LICENSE.html`, `LICENSE-ADDITIONS.html`, `PRIVACY.html`); each Help-menu entry
+appears only when its file is present there. `help.html` has a fixed name.
+`WEB_DIR` is read directly from disk with Perl's `open()`; it is distinct from
+the HTTP-visible location, which is `BASE_URL` + the filename. The browser loads
+the help page at `<BASE_URL>help.html`, merged with the site's host name.
 
 If the file is missing (e.g. before you've deployed it), Help still works:
 `fetchconfig-web.cgi` falls back to a built-in description covering the

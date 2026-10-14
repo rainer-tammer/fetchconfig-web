@@ -94,7 +94,7 @@
         own page: Audit log, Check devices for consistent backup suffixes,
         Check site assignment, Devices without backups, Disk space,
         Empty backup cleanup, Empty directory cleanup, Orphaned backup cleanup, Restore device table,
-        Show fetchconfig-web.cfg, Verify email setup, Login failures, Orphaned notes cleanup, Templates, Upload report logo, View fetchconfig log.</li>
+        Show fetchconfig-web.cfg, Verify email setup, Login failures, Orphaned notes cleanup, Templates, Upload report logo, View last fetchconfig schedule log.</li>
     <li><strong>User</strong> &mdash; Change your password (everyone); Users,
         Add user and Sites (administrators only).</li>
     <li><strong>Help</strong> &mdash; this page.</li>
@@ -202,11 +202,10 @@
         notification address is configured a backup-summary e-mail is sent,
         exactly as a command-line backup would. When it finishes you're
         returned to the backup list, which now includes the new backup.</li>
-    <li><strong>Check for empty backups</strong> &mdash; asks fetchconfig to
-        inspect the backup files already on disk for this device and report any
-        that are zero bytes (empty). Nothing is changed; it only reads and
-        reports, and the result is shown in the same kind of output box as
-        Backup now.</li>
+    <li><strong>Empty backups</strong> &mdash; the backup list shows each
+        backup's byte size, and any zero-byte (empty) backup row is highlighted
+        in red, so empty captures stand out at a glance without a separate
+        check step.</li>
     <li><strong>Check backup suffixes</strong> &mdash; checks that this
         device's stored backups all use the same filename extension, and shows
         the full result (including a per-file breakdown when they differ).
@@ -475,7 +474,7 @@
   filename suffix, or whose suffix doesn't match the configured one. It lists
   the affected Device-IDs; open a device's <strong>Check backup suffixes</strong>
   button to see the details.</p>
-  <p><strong>View fetchconfig log</strong> &mdash; press <strong>Display
+  <p><strong>View last fetchconfig schedule log</strong> &mdash; press <strong>Display
   log</strong> to open the output of the scheduled (cron) backup run on its
   own page, split into sections you can expand or collapse. Each section's
   name is green if it succeeded and red if it failed; failed sections open
@@ -536,9 +535,9 @@
 
 <section class="card" id="help-navigation">
   <h2>Getting around long pages</h2>
-  <p>On pages that can get long &mdash; the device list, Setup, the
-  device-table editor, a backup's configuration, and the side-by-side
-  comparison &mdash; a small pair of <strong>&#9650; Top</strong> /
+  <p>On pages that can get long &mdash; the device list, the device table and
+  its editors, a backup's configuration, the config comparisons, and the Tools
+  pages &mdash; a small pair of <strong>&#9650; Top</strong> /
   <strong>&#9660; Bottom</strong> buttons floats in the bottom-right corner.
   Use them to jump straight to the top or bottom without scrolling.</p>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>

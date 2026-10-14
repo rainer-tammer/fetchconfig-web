@@ -10,17 +10,17 @@ my @bad  = ('javascript:alert(1)', "/x'y", '/x)y', '/x y', 'http://evil', 'relat
 my @good = ('/fetchconfig-web', '/a/b_c.d~e-f/', '/');
 
 for my $v (@bad) {
-    my ($cfg) = make_config(HELP_BASE_URL => $v);
+    my ($cfg) = make_config(BASE_URL => $v);
     my $out = `perl -I "$FindBin::Bin/lib" -e 'use FCWebTest qw(load_cgi); load_cgi(q{$cfg}); my \$e=main::read_config(); print defined \$e ? "REJ" : "OK";' 2>/dev/null`;
-    is($out, 'REJ', "HELP_BASE_URL '$v' rejected");
+    is($out, 'REJ', "BASE_URL '$v' rejected");
 }
 for my $v (@good) {
-    my ($cfg) = make_config(HELP_BASE_URL => $v);
+    my ($cfg) = make_config(BASE_URL => $v);
     my $out = `perl -I "$FindBin::Bin/lib" -e 'use FCWebTest qw(load_cgi); load_cgi(q{$cfg}); my \$e=main::read_config(); print defined \$e ? "REJ" : "OK";' 2>/dev/null`;
-    is($out, 'OK', "HELP_BASE_URL '$v' accepted");
+    is($out, 'OK', "BASE_URL '$v' accepted");
 }
 
-# Regression for the vhost "//file" bug: with HELP_BASE_URL=/, the old code
+# Regression for the vhost "//file" bug: with BASE_URL=/, the old code
 # normalized "/" back to "/" and joined "$BASE/$file" -> "//file", a
 # protocol-relative URL the browser read as a hostname (//license.html ->
 # https://license.html/). The fix normalizes a bare "/" (and any trailing
@@ -33,7 +33,7 @@ for my $v (@good) {
         my $path = File::Spec->catfile("$FindBin::Bin/..", 'fetchconfig-web.cgi');
         open(my $fh, '<', $path) or die $!; local $/; <$fh>;
     };
-    # The join uses "$HELP_BASE_URL/$file"; the old "$v = '/' if $v eq ''" that
+    # The join uses "$BASE_URL/$file"; the old "$v = '/' if $v eq ''" that
     # reintroduced the leading slash must be gone.
     unlike($cgi, qr/\$v = '\/' if \$v eq ''/, 'bare-/ no longer re-added before the join');
     like($cgi, qr/\$v =~ s\{\/\+\$\}\{\};/, 'trailing slashes are stripped from URL bases');

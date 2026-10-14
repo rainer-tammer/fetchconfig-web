@@ -66,7 +66,7 @@ isnt($t1, $t2, 'same-size rewrite changes the token (content digest)');
     no warnings 'redefine', 'once';
     local *main::user_may_use_tools = sub { 1 };
     my @redir;
-    local *main::redirect_to_tools = sub { my %o=@_; push @redir, ($o{err} ? "ERR" : "OK"); };
+    local *main::redirect_to_action = sub { my ($act, %o)=@_; push @redir, ($o{err} ? "ERR" : "OK"); };
 
     # stale token -> refused, table unchanged
     my %F = (name => "$base.2026-10-01_120000.bak", table_mtime => '1.0:1:deadbeef');

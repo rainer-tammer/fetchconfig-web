@@ -1,5 +1,6 @@
 #!/usr/bin/perl
-# fetchconfig-web - Web interface for the fetchconfig network configuration tool
+# =============================================================================
+# fetchconfig-web - Web interface for the fetchconfig network backup tool
 # Copyright (C) 2026  Rainer Tammer
 #
 # This program is free software: you can redistribute it and/or modify
@@ -31,13 +32,20 @@
 # and for the assumptions made about the device table format.
 # =============================================================================
 
+# --------------------------------------------------------------------------
+# Modules
+# --------------------------------------------------------------------------
+
+################################################################################
+# SECTION 1: MODULE IMPORTS
+################################################################################
 use strict;
 use warnings;
 use CGI;
 use CGI::Cookie;
 use Digest::MD5 ();
 use Time::HiRes ();
-use MIME::Base64 ();   # core (5.8+); inline base64 logo previews on the Tools page
+use MIME::Base64 ();
 use Fcntl qw(:flock);
 use File::Path qw(make_path);
 use File::Temp qw(tempfile);
@@ -62,6 +70,10 @@ use Algorithm::Diff qw(sdiff);
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
 # this constant is what the footer shows. Bump it here on each release.
+
+################################################################################
+# SECTION 2: CONSTANTS
+################################################################################
 use constant APP_VERSION => '2.00';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
@@ -76,6 +88,25 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
 use constant MIN_FETCHCONFIG_VERSION => '9.69';
+
+# --- Login throttle (see login_record_failure / login_is_throttled) ---
+use constant LOGIN_MAX_FAILURES  => 5;     # failures in the window before throttling
+use constant LOGIN_WINDOW_SECS   => 900;   # 15 min: older failures don't count
+use constant LOGIN_COOLDOWN_SECS => 900;   # 15 min: how long a tripped key stays throttled
+# --- Password-reset tokens ---
+use constant RESET_TOKEN_TTL  => 1800;     # 30 minutes
+use constant RESET_FLOOR_SECS => 0.5;      # V2: min wall time for a forgot-password request
+# --- Password hashing ---
+use constant BCRYPT_COST => 12;
+# --- Sites ---
+use constant SITE_ALL_CODE => '*';         # reserved id-0 code, shown as "any site"
+# --- Audit log ---
+use constant AUDIT_PAGE_SIZE => 100;
+# --- Config view: banner prepended to the always-masked config content ---
+use constant CONFIG_MASK_BANNER =>
+      "# ------------------------------------------------------------#\n"
+    . "# Note: Unencrypted secrets are masked on a best effort base. #\n"
+    . "# ------------------------------------------------------------#\n";
 
 # Seconds between keepalive writes to the client while a long external command
 # runs (Backup Now, Empty backup cleanup; see run_command_capture). Keeps the
@@ -96,20 +127,58 @@ my $COOKIE_NAME = 'fcweb_sid';
 # Everything below is populated from $CONFIG_FILE by read_config(), called
 # at startup (further down, once $cgi exists so a config error can be shown
 # as a proper page). Declared here, before any sub that closes over them.
-my ($DEVICE_TABLE, $FETCHCONFIG_PATH, $FETCHCONFIG_BIN, $FETCHCONFIG_BIN_FULL,
-    $USE_SUDO_FOR_BACKUP_NOW, $SUDO_BIN,
-    $SESSION_DIR, $BACKUP_TMP_DIR, $SESSION_TTL, $SESSION_MAX_LIFETIME, $DEVICE_ID_FIELD,
+
+################################################################################
+# SECTION 3: CONFIG FILE (/etc/fetchconfig-web.cfg) HANDLING
+################################################################################
+my ($DEVICE_TABLE,
+    $FETCHCONFIG_PATH,
+    $FETCHCONFIG_BIN,
+    $FETCHCONFIG_BIN_FULL,
+    $USE_SUDO_FOR_BACKUP_NOW,
+    $SUDO_BIN,
+    $SESSION_DIR,
+    $BACKUP_TMP_DIR,
+    $SESSION_TTL,
+    $SESSION_MAX_LIFETIME,
     $BACKUP_DEVICE_TABLE,
-    $DBinst, $DBuser, $DBpass, $DBhost,
-    $PROTECTED_USER, $MIN_PASSWORD_LENGTH, $MAX_PASSWORD_LENGTH, $DEFAULT_PASSWORD,
-    $PASSWORD_MIN_UPPER, $PASSWORD_MIN_LOWER, $PASSWORD_MIN_DIGIT,
-    $PASSWORD_MIN_SPECIAL, $PASSWORD_MIN_CLASSES,
-    $HELP_FILE, $HELP_DIR, $APP_VERSION, $COPYRIGHT,
-    $FETCHCONFIG_LOG, $LOG_MAX_DEVICES, $MAX_PARALLEL_SCAN, $BACKUP_TIMEOUT,
-    $FONT_BASE_URL, $IMAGE_BASE_URL, $TEMPLATE_HELPER, $HELP_BASE_URL,
-    $HTTPS_ENABLED, $SHOW_RENDER_TIME,
-    $EMAIL, $SMTP_HOST, $SMTP_PORT, $SMTP_SECURITY, $EMAIL_AUTH, $GENERIC_SYNTAX,
-    $SMTP_USER, $SMTP_PASS, $EMAIL_FROM, $SITE_URL);
+    $DBinst,
+    $DBuser,
+    $DBpass,
+    $DBhost,
+    $PROTECTED_USER,
+    $MIN_PASSWORD_LENGTH,
+    $MAX_PASSWORD_LENGTH,
+    $DEFAULT_PASSWORD,
+    $PASSWORD_MIN_UPPER,
+    $PASSWORD_MIN_LOWER,
+    $PASSWORD_MIN_DIGIT,
+    $PASSWORD_MIN_SPECIAL,
+    $PASSWORD_MIN_CLASSES,
+    $WEB_DIR,
+    $APP_VERSION,
+    $COPYRIGHT,
+    $FETCHCONFIG_LOG,
+    $LOG_MAX_DEVICES,
+    $MAX_PARALLEL_SCAN,
+    $BACKUP_TIMEOUT,
+    $FONT_BASE_URL,
+    $IMAGE_BASE_URL,
+    $CSS_BASE_URL,
+    $TEMPLATE_HELPER,
+    $BASE_URL,
+    $HTTPS_ENABLED,
+    $SHOW_RENDER_TIME,
+    $EMAIL,
+    $SMTP_HOST,
+    $SMTP_PORT,
+    $SMTP_SECURITY,
+    $EMAIL_AUTH,
+    $GENERIC_SYNTAX,
+    $SMTP_USER,
+    $SMTP_PASS,
+    $EMAIL_FROM,
+    $SITE_URL);
 
 ################################################################################
 # parse_config_file
@@ -141,6 +210,7 @@ sub parse_config_file {
     return (\%kv, undef);
 }
 
+################################################################################
 # Registry of every /etc/fetchconfig-web.cfg key, for the "Show
 # fetchconfig-web.cfg" tool (show_tool_show_cfg): validation type, default and
 # allowed range as display text. The validation mirrors read_config(); the
@@ -148,8 +218,9 @@ sub parse_config_file {
 # t/B3-cfg-view.t checks that this list and the keys read_config() reads stay
 # in sync. Order = the order of the "Not in config file" group.
 #   type: path (absolute), path_opt (empty or absolute), file (bare file
-#         name), help_file (file name or absolute path), str_req (non-empty),
+#         name), str_req (non-empty),
 #         str (anything), int (with min/max), bool (0|1), url (absolute URL path)
+################################################################################
 my @CFG_KEYS = (
     # key                       type         default                                   range / format                 min  max
     [ 'DEVICE_TABLE',           'path',      '(required)',                             'absolute path' ],
@@ -167,7 +238,6 @@ my @CFG_KEYS = (
     [ 'BACKUP_TMP_DIR',         'path',      '= SESSION_DIR',                          'absolute path' ],
     [ 'SESSION_TTL',            'int',       '28800',                                  'integer >= 1 seconds',         1, undef ],
     [ 'SESSION_MAX_LIFETIME',   'int',       '86400',                                  'integer >= 0 seconds (0 = no cap)', 0, undef ],
-    [ 'DEVICE_ID_FIELD',        'int',       '1',                                      'integer >= 0',                 0, undef ],
     [ 'DBinst',                 'str_req',   '(required)',                             'database name' ],
     [ 'DBuser',                 'str_req',   '(required)',                             'database role' ],
     [ 'DBpass',                 'str',       '(empty)',                                'string' ],
@@ -183,11 +253,11 @@ my @CFG_KEYS = (
     [ 'DEFAULT_PASSWORD',       'str',       'fetchconfig',                            'string' ],
     [ 'HTTPS_ENABLED',          'bool',      '0',                                      '0 | 1' ],
     [ 'SHOW_RENDER_TIME',       'bool',      '0',                                      '0 | 1' ],
-    [ 'FONT_BASE_URL',          'url',       '/fetchconfig-web/fonts',                 'absolute URL path' ],
-    [ 'IMAGE_BASE_URL',         'url',       '/fetchconfig-web/images',                'absolute URL path' ],
-    [ 'HELP_BASE_URL',          'url',       '/fetchconfig-web',                       'absolute URL path' ],
-    [ 'HELP_DIR',               'path_opt',  '(directory of HELP_FILE)',               'absolute path' ],
-    [ 'HELP_FILE',              'help_file', '/www/pub/fetchconfig-web/help.html',     'file name, or absolute path (old style)' ],
+    [ 'WEB_DIR',                'path_opt',  '/www/virtual/fetchconfig/htdocs',        'absolute filesystem path' ],
+    [ 'BASE_URL',               'url',       '/',                                      'absolute URL path' ],
+    [ 'CSS_BASE_URL',           'url',       '/css',                                   'absolute URL path' ],
+    [ 'FONT_BASE_URL',          'url',       '/fonts',                                 'absolute URL path' ],
+    [ 'IMAGE_BASE_URL',         'url',       '/images',                                'absolute URL path' ],
     [ 'APP_VERSION',            'str',       APP_VERSION,                              'string (overrides the shown version)' ],
     [ 'COPYRIGHT',              'str',       DEFAULT_COPYRIGHT,                        'string' ],
     # email / password reset (see read_config and send_mail / do_forgot_password)
@@ -203,7 +273,9 @@ my @CFG_KEYS = (
     [ 'GENERIC_SYNTAX',         'enum',      'auto',                                   'auto | none | cisco-ios | procurve | comware | zyxel | aruba-cx | nexus | mediant | json | xml | generic' ],
 );
 
+################################################################################
 # Keys that were valid in an earlier release and are now ignored.
+################################################################################
 my %CFG_OBSOLETE = (
     REPOSITORY => 'obsolete since 1.60 -- remove it (the repository comes from the device table)',
 );
@@ -228,7 +300,6 @@ sub cfg_value_problem {
     }
     if    ($type eq 'path' || $type eq 'path_opt') { return "must be an $range" unless $v =~ m{^/}; }
     elsif ($type eq 'file')      { return 'must be a file name (no "/")' if $v =~ m{/}; }
-    elsif ($type eq 'help_file') { return "must be a $range" if $v =~ m{/} && $v !~ m{^/}; }
     elsif ($type eq 'int') {
         return "must be an $range"
             unless $v =~ /^\d+$/ && (!defined $min || $v >= $min) && (!defined $max || $v <= $max);
@@ -460,7 +531,6 @@ sub read_config {
     # after LOGIN regardless of activity (the idle TTL slides, this does not).
     # 0 disables the cap (idle timeout only). Min 0; default 24h.
     $SESSION_MAX_LIFETIME = $cfg_int->('SESSION_MAX_LIFETIME', 24 * 3600, 0, undef);
-    $DEVICE_ID_FIELD     = $cfg_int->('DEVICE_ID_FIELD', 1, 0, undef);
     $PROTECTED_USER      = defined $kv->{PROTECTED_USER}     ? $kv->{PROTECTED_USER}     : 'admin';
     $MIN_PASSWORD_LENGTH  = $cfg_int->('MIN_PASSWORD_LENGTH', 8, 1, undef);
     $MAX_PASSWORD_LENGTH  = $cfg_int->('MAX_PASSWORD_LENGTH', 64, 1, undef);
@@ -472,25 +542,14 @@ sub read_config {
     $PASSWORD_MIN_SPECIAL = $cfg_int->('PASSWORD_MIN_SPECIAL', 0, 0, undef);
     $PASSWORD_MIN_CLASSES = $cfg_int->('PASSWORD_MIN_CLASSES', 0, 0, 4);
     $DEFAULT_PASSWORD    = defined $kv->{DEFAULT_PASSWORD}   ? $kv->{DEFAULT_PASSWORD}   : 'fetchconfig';
-    # Help docs live in one filesystem directory (HELP_DIR), served at the URL
-    # base HELP_BASE_URL; HELP_FILE is the help page's filename (help.html). For
-    # backward compatibility HELP_FILE may still be a full path (old style): if
-    # it contains a "/" its dirname becomes HELP_DIR and its basename the
-    # filename, unless HELP_DIR is set explicitly.
-    my $help_file_cfg = defined $kv->{HELP_FILE} && $kv->{HELP_FILE} ne ''
-                      ? $kv->{HELP_FILE} : '/www/pub/fetchconfig-web/help.html';
-    if (defined $kv->{HELP_DIR} && $kv->{HELP_DIR} ne '') {
-        $HELP_DIR  = $kv->{HELP_DIR};
-        $HELP_DIR  =~ s{/+$}{};
-        ($HELP_FILE = $help_file_cfg) =~ s{^.*/}{};      # basename only
-        $HELP_FILE  = 'help.html' if $HELP_FILE eq '';
-    } elsif ($help_file_cfg =~ m{/}) {                   # old full-path style
-        ($HELP_DIR  = $help_file_cfg) =~ s{/[^/]*$}{};
-        ($HELP_FILE = $help_file_cfg) =~ s{^.*/}{};
-    } else {                                             # bare filename, no dir
-        $HELP_DIR  = '/www/pub/fetchconfig-web';
-        $HELP_FILE = $help_file_cfg;
-    }
+    # WEB_DIR is the filesystem directory that holds the app's static web
+    # assets (css, fonts, images, help.html and the documentation pages). It is
+    # used only for on-disk presence checks; the browser loads these assets by
+    # URL (BASE_URL + the per-asset sub-path), which the browser merges with the
+    # site's FQDN. Trailing slashes are trimmed.
+    $WEB_DIR = (defined $kv->{WEB_DIR} && $kv->{WEB_DIR} ne '')
+             ? $kv->{WEB_DIR} : '/www/virtual/fetchconfig/htdocs';
+    $WEB_DIR =~ s{/+$}{};
     # The config file may override the version this file ships as (the
     # APP_VERSION constant); a missing/empty key means "use the built-in".
     $APP_VERSION         = (defined $kv->{APP_VERSION} && $kv->{APP_VERSION} ne '')
@@ -542,12 +601,13 @@ sub read_config {
     # silent fallback, so a typo can't quietly break fonts/images. Trailing
     # slashes are trimmed.
     my %url_default = (
-        FONT_BASE_URL  => '/fetchconfig-web/fonts',
-        IMAGE_BASE_URL => '/fetchconfig-web/images',
-        HELP_BASE_URL  => '/fetchconfig-web',
+        BASE_URL       => '/',
+        CSS_BASE_URL   => '/css',
+        FONT_BASE_URL  => '/fonts',
+        IMAGE_BASE_URL => '/images',
     );
     my %url_val;
-    for my $k (qw(FONT_BASE_URL IMAGE_BASE_URL HELP_BASE_URL)) {
+    for my $k (qw(BASE_URL CSS_BASE_URL FONT_BASE_URL IMAGE_BASE_URL)) {
         my $v = (defined $kv->{$k} && $kv->{$k} ne '') ? $kv->{$k} : $url_default{$k};
         unless ($v =~ m{^/[A-Za-z0-9._~/-]*$}) {
             return "$CONFIG_FILE: $k must be an absolute URL path containing only "
@@ -561,9 +621,10 @@ sub read_config {
         $v =~ s{/+$}{};
         $url_val{$k} = $v;
     }
+    $BASE_URL       = $url_val{BASE_URL};
+    $CSS_BASE_URL   = $url_val{CSS_BASE_URL};
     $FONT_BASE_URL  = $url_val{FONT_BASE_URL};
     $IMAGE_BASE_URL = $url_val{IMAGE_BASE_URL};
-    $HELP_BASE_URL  = $url_val{HELP_BASE_URL};
 
     # Full path to the privileged template-install helper
     # (fetchconfig-web-install-template.pl), run via sudo for the template
@@ -575,8 +636,10 @@ sub read_config {
     return undef;
 }
 
+################################################################################
 # Embedded PNG logo (base64), shown in the title bar. Kept in-script so the
 # app stays a single deployable file with no separate image asset.
+################################################################################
 my $LOGO_BASE64 = do {
     local $/;
     my $raw = <<'B64';
@@ -736,8 +799,10 @@ B64
     $raw;
 };
 
+################################################################################
 # Embedded PNG icon (base64) shown in the top-right corner of the login
 # box. Kept in-script like the title-bar logo, so no separate asset.
+################################################################################
 my $LOGIN_ICON_BASE64 = do {
     my $raw = <<'ICONB64';
 iVBORw0KGgoAAAANSUhEUgAAAGQAAABkCAYAAABw4pVUAAAWfmNhQlgAABZ+anVtYgAAAB5qdW1kYzJwYQARABCAAACqADibcQNj
@@ -1036,13 +1101,18 @@ ICONB64
     $raw;
 };
 
-# --------------------------------------------------------------------------
+################################################################################
 # Bootstrap
-# --------------------------------------------------------------------------
+################################################################################
 # The current request's CGI object. A package global (not a lexical) so the
 # ~1300 `$cgi->...` call sites work unchanged whether the process runs as plain
 # CGI (one request) or FastCGI (handle_request reassigns $cgi per request; see
 # the Run section at the end of the file).
+################################################################################
+
+################################################################################
+# SECTION 4: CGI / FastCGI REQUEST CORE (state, dispatch, driver at EOF)
+################################################################################
 our $cgi;
 
 # Per-request globals and in-memory caches, predeclared here so both
@@ -1138,12 +1208,56 @@ sub handle_request {
     main();
 }
 
+################################################################################
 # Actions that change server state must be POST (so they can't be triggered
 # by a bookmark, a prefetch, or an <img src=...> tag) AND must carry a
 # valid per-session CSRF token. Read-only actions (viewing lists, configs,
 # diffs, the user/help pages) stay GET-friendly.
-my %STATE_CHANGING = map { $_ => 1 }
-    qw(login logout change_password change_email test_my_email verify_email clear_login_failures reset_password add_user delete_user set_edit_right set_admin_right backup_now save_table preview_table edit_table_from_form orphan_delete bulk_save restore_backup delete_backup delete_old_backups empty_delete empty_bk_delete empty_bk_delete_data check_template save_template revert_template delete_report prune_reports add_site edit_site delete_site set_user_sites set_download_full_report set_download_full_config set_email user_save note_save note_delete notes_orphan_delete reset_do upload_logo delete_logo);
+################################################################################
+my %STATE_CHANGING = map { $_ => 1 } qw(
+  login
+  logout
+  change_password
+  change_email
+  test_my_email
+  verify_email
+  clear_login_failures
+  reset_password
+  add_user
+  delete_user
+  set_edit_right
+  set_admin_right
+  backup_now
+  save_table
+  preview_table
+  edit_table_from_form
+  orphan_delete
+  bulk_save restore_backup
+  delete_backup
+  delete_old_backups
+  empty_delete
+  empty_bk_delete
+  empty_bk_delete_data
+  check_template
+  save_template
+  revert_template
+  delete_report
+  prune_reports
+  add_site
+  edit_site
+  delete_site
+  set_user_sites
+  set_download_full_report
+  set_download_full_config
+  set_email
+  user_save
+  note_save
+  note_delete
+  notes_orphan_delete
+  reset_do
+  upload_logo
+  delete_logo
+);
 
 ################################################################################
 # main
@@ -1216,7 +1330,7 @@ sub main {
                     # Restore tool), which is not device-scoped -- so the guard
                     # applies only when a dev= is actually present.
                     my %dev_scoped = map { $_ => 1 } qw(
-                        compare sidebyside checkempty backup_now view_backup
+                        compare sidebyside backup_now view_backup
                         download_config download_latest
                         check_backups_one check_suffix_one);
                     my $dev = $cgi->param('dev');
@@ -1235,8 +1349,6 @@ sub main {
             show_compare($user);
         } elsif ($action eq 'sidebyside') {
             show_side_by_side($user);
-        } elsif ($action eq 'checkempty') {
-            show_check_empty($user);
         } elsif ($action eq 'backup_now') {
             show_backup_now($user);
         } elsif ($action eq 'user') {
@@ -1442,13 +1554,17 @@ sub main {
     }
 }
 
-# =============================================================================
-# User store -- PostgreSQL (DBI). A fresh connection per request; callers
-# close it (or let process exit close it). Every query is parameterized.
-# =============================================================================
+
+
+################################################################################
+# SECTION 5: FUNCTIONS
+################################################################################
 
 ################################################################################
 # db_connect
+#
+# User store -- PostgreSQL (DBI). A fresh connection per request; callers
+# close it (or let process exit close it). Every query is parameterized.
 #
 # Open a connection to the user database. Returns $dbh or undef on failure;
 # on failure the caller shows a "server misconfiguration" style message
@@ -1463,10 +1579,12 @@ sub db_connect {
     return $dbh;   # undef on failure
 }
 
+################################################################################
 # FastCGI accept-loop state (see the Run section at the end). $IN_REQUEST is
 # true while a request is being handled, so the SIGTERM handler knows whether
 # it may _exit immediately (idle) or must let the request finish first.
 # $EXIT_REQUESTED is set by that handler to break the loop after Finish().
+################################################################################
 our $IN_REQUEST    = 0;
 our $EXIT_REQUESTED = 0;
 
@@ -1485,6 +1603,7 @@ our $RUN_MODE = 'CGI';
 # the audit log (logged as "***" instead). Password changes for USERS never
 # reach audit() at all.
 my %AUDIT_SECRET_KEY = map { $_ => 1 } qw(pass enable snmp_community community);
+
 ################################################################################
 # audit_is_secret
 #
@@ -1492,6 +1611,7 @@ my %AUDIT_SECRET_KEY = map { $_ => 1 } qw(pass enable snmp_community community);
 #   $k
 ################################################################################
 sub audit_is_secret { my ($k) = @_; defined $k && $AUDIT_SECRET_KEY{lc $k} ? 1 : 0; }
+
 ################################################################################
 # audit_redact
 #
@@ -1805,9 +1925,6 @@ sub db_get_user {
 # blocks); the account limit is soft -- it adds delay but does not hard-block,
 # so an attacker hammering a known username cannot lock the real user out.
 # A successful login clears that account's and that IP's counters.
-use constant LOGIN_MAX_FAILURES => 5;      # failures within the window before throttling
-use constant LOGIN_WINDOW_SECS  => 900;    # 15 min: failures older than this don't count
-use constant LOGIN_COOLDOWN_SECS=> 900;    # 15 min: how long a tripped key stays throttled
 
 ################################################################################
 # _login_fail_state
@@ -2032,29 +2149,6 @@ sub login_clear {
     };
 }
 
-################################################################################
-# db_login_attempts
-#
-# All current login_attempts rows, newest failure first, for the admin viewer.
-# Each row: kind ('ip'|'user'), keyval, failures, last_fail (formatted string),
-# age_secs (seconds since last_fail). Empty list on error.
-#
-# Parameters:
-#   $dbh
-################################################################################
-sub db_login_attempts {
-    my ($dbh) = @_;
-    return [] unless $dbh;
-    my $rows = eval {
-        $dbh->selectall_arrayref(
-            "SELECT kind, keyval, failures, "
-          . "       to_char(last_fail, 'YYYY-MM-DD HH24:MI:SS') AS last_fail, "
-          . "       EXTRACT(EPOCH FROM (now() - last_fail))::bigint AS age_secs "
-          . "  FROM login_attempts ORDER BY last_fail DESC",
-            { Slice => {} });
-    };
-    return $rows || [];
-}
 
 ################################################################################
 # db_login_attempts_clear_all
@@ -2205,14 +2299,14 @@ sub send_mail {
     return (0, $why);
 }
 
-# --- D: password-reset tokens ----------------------------------------------
+################################################################################
+# D: password-reset tokens
 # A reset token is a long random value handed to the user in the email link.
 # Only its SHA/MD5 hash is stored, so the DB never holds the usable token.
 # Tokens expire (RESET_TOKEN_TTL), are single-use (used flag), and are all
 # invalidated when the user's password changes.
-use constant RESET_TOKEN_TTL => 1800;   # 30 minutes
+################################################################################
 # V2: minimum wall time for a forgot-password request (timing-channel floor).
-use constant RESET_FLOOR_SECS => 0.5;
 
 ################################################################################
 # _reset_token_hash
@@ -2381,36 +2475,27 @@ sub db_set_password {
 }
 
 ################################################################################
-# db_set_edit_flag
+# db_set_user_flag
 #
-# Update a user's edit-device-table flag. Returns (1) or (0, $errmsg).
-#
-# Parameters:
-#   $dbh
-#   $username
-#   $edit
-################################################################################
-sub db_set_edit_flag {
-    my ($dbh, $username, $edit) = @_;
-    my $ok = $dbh->do('UPDATE users SET edit_device_table = ? WHERE username = ?',
-        undef, $edit ? 1 : 0, $username);
-    return $ok ? (1) : (0, $dbh->errstr);
-}
-
-################################################################################
-# db_set_admin_flag
-#
-# Update a user's admin_function flag. Returns (1) or (0, $errmsg).
+# Set one boolean flag column on a user row. Merges db_set_edit_flag /
+# db_set_admin_flag. The column is chosen from a FIXED allow-list (never
+# interpolated from caller input beyond this check), so there is no SQL
+# injection surface despite the column being a parameter.
 #
 # Parameters:
-#   $dbh
-#   $username
-#   $admin
+#   $dbh        database handle
+#   $username   target user
+#   $column     one of: edit_device_table, admin_function,
+#               download_full_report, download_full_config
+#   $value      truthy -> 1, else 0
 ################################################################################
-sub db_set_admin_flag {
-    my ($dbh, $username, $admin) = @_;
-    my $ok = $dbh->do('UPDATE users SET admin_function = ? WHERE username = ?',
-        undef, $admin ? 1 : 0, $username);
+sub db_set_user_flag {
+    my ($dbh, $username, $column, $value) = @_;
+    my %ALLOWED = map { $_ => 1 }
+        qw(edit_device_table admin_function download_full_report download_full_config);
+    return (0, "invalid flag column: $column") unless $ALLOWED{$column};
+    my $ok = $dbh->do("UPDATE users SET $column = ? WHERE username = ?",
+        undef, $value ? 1 : 0, $username);
     return $ok ? (1) : (0, $dbh->errstr);
 }
 
@@ -2467,16 +2552,14 @@ sub user_may_edit_table {
     return ($u && $u->{edit_device_table}) ? 1 : 0;
 }
 
-# =============================================================================
+################################################################################
 # Per-site device access (v1.50). A device carries an optional "site=<code>"
 # option; a user is assigned one or more site codes in user_sites. Site id 0
 # (code '*', "All sites") means unrestricted. A device with no site= belongs to
 # site 0 ("any site"), so only unrestricted users see it. admin is always
 # unrestricted. All access decisions are computed here, server-side, from the
 # database and the device table -- never from the browser.
-# =============================================================================
-
-use constant SITE_ALL_CODE => '*';     # reserved id-0 code, shown as "any site"
+################################################################################
 
 # Request-scoped context for rendering the site= dropdown in the editor:
 #   { options => [ {code, description} ... allowed for this user ],
@@ -2489,6 +2572,7 @@ our %SITE_CTX;
 # model => { repository => <val>, template_dir => <val>, on_fetch_run => <val> }
 # Populated by model_defaults_init() from the parsed records.
 our %MODEL_DEFAULTS;
+
 ################################################################################
 # model_defaults_init
 #
@@ -2623,7 +2707,9 @@ sub user_is_unrestricted {
     return user_site_access($dbh, $username)->{unrestricted} ? 1 : 0;
 }
 
+# =============================================================================
 # --- site management DB helpers ------------------------------------------
+# =============================================================================
 
 ################################################################################
 # db_site_by_id
@@ -2817,24 +2903,6 @@ sub device_site_code {
     return SITE_ALL_CODE;   # untagged => "any site" (id 0) => unrestricted-only
 }
 
-################################################################################
-# device_visible_to
-#
-# Is a device (by its record) visible to this user?
-#
-# Parameters:
-#   $dbh
-#   $username
-#   $rec
-################################################################################
-sub device_visible_to {
-    my ($dbh, $username, $rec) = @_;
-    my $acc = user_site_access($dbh, $username);
-    return 1 if $acc->{unrestricted};
-    my $code = device_site_code($rec);
-    return 0 if $code eq SITE_ALL_CODE;   # untagged / all-sites: unrestricted only
-    return $acc->{codes}{$code} ? 1 : 0;
-}
 
 ################################################################################
 # device_accessible
@@ -2866,25 +2934,6 @@ sub device_accessible {
     return 0;   # device not found
 }
 
-################################################################################
-# deny_device
-#
-# Emit a 403-style "not allowed / not found" page and return true when a
-# per-device action must be refused; callers do: return if deny_device(...).
-#
-# Parameters:
-#   $user
-#   $devid
-################################################################################
-sub deny_device {
-    my ($user, $devid) = @_;
-    return 0 if device_accessible($user, $devid);
-    print std_header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('Not available', $user);
-    print qq{<p class="error">That device is not available to you.</p>\n};
-    print page_foot();
-    return 1;
-}
 
 ################################################################################
 # device_visible_to_acc
@@ -3089,6 +3138,7 @@ sub md5_crypt {
     return "$magic$salt\$$result";
 }
 
+# =============================================================================
 # Generate a fresh Apache MD5 ($apr1$) hash for a new/changed password,
 # with a random 8-char salt. Pure Perl -- no htpasswd binary needed. The
 # output is byte-for-byte what `openssl passwd -apr1` produces, and
@@ -3096,6 +3146,7 @@ sub md5_crypt {
 # Is Crypt::Bcrypt usable? Probed once and cached. bcrypt is the preferred
 # password hash (stronger than the legacy $apr1$ MD5); when the module is not
 # installed the app transparently falls back to $apr1$ so it still runs.
+# =============================================================================
 {
     my $probe;
     sub bcrypt_available {
@@ -3113,14 +3164,9 @@ sub md5_crypt {
 # bcrypt cost (work factor). 12 is a reasonable 2026 default; each +1 doubles
 # the time. Kept modest so a login on the 32-bit AIX Perl stays well under a
 # second.
-use constant BCRYPT_COST => 12;
 
 # Banner prepended to the on-screen (masked) config view and thus to the masked
 # copy, so masked output can never be mistaken for a working configuration.
-use constant CONFIG_MASK_BANNER =>
-      "# ------------------------------------------------------------#\n"
-    . "# Note: Unencrypted secrets are masked on a best effort base. #\n"
-    . "# ------------------------------------------------------------#\n";
 
 ################################################################################
 # secure_random_bytes
@@ -3179,11 +3225,13 @@ sub password_hash {
 ################################################################################
 sub login_jitter { select(undef, undef, undef, 0.05 + rand(0.05)); }
 
+################################################################################
 # A hash to verify against when the username does NOT exist, so that path costs
 # the same as a real wrong-password check (V3, timing-based enumeration).
 # Computed once per process with the live algorithm/cost (bcrypt when available,
 # else $apr1$), so it always matches what verify_password() would do for a real
 # account.
+################################################################################
 {
     my $dummy;
     sub dummy_password_hash {
@@ -3643,9 +3691,9 @@ sub csrf_field {
     return qq{<input type="hidden" name="csrf" value="} . esc(csrf_token()) . qq{">\n};
 }
 
-# =============================================================================
+################################################################################
 # Actions
-# =============================================================================
+################################################################################
 
 # Landing pages an unauthenticated user may be redirected back to after login.
 # Only read-only (GET) "view a page" actions are allowed -- never a
@@ -3816,9 +3864,9 @@ sub script_url {
     return $cgi->url(-absolute => 1);
 }
 
-# --------------------------------------------------------------------------
+################################################################################
 # Views
-# --------------------------------------------------------------------------
+################################################################################
 
 ################################################################################
 # show_login_form
@@ -4840,13 +4888,9 @@ sub show_backup_list {
         print qq{<button type="submit" form="compare-form" name="action" value="sidebyside" class="btn">Side by side selected</button>\n};
     }
     if ($show_table) {
-        # Read-only disk check (fetchconfig.pl -z): a plain GET link like the
-        # compare actions. Only meaningful when backups exist, so it's shown
-        # alongside them (a device with no backups yet has nothing to check).
-        print qq{<a class="btn" href="} . esc(script_url() . '?action=checkempty&dev=' . CGI::escape($dev))
-            . qq{">Check for empty backups</a>\n};
-        # (The per-device backup-suffix check was removed; the Tools tool
-        # "Check devices for consistent backup suffixes" covers all devices.)
+        # (The per-device "Check for empty backups" button was removed: the
+        # table shows every backup's byte size, and a 0-byte backup row is
+        # highlighted red, so a separate check action is redundant.)
         # Download a SELECTED backup's configuration as a file. Only for a user
         # who may see the unmasked config; the button reads the backup selected
         # in the table below (radio) and errors if none is selected.
@@ -4879,7 +4923,10 @@ sub show_backup_list {
         print qq{<table class="list">\n<tr>$chk_th$dl_th<th>#</th><th>Date</th><th>Time</th><th>Size</th><th>Path</th></tr>\n};
         for my $b (@$backups) {
             my $link = script_url() . '?dev=' . CGI::escape($dev) . '&idx=' . CGI::escape($b->{idx});
-            print qq{<tr>};
+            # A 0-byte backup is empty (failed/partial capture); flag its row red
+            # so it stands out without a separate "check for empty backups" step.
+            my $empty = (defined $b->{size} && $b->{size} =~ /^\s*0\s*$/) ? 1 : 0;
+            print $empty ? qq{<tr class="backup-empty" title="Empty backup (0 bytes)">} : qq{<tr>};
             print qq{<td><input type="checkbox" class="cmp-sel" name="sel" value="}
                 . esc($b->{idx}) . qq{"></td>} if $show_compare;
             print qq{<td><input type="radio" class="dl-sel" name="dl_idx" value="}
@@ -5015,7 +5062,7 @@ JS2
     print page_foot();
 }
 
-# =============================================================================
+################################################################################
 # Config syntax highlighting (backup content view only)
 # =============================================================================
 #
@@ -5032,6 +5079,7 @@ JS2
 # forgetting to escape a token would be an injection bug -- the helpers
 # below (hl() / esc()) do the escaping, and highlighters must only ever emit
 # text through them.
+################################################################################
 
 my %SYNTAX_HIGHLIGHTERS;   # model => coderef($raw_content) -> html
 
@@ -5120,9 +5168,11 @@ sub resolve_syntax_scheme {
     return detect_syntax_scheme($content);
 }
 
+################################################################################
 # Ask fetchconfig for a device's template syntax_style, cached per template
 # file (path + mtime). Returns the scheme name, or undef if none is declared
 # or it can't be determined.
+################################################################################
 {
     my %cache;   # "path\0mtime" => scheme | ''   (reset per request by reset_request_state)
     sub _syntax_cache_reset { %cache = (); }
@@ -6099,6 +6149,7 @@ sub highlight_xml {
     }
     return join("\n", @out);
 }
+
 ################################################################################
 # _hl_xml_line
 #
@@ -6164,6 +6215,7 @@ sub highlight_generic {
     }
     return join("\n", @out);
 }
+
 ################################################################################
 # _hl_generic_line
 #
@@ -7218,7 +7270,6 @@ sub normalize_config_ws {
     return join("\n", @out) . (@out ? "\n" : '');
 }
 
-
 ################################################################################
 # render_side_by_side
 #
@@ -7312,7 +7363,7 @@ sub show_backup_now {
         return;
     }
 
-    print page_head("Backup Now: $dev", $user, 'checkout');
+    print page_head("Backup Now: $dev", $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url()) . qq{">&larr; Devices</a>}
         . qq{<span class="sep">/</span>}
         . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
@@ -7381,76 +7432,8 @@ sub show_backup_now {
 }
 
 ################################################################################
-# show_check_empty
-#
-# Check for empty backup files on disk via `fetchconfig.pl -z dev_id`, and
-# show the tool's report in the same layout as Backup Now (breadcrumb,
-# heading, status line, copyable output block). Read-only: -z only inspects
-# the files already in the repository, so this uses the same non-sudo
-# run_fetchconfig() path as -l/-g, not the sudo Backup Now path.
-#
-# Parameters:
-#   $user
-################################################################################
-sub show_check_empty {
-    my ($user) = @_;
-    my $dev = $cgi->param('dev') // '';
-
-    print std_header(-type => 'text/html', -charset => 'UTF-8');
-
-    unless (valid_id($dev)) {
-        print page_head('Error', $user);
-        print qq{<p class="error">Invalid device id.</p>\n};
-        print page_foot();
-        return;
-    }
-
-    print page_head("Check empty backups: $dev", $user, "checkout");
-    print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url()) . qq{">&larr; Devices</a>}
-        . qq{<span class="sep">/</span>}
-        . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
-        . esc($dev) . qq{</a></p>\n};
-    print qq{<div class="tool-section" id="check-empty-section">\n};
-    print qq{<h2 class="tool-section-title">Check empty backups: } . esc($dev) . qq{</h2>\n};
-    print qq{<p class="muted">Result of <code>fetchconfig.pl -z </code>}
-        . esc($dev) . qq{, which inspects the backup files already on disk.</p>\n};
-
-    my ($output, $status, $err) = run_check_empty($dev);
-    my $return_link = script_url() . '?dev=' . CGI::escape($dev);
-
-    if ($err) {
-        print qq{<p class="error">} . esc($err) . qq{</p>\n};
-    } else {
-        if (defined $status && $status == 0) {
-            print qq{<p class="success">No empty backups found (exit 0).</p>\n};
-        } elsif (defined $status && $status == 1) {
-            print qq{<p class="error">One or more empty (zero-byte) backups found (exit 1) -- see output below.</p>\n};
-        } else {
-            print qq{<p class="error">Check exited with status }
-                . esc($status) . qq{ -- see output below.</p>\n};
-        }
-        my $shown = (defined $output && $output ne '') ? $output
-                  : "(fetchconfig.pl -z produced no output.)";
-        print qq{<div class="config-wrap">\n};
-        print copy_button_html();
-        print qq{<pre class="config" id="config-content">} . esc($shown) . qq{</pre>\n};
-        print qq{</div>\n};
-        print copy_button_script();
-    }
-
-    print qq{<p><a class="btn" href="} . esc($return_link) . qq{">}
-        . qq{Return to backups for } . esc($dev) . qq{</a></p>\n};
-    print qq{</div>\n};   # .tool-section (Check empty backups)
-    print page_foot();
-}
-
-# Per-device page: full output of `fetchconfig.pl -s dev_id`, which reports
-# whether the device's backup files have consistent extensions/suffixes.
-# Same layout as show_check_empty (raw transcript in a copyable block).
-
-# =============================================================================
 # Tools (admin only): orphaned-backup check and delete
-# =============================================================================
+################################################################################
 
 ################################################################################
 # user_may_use_tools
@@ -8209,7 +8192,6 @@ sub show_tool_diskspace {
     print page_foot();
 }
 
-use constant AUDIT_PAGE_SIZE => 100;
 
 ################################################################################
 # audit_filter_sql
@@ -8417,6 +8399,7 @@ sub show_login_failures_data {
         . ',"limit":' . $limit . ',"rows":[' . join(',', @items) . ']}';
 }
 
+################################################################################
 # Login-failures viewer (?action=tool_login_failures, admin only). Same look
 # and paging as the audit viewer: a filter bar, First/Prev/Next/Last pagers top
 # and bottom, and the rows fetched by AJAX from show_login_failures_data().
@@ -8428,6 +8411,7 @@ sub show_login_failures_data {
 # note_get / note_save; the Notes viewer lists all visible notes; the admin
 # orphan-cleanup removes notes whose device-id is gone from the table (unless
 # the keep flag is set).
+################################################################################
 
 ################################################################################
 # note_icon_button
@@ -9195,9 +9179,20 @@ sub show_fetchconfig_log {
         return;
     }
 
-    print page_head('View fetchconfig log', $user, 'full');
+    print page_head('View last fetchconfig schedule log', $user, 'full');
     print qq{<div class="tool-section">\n};
-    print qq{<h2 class="tool-section-title">View fetchconfig log</h2>\n};
+    # Append the log's date (its mtime = when the last scheduled run wrote it).
+    my $log_date = '';
+    if (defined $FETCHCONFIG_LOG && $FETCHCONFIG_LOG ne '') {
+        my @st = stat($FETCHCONFIG_LOG);
+        if (@st) {
+            my @lt = localtime($st[9]);
+            $log_date = sprintf(' - %04d-%02d-%02d %02d:%02d:%02d',
+                $lt[5] + 1900, $lt[4] + 1, $lt[3], $lt[2], $lt[1], $lt[0]);
+        }
+    }
+    print qq{<h2 class="tool-section-title">View last fetchconfig schedule log}
+        . esc($log_date) . qq{</h2>\n};
 
     if (!defined $FETCHCONFIG_LOG || $FETCHCONFIG_LOG eq '') {
         print qq{<p class="muted">No log file configured. Set }
@@ -9298,6 +9293,7 @@ sub show_fetchconfig_log {
     print page_foot();
 }
 
+################################################################################
 # Format a byte count as B / KB / MB (one decimal), for the template list.
 # =============================================================================
 # Reports (all logged-in users): list / view / download / delete the HTML
@@ -9305,7 +9301,7 @@ sub show_fetchconfig_log {
 # resolved through the directory: allow-list). The web server has no direct
 # access to that directory, so every file operation is streamed/handled here
 # behind the fetchconfig-web login.
-# =============================================================================
+################################################################################
 
 ################################################################################
 # valid_logo_name
@@ -9854,31 +9850,15 @@ sub do_delete_report {
     my $file = $cgi->param('file');
     $file = '' unless defined $file;
     unless (defined $dir && valid_report_name($file) && -f "$dir/$file") {
-        redirect_to_reports(err => 'Report not found, or not a valid report file.');
+        redirect_to_action('report', err => 'Report not found, or not a valid report file.');
         return;
     }
     if (unlink("$dir/$file")) {
         audit(action=>'delete_report', object_type=>'report', object_id=>$file, detail=>'deleted report');
-        redirect_to_reports(msg => "Deleted report $file.");
+        redirect_to_action('report', msg => "Deleted report $file.");
     } else {
-        redirect_to_reports(err => "Could not delete $file: $!");
+        redirect_to_action('report', err => "Could not delete $file: $!");
     }
-}
-
-################################################################################
-# redirect_to_logo_tool
-#
-# Redirect back to the Upload report logo tool page, carrying a message.
-#
-# Parameters:
-#   %o
-################################################################################
-sub redirect_to_logo_tool {
-    my (%o) = @_;
-    my $url = script_url() . '?action=tool_logo';
-    $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
-    $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print std_header(-location => $url, -status => '302 Found');
 }
 
 ################################################################################
@@ -9896,26 +9876,26 @@ sub do_upload_logo {
     my ($user) = @_;
     my $dir = report_directory();
     unless (defined $dir && -d $dir) {
-        redirect_to_logo_tool(err => 'No usable report_dir is configured; set it first.');
+        redirect_to_action('tool_logo', err => 'No usable report_dir is configured; set it first.');
         return;
     }
     my $fn = $cgi->param('logofile');
     unless (defined $fn && "$fn" ne '') {
-        redirect_to_logo_tool(err => 'No file was selected.');
+        redirect_to_action('tool_logo', err => 'No file was selected.');
         return;
     }
     # The submitted name -> a safe, case-preserved basename.
     my $base = "$fn";
     $base =~ s{^.*[/\\]}{};          # strip any client path
     unless (valid_logo_name($base)) {
-        redirect_to_logo_tool(err =>
+        redirect_to_action('tool_logo', err =>
             'Invalid filename. Use letters/digits/._- and a .png/.jpg/.gif extension.');
         return;
     }
     # Read the upload with a hard byte cap (101 KB: 100KB + 1 to detect oversize).
     my $fh = $cgi->upload('logofile');
     unless (defined $fh) {
-        redirect_to_logo_tool(err => 'Upload failed (no file handle).');
+        redirect_to_action('tool_logo', err => 'Upload failed (no file handle).');
         return;
     }
     my $limit = 100 * 1024;
@@ -9925,18 +9905,18 @@ sub do_upload_logo {
     while (read($fh, $buf, 8192)) {
         $data .= $buf;
         if (length($data) > $limit) {
-            redirect_to_logo_tool(err => 'File is larger than 100KB.');
+            redirect_to_action('tool_logo', err => 'File is larger than 100KB.');
             return;
         }
     }
     if (length($data) == 0) {
-        redirect_to_logo_tool(err => 'The uploaded file is empty.');
+        redirect_to_action('tool_logo', err => 'The uploaded file is empty.');
         return;
     }
     # Content sniff: must actually be PNG/JPEG/GIF, whatever the extension says.
     my $magic = image_magic_type($data);
     unless ($magic) {
-        redirect_to_logo_tool(err =>
+        redirect_to_action('tool_logo', err =>
             'That file is not a PNG, JPEG or GIF image (content check failed).');
         return;
     }
@@ -9944,20 +9924,20 @@ sub do_upload_logo {
     my $path = "$dir/$base";
     my ($tfh, $tmp) = eval { tempfile('logo-XXXXXXXX', DIR => $dir) };
     unless ($tfh) {
-        redirect_to_logo_tool(err => "Could not write to the report directory: $!");
+        redirect_to_action('tool_logo', err => "Could not write to the report directory: $!");
         return;
     }
     binmode($tfh);
     print $tfh $data;
     unless (close($tfh) && rename($tmp, $path)) {
         unlink($tmp);
-        redirect_to_logo_tool(err => "Could not save $base to the report directory: $!");
+        redirect_to_action('tool_logo', err => "Could not save $base to the report directory: $!");
         return;
     }
     chmod(0644, $path);
     audit(action=>'upload_logo', object_type=>'logo', object_id=>$base,
           detail=>"uploaded logo (" . human_size(length($data)) . ")");
-    redirect_to_logo_tool(msg => "Uploaded $base (" . human_size(length($data)) . ").");
+    redirect_to_action('tool_logo', msg => "Uploaded $base (" . human_size(length($data)) . ").");
 }
 
 ################################################################################
@@ -9974,14 +9954,14 @@ sub do_delete_logo {
     my $name = $cgi->param('name');
     $name = '' unless defined $name;
     unless (defined $dir && valid_logo_name($name) && -f "$dir/$name") {
-        redirect_to_logo_tool(err => 'Logo not found, or not a valid image filename.');
+        redirect_to_action('tool_logo', err => 'Logo not found, or not a valid image filename.');
         return;
     }
     if (unlink("$dir/$name")) {
         audit(action=>'delete_logo', object_type=>'logo', object_id=>$name, detail=>'deleted report logo');
-        redirect_to_logo_tool(msg => "Deleted logo $name.");
+        redirect_to_action('tool_logo', msg => "Deleted logo $name.");
     } else {
-        redirect_to_logo_tool(err => "Could not delete $name: $!");
+        redirect_to_action('tool_logo', err => "Could not delete $name: $!");
     }
 }
 
@@ -9997,12 +9977,12 @@ sub do_prune_reports {
     my ($user) = @_;
     my $dir  = report_directory();
     unless (defined $dir && -d $dir) {
-        redirect_to_reports(err => 'Reporting is not configured.');
+        redirect_to_action('report', err => 'Reporting is not configured.');
         return;
     }
     my $days = $cgi->param('days');
     unless (defined $days && $days =~ /^\d+$/ && $days >= 1) {
-        redirect_to_reports(err => 'Please enter a whole number of days (1 or more).');
+        redirect_to_action('report', err => 'Please enter a whole number of days (1 or more).');
         return;
     }
     my $reports = list_reports($dir);   # newest first
@@ -10018,7 +9998,7 @@ sub do_prune_reports {
     }
     audit(action=>'prune_reports', object_type=>'report',
           detail=>"pruned $deleted report(s) older than $days day(s)");
-    redirect_to_reports(msg => "Deleted $deleted report" . ($deleted == 1 ? '' : 's')
+    redirect_to_action('report', msg => "Deleted $deleted report" . ($deleted == 1 ? '' : 's')
                              . " older than $days day" . ($days == 1 ? '' : 's') . '.');
 }
 
@@ -10035,20 +10015,6 @@ sub stamp_to_epoch {
     return undef unless defined $s && $s =~ /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/;
     require POSIX;
     return eval { POSIX::mktime($6, $5, $4, $3, $2 - 1, $1 - 1900) };
-}
-
-################################################################################
-# redirect_to_reports
-#
-# Parameters:
-#   %o
-################################################################################
-sub redirect_to_reports {
-    my (%o) = @_;
-    my $url = script_url() . '?action=report';
-    $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
-    $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print std_header(-location => $url, -status => '302 Found');
 }
 
 ################################################################################
@@ -10351,7 +10317,7 @@ sub show_edit_template {
     print qq{<button type="submit" name="action" value="check_template" class="btn btn-green">Check syntax</button>\n};
     print qq{<button type="submit" name="action" value="save_template" class="btn">Save</button>\n};
     print qq{<a id="tpl-discard" class="btn" href="$reopen_url">Discard changes</a>\n};
-    print qq{<a class="btn btn-gray" href="} . esc("$HELP_BASE_URL/README.template_engine.html")
+    print qq{<a class="btn btn-gray" href="} . esc("$BASE_URL/README.template_engine.html")
         . qq{" target="_blank" rel="noopener">Help templates</a>\n};
     if (defined template_backup_path($path)) {
         print qq{<button type="submit" name="action" value="revert_template" class="btn btn-danger" }
@@ -11146,12 +11112,12 @@ sub do_restore_backup {
     my $name = $cgi->param('name') // '';
     my $path = resolve_backup_path($name);
     unless ($path) {
-        redirect_to_tools(err => "No such backup.");
+        redirect_to_action('tool_restore', err => "No such backup.");
         return;
     }
     my $restore_content = '';
     unless (open(my $fh, '<', $path)) {
-        redirect_to_tools(err => "Could not read backup $name: $!.");
+        redirect_to_action('tool_restore', err => "Could not read backup $name: $!.");
         return;
     } else {
         local $/; $restore_content = <$fh>; close($fh);
@@ -11164,13 +11130,13 @@ sub do_restore_backup {
     # itself undoable -- but an UNINTENDED clobber is now refused instead.
     my ($table_lock, $lock_err) = lock_device_table();
     unless ($table_lock) {
-        redirect_to_tools(err => "$lock_err The table was NOT restored.");
+        redirect_to_action('tool_restore', err => "$lock_err The table was NOT restored.");
         return;
     }
     my $submitted_mtime = $cgi->param('table_mtime') // '';
     my $current_mtime   = device_table_mtime();
     if ($submitted_mtime ne '' && "$current_mtime" ne "$submitted_mtime") {
-        redirect_to_tools(err =>
+        redirect_to_action('tool_restore', err =>
             'The device table changed since the Restore page was loaded, so the '
           . 'restore was NOT performed (that newer change is not lost). Reload '
           . 'this page to see the current state, then restore again if you still '
@@ -11183,7 +11149,7 @@ sub do_restore_backup {
     $current = '' unless defined $current;
     my ($ok, $info) = backup_and_write_table($current, $restore_content);
     if (!$ok) {
-        redirect_to_tools(err => $info);
+        redirect_to_action('tool_restore', err => $info);
         return;
     }
     audit(action=>'restore_backup', object_type=>'table', object_id=>$name,
@@ -11193,7 +11159,7 @@ sub do_restore_backup {
     # next login / editor open. Same step the editor and bulk-save paths do
     # via audit_device_table_changes().
     audit_record_device_table_token(undef, $user);
-    redirect_to_tools(msg => "Device table restored from $name. "
+    redirect_to_action('tool_restore', msg => "Device table restored from $name. "
         . "(Previous table backed up as $info.)");
 }
 
@@ -11215,14 +11181,14 @@ sub do_delete_backup {
     my $name = $cgi->param('name') // '';
     my $path = resolve_backup_path($name);
     unless ($path) {
-        redirect_to_tools(err => "No such backup.");
+        redirect_to_action('tool_restore', err => "No such backup.");
         return;
     }
     if (unlink($path)) {
         audit(action=>'delete_backup', object_type=>'backup', object_id=>$name, detail=>'deleted backup');
-        redirect_to_tools(msg => "Deleted backup $name.");
+        redirect_to_action('tool_restore', msg => "Deleted backup $name.");
     } else {
-        redirect_to_tools(err => "Could not delete $name: $!.");
+        redirect_to_action('tool_restore', err => "Could not delete $name: $!.");
     }
 }
 
@@ -11246,7 +11212,7 @@ sub do_delete_old_backups {
     }
     my $days = $cgi->param('days') // '';
     unless ($days =~ /^\d+$/ && $days >= 1) {
-        redirect_to_tools(err => "Please enter a whole number of days (1 or more).");
+        redirect_to_action('tool_restore', err => "Please enter a whole number of days (1 or more).");
         return;
     }
 
@@ -11256,7 +11222,7 @@ sub do_delete_old_backups {
                 map  { { %$_, epoch => backup_epoch_from_name($_->{name}) } }
                 @$backups;
     if (@dated <= 1) {
-        redirect_to_tools(msg => "Nothing to delete: there is no backup older than the newest one.");
+        redirect_to_action('tool_restore', msg => "Nothing to delete: there is no backup older than the newest one.");
         return;
     }
     my $newest = shift @dated;   # never deleted
@@ -11276,9 +11242,9 @@ sub do_delete_old_backups {
     audit(action=>'delete_old_backups', object_type=>'backup',
           detail=>"deleted $deleted backup(s) older than $days day(s)");
     if (@failed) {
-        redirect_to_tools(err => "$msg Could not delete: " . join(', ', @failed) . ".");
+        redirect_to_action('tool_restore', err => "$msg Could not delete: " . join(', ', @failed) . ".");
     } else {
-        redirect_to_tools(msg => $msg);
+        redirect_to_action('tool_restore', msg => $msg);
     }
 }
 
@@ -11301,7 +11267,7 @@ sub show_orphan_check {
         return;
     }
 
-    print page_head('Check for orphaned backups', $user, 'checkout');
+    print page_head('Check for orphaned backups', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned backup cleanup</a></p>\n};
     print qq{<div class="tool-section" id="orphan-check-section">\n};
@@ -11309,7 +11275,7 @@ sub show_orphan_check {
     print qq{<p class="muted">Result of <code>fetchconfig.pl -o</code>. Nothing }
         . qq{is deleted.</p>\n};
 
-    my ($output, $status, $err) = run_orphan_check();
+    my ($output, $status, $err) = run_scan_check('-o');
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
     } elsif (defined $status && $status == 0) {
@@ -11366,14 +11332,14 @@ sub do_orphan_delete {
         return;
     }
 
-    print page_head('Delete orphaned backups', $user, 'checkout');
+    print page_head('Delete orphaned backups', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_orphan') . qq{">&larr; Orphaned backup cleanup</a></p>\n};
     print qq{<div class="tool-section" id="orphan-delete-section">\n};
     print qq{<h2 class="tool-section-title">Delete orphaned backups</h2>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -o -D</code>.</p>\n};
 
-    my ($output, $status, $err) = run_orphan_delete();
+    my ($output, $status, $err) = run_scan_delete('-o');
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
     } else {
@@ -11430,7 +11396,7 @@ sub show_empty_check {
         return;
     }
 
-    print page_head('Check for empty directories', $user, 'checkout');
+    print page_head('Check for empty directories', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty directory cleanup</a></p>\n};
     print qq{<div class="tool-section" id="empty-dir-check-section">\n};
@@ -11438,7 +11404,7 @@ sub show_empty_check {
     print qq{<p class="muted">Result of <code>fetchconfig.pl -e</code>. Nothing }
         . qq{is deleted.</p>\n};
 
-    my ($output, $status, $err) = run_empty_check();
+    my ($output, $status, $err) = run_scan_check('-e');
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
     } elsif (defined $status && $status == 0) {
@@ -11494,14 +11460,14 @@ sub do_empty_delete {
         return;
     }
 
-    print page_head('Delete empty directories', $user, 'checkout');
+    print page_head('Delete empty directories', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_empty_dir') . qq{">&larr; Empty directory cleanup</a></p>\n};
     print qq{<div class="tool-section" id="empty-dir-delete-section">\n};
     print qq{<h2 class="tool-section-title">Delete empty directories</h2>\n};
     print qq{<p class="muted">Result of <code>fetchconfig.pl -e -D</code>.</p>\n};
 
-    my ($output, $status, $err) = run_empty_delete();
+    my ($output, $status, $err) = run_scan_delete('-e');
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
     } else {
@@ -11556,7 +11522,7 @@ sub show_empty_bk_check {
         print page_foot();
         return;
     }
-    print page_head('Check for empty backups', $user, 'checkout');
+    print page_head('Check for empty backups', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty backup cleanup</a></p>\n};
     print qq{<div class="tool-section" id="empty-bk-check-section">\n};
@@ -11588,7 +11554,7 @@ sub do_empty_bk_delete {
         print page_foot();
         return;
     }
-    print page_head('Delete empty backups', $user, 'checkout');
+    print page_head('Delete empty backups', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_empty_bk') . qq{">&larr; Empty backup cleanup</a></p>\n};
     print qq{<div class="tool-section" id="empty-bk-delete-section">\n};
@@ -11629,8 +11595,8 @@ sub empty_bk_result_shell {
           . qq{<p><button type="submit" class="btn">Show result</button></p></form></noscript>}
         : qq{<noscript><p><a class="btn" href="$url?action=$data_action&inline=1">Show result</a></p></noscript>};
     my $h = <<"HTML";
-<div id="ebk-result" style="min-height:22em;width:900px;max-width:100%;box-sizing:border-box;">
-  <div class="backup-overlay-box" id="ebk-spin" style="margin:1.5em auto;max-width:30em;">
+<div id="ebk-result" style="min-height:22em;width:100%;max-width:100%;box-sizing:border-box;">
+  <div class="backup-overlay-box" id="ebk-spin" style="margin:1.5em auto;width:fit-content;max-width:30em;">
     <div class="backup-spinner" aria-hidden="true"></div>
     <div class="backup-patience">Scanning all devices &mdash; please wait.</div>
   </div>
@@ -11685,7 +11651,7 @@ HTML
 sub empty_bk_result_fragment {
     my ($mode) = @_;
     my ($output, $status, $err, $aborted) = $mode eq 'delete'
-        ? run_empty_bk_delete() : run_empty_bk_check();
+        ? run_scan_delete('-Z') : run_empty_bk_check();
     $output = '' unless defined $output;
     my $found = ($output =~ /found\s+(\d+)\s+zero-byte\s+backup/i) ? $1 : undef;
 
@@ -11744,7 +11710,7 @@ sub show_empty_bk_check_data {
     # runs (see run_command_capture).
     my $inline = $cgi->param('inline') ? 1 : 0;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('Check for empty backups', $user, 'checkout') if $inline;
+    print page_head('Check for empty backups', $user, 'full') if $inline;
     my $frag;
     {
         local $RUN_KEEPALIVE = html_keepalive();
@@ -11772,7 +11738,7 @@ sub do_empty_bk_delete_data {
     # runs (see run_command_capture).
     my $inline = $cgi->param('inline') ? 1 : 0;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('Delete empty backups', $user, 'checkout') if $inline;
+    print page_head('Delete empty backups', $user, 'full') if $inline;
     my $frag;
     {
         local $RUN_KEEPALIVE = html_keepalive();
@@ -11783,6 +11749,29 @@ sub do_empty_bk_delete_data {
     } else {
         print $frag;
     }
+}
+
+################################################################################
+# redirect_to_action
+#
+# 302-redirect (Post/Redirect/Get) to ?action=$action, carrying optional msg,
+# err, username and cookie. Replaces the former per-page redirect_to_tools /
+# _setup / _editor / _reports / _logo_tool helpers, which differed only by the
+# action string.
+#
+# Parameters:
+#   $action   the action= value to redirect to
+#   %opts     optional: msg, err, username (URL-escaped), cookie (session rotation)
+################################################################################
+sub redirect_to_action {
+    my ($action, %opts) = @_;
+    my $url = script_url() . '?action=' . $action;
+    $url .= '&username=' . CGI::escape($opts{username}) if defined $opts{username} && $opts{username} ne '';
+    $url .= '&msg=' . CGI::escape($opts{msg}) if defined $opts{msg} && $opts{msg} ne '';
+    $url .= '&err=' . CGI::escape($opts{err}) if defined $opts{err} && $opts{err} ne '';
+    my @hdr = (-location => $url, -status => '302 Found');
+    push @hdr, (-cookie => $opts{cookie}) if defined $opts{cookie};
+    print std_header(@hdr);
 }
 
 ################################################################################
@@ -13090,39 +13079,6 @@ sub _verify_email_redirect {
     print std_header(-location => $url, -status => '302 Found');
 }
 
-################################################################################
-# _right_toggle_form
-#
-# A small grant/revoke toggle form for a right (edit_device_table or
-# admin_function): shows the current state as a tag and a button that
-# flips it. $action is the handler action name.
-#
-# Parameters:
-#   $action
-#   $username
-#   $has
-################################################################################
-sub _right_toggle_form {
-    my ($action, $username, $has) = @_;
-    my $new = $has ? 0 : 1;
-    my $field = ($action eq 'set_admin_right')          ? 'admin'
-              : ($action eq 'set_download_full_report') ? 'value'
-              : ($action eq 'set_download_full_config') ? 'value'
-              :                                           'edit';
-    my $h = $cgi->start_form(-method => 'POST', -action => script_url());
-    $h .= qq{<input type="hidden" name="action" value="} . esc($action) . qq{">\n};
-    $h .= qq{<input type="hidden" name="username" value="} . esc($username) . qq{">\n};
-    $h .= qq{<input type="hidden" name="$field" value="$new">\n};
-    $h .= csrf_field();
-    # Button first, then the current-state tag (per the table layout).
-    $h .= qq{<button type="submit" class="btn btn-small">}
-        . ($has ? 'Revoke' : 'Grant') . qq{</button> };
-    $h .= $has ? qq{<span class="tag-on">yes</span>}
-               : qq{<span class="tag-off">no</span>};
-    $h .= qq{\n};
-    $h .= $cgi->end_form;
-    return $h;
-}
 
 ################################################################################
 # do_change_password
@@ -13508,7 +13464,7 @@ sub do_set_edit_right {
         redirect_to_user_page(action=>"user_list", err => "User '$target' not found.");
         return;
     }
-    my ($ok, $err) = db_set_edit_flag($dbh, $target, $edit);
+    my ($ok, $err) = db_set_user_flag($dbh, $target, 'edit_device_table', $edit);
     $dbh->disconnect;
     if (!$ok) {
         redirect_to_user_page(action=>"user_list", err => "Could not update edit right: " . ($err // 'unknown error'));
@@ -13563,7 +13519,7 @@ sub do_set_admin_right {
         redirect_to_user_page(action=>"user_list", err => "User '$target' not found.");
         return;
     }
-    my ($ok, $err) = db_set_admin_flag($dbh, $target, $admin);
+    my ($ok, $err) = db_set_user_flag($dbh, $target, 'admin_function', $admin);
     $dbh->disconnect;
     if (!$ok) {
         redirect_to_user_page(action=>"user_list", err => "Could not update admin functions: " . ($err // 'unknown error'));
@@ -13614,9 +13570,9 @@ sub clear_pw_warning_if_changed {
     }
 }
 
-# =============================================================================
+################################################################################
 # Help
-# =============================================================================
+################################################################################
 
 ################################################################################
 # show_help
@@ -13703,7 +13659,7 @@ sub show_setup {
     print page_foot();
 }
 
-# =============================================================================
+################################################################################
 # Device-table editor -- option catalog + structured model
 # =============================================================================
 #
@@ -13718,6 +13674,7 @@ sub show_setup {
 # 'debug' which is on/off), int, recipients (';'-separated for email 'to'),
 # enum_timezone ('hide'), enum_tls (off/starttls/ssl),
 # enum_transport (ssh/telnet/auto), path, text.
+################################################################################
 
 # Options common to every device model (from the fetchconfig README).
 my %COMMON_OPTS = (
@@ -13975,7 +13932,7 @@ sub model_option_keys {
     return sort keys %$cat;
 }
 
-# -----------------------------------------------------------------------------
+################################################################################
 # Structured parse / serialize of the device table.
 #
 # parse_device_table() turns the raw file into an ordered list of "records",
@@ -13988,7 +13945,7 @@ sub model_option_keys {
 # Options keep file order and can repeat; the editor works on these records.
 # serialize_records() turns them back into text, so comments and anything
 # the editor doesn't model round-trip untouched.
-# -----------------------------------------------------------------------------
+################################################################################
 
 ################################################################################
 # parse_opts
@@ -14413,9 +14370,10 @@ sub slurp_device_table {
     return ($content, undef);
 }
 
+################################################################################
 # =============================================================================
 # Device-table editor -- views and save
-# =============================================================================
+################################################################################
 
 # A placeholder shown in secret fields for an existing value. If the field
 # still holds exactly this on save, the stored value is kept unchanged; any
@@ -15790,7 +15748,7 @@ sub do_save_table {
     # section (through backup_and_write_table); every early return releases it.
     my ($table_lock, $lock_err) = lock_device_table();
     unless ($table_lock) {
-        redirect_to_editor(err => "$lock_err Your changes were NOT saved.");
+        redirect_to_action('edit_table', err => "$lock_err Your changes were NOT saved.");
         return;
     }
 
@@ -15800,7 +15758,7 @@ sub do_save_table {
     my $submitted_mtime = $cgi->param('table_mtime') // '';
     my $current_mtime   = device_table_mtime();
     if ($submitted_mtime ne '' && "$current_mtime" ne "$submitted_mtime") {
-        redirect_to_editor(err =>
+        redirect_to_action('edit_table', err =>
             'The device table changed on disk since you opened the editor. '
           . 'Your changes were NOT saved. Reload the editor and redo them.');
         return;
@@ -15811,7 +15769,7 @@ sub do_save_table {
     # matches exactly what the editor was built from, so original record index
     # N ("rN") lines up with $orig[N].
     my ($content, $rerr) = slurp_device_table();
-    if ($rerr) { redirect_to_editor(err => $rerr); return; }
+    if ($rerr) { redirect_to_action('edit_table', err => $rerr); return; }
     my $orig = parse_device_table($content);
 
     my ($records, $warnings) = reconstruct_records_from_form($orig);
@@ -15832,7 +15790,7 @@ sub do_save_table {
         for my $d (@submitted_dev) {
             my $code = device_site_code($d);
             if ($code eq SITE_ALL_CODE || !$site_acc->{codes}{$code}) {
-                redirect_to_editor(err => "Device '" . (defined $d->{id} ? $d->{id} : '?')
+                redirect_to_action('edit_table', err => "Device '" . (defined $d->{id} ? $d->{id} : '?')
                     . "': you may only assign a site from your allowed list.");
                 return;
             }
@@ -15845,7 +15803,7 @@ sub do_save_table {
         }
         for my $d (@submitted_dev) {
             if (defined $d->{id} && $other_ids{ $d->{id} }) {
-                redirect_to_editor(err => "Device-id '$d->{id}' already exists "
+                redirect_to_action('edit_table', err => "Device-id '$d->{id}' already exists "
                     . "(on a device outside your sites). Device-ids must be unique.");
                 return;
             }
@@ -15877,7 +15835,7 @@ sub do_save_table {
         $vdbh->disconnect if $vdbh;
     }
     if (@$errors) {
-        redirect_to_editor(err => join('  ', @$errors));
+        redirect_to_action('edit_table', err => join('  ', @$errors));
         return;
     }
     my @records = @$records;
@@ -15892,19 +15850,19 @@ sub do_save_table {
     # invalid table never reaches disk.
     my $fc_err = validate_table_with_fetchconfig($new_content);
     if (defined $fc_err) {
-        redirect_to_editor(err => $fc_err);
+        redirect_to_action('edit_table', err => $fc_err);
         return;
     }
 
     my ($ok, $info) = backup_and_write_table($content, $new_content);
     if (!$ok) {
-        redirect_to_editor(err => $info);
+        redirect_to_action('edit_table', err => $info);
         return;
     }
     audit_device_table_changes('save_table', $orig, \@records, $user);
 
     my $note = @warnings ? '  Warnings: ' . join('  ', @warnings) : '';
-    redirect_to_editor(msg => "Device table saved. Backup: $info.$note");
+    redirect_to_action('edit_table', msg => "Device table saved. Backup: $info.$note");
 }
 
 ################################################################################
@@ -16048,11 +16006,13 @@ sub orig_option_value {
 ################################################################################
 sub _basename { my ($p) = @_; $p =~ s{.*/}{}; return $p; }
 
+################################################################################
 # Redirect back to the editor with a flash message (PRG, same pattern as the
 # user-page handlers). Messages go in the query string.
 # =============================================================================
 # Device-table backup restore (Restore device table tool, admin only)
 # =============================================================================
+################################################################################
 
 ################################################################################
 # backup_name_re
@@ -16156,52 +16116,10 @@ sub resolve_backup_path {
 }
 
 ################################################################################
-# redirect_to_tools
-#
-# Parameters:
-#   %o
-################################################################################
-sub redirect_to_tools {
-    my (%o) = @_;
-    my $url = script_url() . '?action=tool_restore';
-    $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
-    $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print std_header(-location => $url, -status => '302 Found');
-}
-
-################################################################################
-# redirect_to_editor
-#
-# Parameters:
-#   %o
-################################################################################
-sub redirect_to_editor {
-    my (%o) = @_;
-    my $url = script_url() . '?action=edit_table';
-    $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
-    $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print std_header(-location => $url, -status => '302 Found');
-}
-
-################################################################################
-# redirect_to_setup
-#
-# Redirect to the "Show device table" view with a flash message (PRG).
-#
-# Parameters:
-#   %o
-################################################################################
-sub redirect_to_setup {
-    my (%o) = @_;
-    my $url = script_url() . '?action=setup';
-    $url .= '&msg=' . CGI::escape($o{msg}) if defined $o{msg} && $o{msg} ne '';
-    $url .= '&err=' . CGI::escape($o{err}) if defined $o{err} && $o{err} ne '';
-    print std_header(-location => $url, -status => '302 Found');
-}
-
 # =============================================================================
 # Bulk Edit -- full-text edit of the DEVICES SECTION only (admin only)
 # =============================================================================
+################################################################################
 
 ################################################################################
 # devices_to_text
@@ -16471,7 +16389,7 @@ sub do_bulk_save {
     audit_device_table_changes('bulk_save', $orig, \@records, $user);
 
     my $n = scalar @$new_devices;
-    redirect_to_setup(msg => "Device list saved ($n device" . ($n == 1 ? '' : 's')
+    redirect_to_action('setup', msg => "Device list saved ($n device" . ($n == 1 ? '' : 's')
         . "). Backup: $info.");
 }
 
@@ -16502,28 +16420,6 @@ sub render_merged_default_readonly {
     return $h;
 }
 
-################################################################################
-# render_record_card_readonly
-#
-# Parameters:
-#   $r
-################################################################################
-sub render_record_card_readonly {
-    my ($r) = @_;
-    my $model = defined $r->{model} ? $r->{model} : '';
-    my $h = qq{<div class="rec-card rec-readonly">\n};
-    $h .= qq{<div class="rec-head"><strong>default:</strong> } . esc($model) . qq{</div>\n};
-    $h .= qq{<div class="opt-list">\n};
-    for my $pair (@{ $r->{opts} || [] }) {
-        my ($k, $v) = @$pair;
-        next unless defined $k;
-        $v = mask_secrets_opt($k, $v);
-        $h .= qq{<div class="opt-field"><label>} . esc($k) . qq{</label> }
-            . qq{<span class="ro-value">} . esc(defined $v ? $v : '') . qq{</span></div>\n};
-    }
-    $h .= qq{</div></div>\n};
-    return $h;
-}
 
 ################################################################################
 # mask_secrets_opt
@@ -16784,7 +16680,7 @@ sub render_record_card {
 ################################################################################
 # help_file_path
 #
-# Read $HELP_FILE as-is (an HTML fragment, not a full document) and print
+# Read help.html from WEB_DIR as-is (an HTML fragment, not a full document) and print
 # it verbatim inside this page's own chrome -- operator-authored content,
 # not user input, so it deliberately does NOT go through esc(). Falls back
 # to a built-in description if the file is missing.
@@ -16793,8 +16689,8 @@ sub render_record_card {
 #
 # Parameters: reads @_ directly
 ################################################################################
-sub help_file_path { return (defined $HELP_DIR && $HELP_DIR ne '' ? "$HELP_DIR/" : '') . $HELP_FILE; }
-sub help_doc_dir   { return defined $HELP_DIR ? $HELP_DIR : ''; }
+sub help_file_path { return (defined $WEB_DIR && $WEB_DIR ne '' ? "$WEB_DIR/" : '') . 'help.html'; }
+sub help_doc_dir   { return defined $WEB_DIR ? $WEB_DIR : ''; }
 
 ################################################################################
 # read_help_file
@@ -17762,17 +17658,19 @@ JS
 sub default_help_html {
     my $path = CGI::escapeHTML(help_file_path());
     return <<"HTML";
-<p class="error">The help page <code>$HELP_FILE</code> is not present in the
+<p class="error">The help page <code>help.html</code> is not present in the
 web server help directory.</p>
-<p>Expected at <code>$path</code>. Copy <code>$HELP_FILE</code> (and the other
+<p>Expected at <code>$path</code>. Copy <code>help.html</code> (and the other
 documentation files) from the <strong>$APP_TITLE</strong> source package into the
 help directory, then reload this page.</p>
 HTML
 }
 
+################################################################################
 # =============================================================================
 # Data access -- device table + fetchconfig.pl invocation
 # =============================================================================
+################################################################################
 
 ################################################################################
 # host_sort_key
@@ -17782,9 +17680,8 @@ HTML
 # Each device line is a run of whitespace-separated columns, e.g.:
 #     comware-ssh   switch01.acme.com   switch01.acme.com
 #     (model)       (device-id)                   (host)
-# $DEVICE_ID_FIELD (set in the config section at the top of this file)
-# picks which column (0-based) is used as the Device-ID. Blank lines,
-# '#'-comments, and directive lines are skipped. A directive line is one
+# The Device-ID is always the second column (the model is the first). Blank
+# lines, '#'-comments, and directive lines are skipped. A directive line is one
 # whose first token is a keyword ending in a colon (e.g. 'default:',
 # 'email:') -- those configure fetchconfig rather than declaring a device,
 # so they must never appear in the device list.
@@ -17842,7 +17739,7 @@ sub read_device_ids {
             ($model, $id, $host, $optstr) = ($1, $2, $3, $4);
         } else {
             my @fields = split(/\s+/, $line);
-            ($model, $id) = ($fields[0], $fields[$DEVICE_ID_FIELD]);
+            ($model, $id) = ($fields[0], $fields[1]);
             $optstr = '';
         }
         next unless defined $id && $id ne '';
@@ -17893,7 +17790,7 @@ sub find_device_table_line {
         next if $line =~ /^\s*\S+\s*:/;   # directive line (default:, email:, ...)
         $line =~ s/^\s+|\s+$//g;
         my @fields = split(/\s+/, $line);
-        my $id = $fields[$DEVICE_ID_FIELD];
+        my $id = $fields[1];
         if (defined $id && $id eq $dev) {
             close($fh);
             return ($line, undef);
@@ -17903,6 +17800,7 @@ sub find_device_table_line {
     return (undef, undef);
 }
 
+################################################################################
 # Return every global "directive" line from $DEVICE_TABLE, verbatim
 # (trimmed), in file order -- any line whose first whitespace-delimited
 # token ends in a colon: `default:` (model defaults), `email:` (backup-
@@ -17932,6 +17830,7 @@ sub find_device_table_line {
 #   { present, rc, raw, repository=>[{alias,path}], template=>[...],
 #     fetch_run=>[...], fetch_run_configured, fetch_run_disabled,
 #     alias2path=>{ kind => { '$A'=>'/p' } } }
+################################################################################
 
 ################################################################################
 # read_allowed_dirs
@@ -18290,7 +18189,7 @@ sub collapse_model_registration {
     return join("\n", @out);
 }
 
-# --------------------------------------------------------------------------
+################################################################################
 # fetchconfig version check
 #
 # fetchconfig ships its version in fetchconfig::Constants (Constants.pm). We
@@ -18298,7 +18197,7 @@ sub collapse_model_registration {
 # it against MIN_FETCHCONFIG_VERSION, and cache the answer keyed on the
 # module's path+mtime so an upgrade is picked up automatically without paying
 # the require() cost on every request.
-# --------------------------------------------------------------------------
+################################################################################
 
 ################################################################################
 # version_cmp
@@ -18391,6 +18290,7 @@ sub fetchconfig_version_cached {
     return $ver;
 }
 
+################################################################################
 # FATAL device-table problems, shown as a red banner directly below the title
 # bar on every page after login. Returns the problem text, or '' if none:
 #   - the configured DEVICE_TABLE cannot be read;
@@ -18398,6 +18298,7 @@ sub fetchconfig_version_cached {
 #     mandatory for every fetchconfig model and fetchconfig has no global
 #     fallback, so no device can be backed up, listed or shown.
 # Computed once per request ($_fatal_error_cache).
+################################################################################
 
 ################################################################################
 # fatal_error_text
@@ -18693,74 +18594,8 @@ sub device_suffix_status {
                    . ": " . ($err ne '' ? $err : $out));
 }
 
-################################################################################
-# suffix_rc_message
-#
-# Human-readable interpretation of the -s exit code, for the per-device page.
-#
-# Parameters:
-#   $rc
-################################################################################
-sub suffix_rc_message {
-    my ($rc) = @_;
-    return ('success', 'Backup suffixes are consistent and match the configured suffix (exit 0).')
-        if defined $rc && $rc == 0;
-    return ('error', 'Inconsistent backup suffixes found -- the stored backups do not all share the same suffix (exit 1). See output below.')
-        if defined $rc && $rc == 1;
-    return ('error', 'Backups are internally consistent, but their suffix does not match the configured filename_append_suffix (exit 2). See output below.')
-        if defined $rc && $rc == 2;
-    return ('error', 'Check exited with status ' . (defined $rc ? $rc : '?') . ' -- see output below.');
-}
 
 ################################################################################
-# run_check_suffix
-#
-# Run `fetchconfig.pl -s dev_id` and return its full combined transcript
-# (stderr log first, then stdout results -- same reading order as the empty
-# check), the exit status, and any fork error. Used by the per-device page.
-#
-# Parameters:
-#   $dev
-################################################################################
-sub run_check_suffix {
-    my ($dev) = @_;
-    my ($out, $err, $status, $fork_err) =
-        run_fetchconfig('-devices=' . $DEVICE_TABLE, '-s', $dev);
-    return (undef, undef, $fork_err) if $fork_err;
-
-    my $combined = '';
-    $combined .= $err if defined $err && $err ne '';
-    if (defined $out && $out ne '') {
-        $combined .= "\n" if $combined ne '' && $combined !~ /\n$/;
-        $combined .= $out;
-    }
-    return (collapse_model_registration($combined), $status, undef);
-}
-################################################################################
-# run_orphan_check
-#
-# (it scans the repository and lists device directories on disk that no
-# longer match a device in the table), so it uses the same non-sudo
-# run_fetchconfig() path as -z. Like -z, results go to stdout and the
-# progress/diagnostic log to stderr; we reassemble log-then-results so the
-# summary/result lines read last, as on a terminal. Returns
-# ($output, $status, $error).
-#
-# Parameters: none
-################################################################################
-sub run_orphan_check {
-    my ($out, $err, $status, $fork_err) =
-        run_fetchconfig('-devices=' . $DEVICE_TABLE, '-o');
-    return (undef, undef, $fork_err) if $fork_err;
-    my $combined = '';
-    $combined .= $err if defined $err && $err ne '';
-    if (defined $out && $out ne '') {
-        $combined .= "\n" if $combined ne '' && $combined !~ /\n$/;
-        $combined .= $out;
-    }
-    return (collapse_model_registration($combined), $status, undef);
-}
-
 # List the generic-model templates available to the loaded devices via
 # `fetchconfig.pl -devices=<table> -t`. Output lines look like "1 cisco",
 # "2 cisco-ios" (id number then name); "#"-prefixed summary lines are skipped.
@@ -18777,6 +18612,7 @@ sub run_orphan_check {
 #              command could not be run.
 #   rows : [ { section, path, model, dir } ]
 #   raw  : combined stdout+stderr, for display when rc is 1 or 2.
+################################################################################
 
 ################################################################################
 # run_templates_t
@@ -19155,17 +18991,19 @@ sub _atomic_copy_file {
 }
 
 ################################################################################
-# run_empty_check
+# run_scan_check
 #
-# Empty-directory check: `fetchconfig.pl -devices=<table> -e`. Read-only; lists
-# empty date/device directories in the repository. Like -o, it exits 0 when
-# none are found and 1 when some are (an expected result, not an error).
+# Run a read-only fetchconfig scan ($flag: -o orphaned, -e empty dirs) and
+# return (combined_output, exit_status, fork_err). Merges run_orphan_check /
+# run_empty_check, which differed only by the flag.
 #
-# Parameters: none
+# Parameters:
+#   $flag   the fetchconfig scan flag (e.g. "-o" or "-e")
 ################################################################################
-sub run_empty_check {
+sub run_scan_check {
+    my ($flag) = @_;
     my ($out, $err, $status, $fork_err) =
-        run_fetchconfig('-devices=' . $DEVICE_TABLE, '-e');
+        run_fetchconfig('-devices=' . $DEVICE_TABLE, $flag);
     return (undef, undef, $fork_err) if $fork_err;
     my $combined = '';
     $combined .= $err if defined $err && $err ne '';
@@ -19175,40 +19013,23 @@ sub run_empty_check {
     }
     return (collapse_model_registration($combined), $status, undef);
 }
-################################################################################
-# run_orphan_delete
-#
-# deletes orphaned device directories in the repository, so -- like Backup
-# Now -- it runs through sudo (the web-server user typically can't write the
-# repository directly). fetchconfig deletes each file with its own
-# unlink()/rmdir() (no shell, no wildcards) and logs "rm <file>" / "rmdir
-# <path>" to stderr; the tab-separated listing stays on stdout. We merge the
-# two streams (via run_command_capture) so the full transcript -- what was
-# found and what was removed -- is shown together, exactly like a Backup Now
-# run. Returns ($output, $status, $error).
-#
-# Parameters: none
-################################################################################
-sub run_orphan_delete {
-    my @cmd = $USE_SUDO_FOR_BACKUP_NOW
-        ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-o', '-D')
-        : ($FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-o', '-D');
-    return run_command_capture(@cmd);
-}
 
 ################################################################################
-# run_empty_delete
+# run_scan_delete
 #
-# Empty-directory DELETE: `fetchconfig.pl -devices=<table> -e -D`. Writes into
-# the repository, so it runs via sudo -n when USE_SUDO_FOR_BACKUP_NOW is set,
-# exactly like the orphaned-backup delete.
+# Run a destructive fetchconfig cleanup ($flag: -o orphaned, -e empty dirs,
+# -Z empty backups) with -D, via sudo when USE_SUDO_FOR_BACKUP_NOW. Merges
+# run_orphan_delete / run_empty_delete / run_empty_bk_delete, which differed
+# only by the flag. The sudo command-building now lives in ONE place.
 #
-# Parameters: none
+# Parameters:
+#   $flag   the fetchconfig scan flag (e.g. "-o", "-e", "-Z")
 ################################################################################
-sub run_empty_delete {
+sub run_scan_delete {
+    my ($flag) = @_;
     my @cmd = $USE_SUDO_FOR_BACKUP_NOW
-        ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-e', '-D')
-        : ($FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-e', '-D');
+        ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, $flag, '-D')
+        : ($FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, $flag, '-D');
     return run_command_capture(@cmd);
 }
 
@@ -19224,22 +19045,6 @@ sub run_empty_delete {
 ################################################################################
 sub run_empty_bk_check {
     return run_command_capture($FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-Z');
-}
-
-################################################################################
-# run_empty_bk_delete
-#
-# Empty-BACKUP DELETE: `fetchconfig.pl -devices=<table> -Z -D`. Removes the
-# zero-byte backup files; writes into the repository, so it uses sudo when
-# USE_SUDO_FOR_BACKUP_NOW is set.
-#
-# Parameters: none
-################################################################################
-sub run_empty_bk_delete {
-    my @cmd = $USE_SUDO_FOR_BACKUP_NOW
-        ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-Z', '-D')
-        : ($FETCHCONFIG_BIN_FULL, '-devices=' . $DEVICE_TABLE, '-Z', '-D');
-    return run_command_capture(@cmd);
 }
 
 ################################################################################
@@ -19608,9 +19413,11 @@ sub sweep_stale_backup_tables {
     closedir($dh);
 }
 
+################################################################################
 # =============================================================================
 # Output sanitization
 # =============================================================================
+################################################################################
 
 ################################################################################
 # mask_secrets
@@ -19683,6 +19490,13 @@ sub mask_secrets {
     # Scoped to a line whose only content is "key <value>" to avoid touching
     # other "key ..." commands.
     $text =~ s/^(\s+key\s+)(\S+)\s*$/$1?***?/gim;
+    # Cisco IOS hashed secrets: "secret <type> <hash>" / "password <type> <hash>"
+    # where <type> is a single encoding digit (0 plaintext, 5 MD5, 7 Vigenere,
+    # 8 PBKDF2, 9 scrypt, ...). Covers "enable secret 9 ...", "username X secret
+    # 9 ...", "username X password 7 ...". The keyword and type stay visible; only
+    # the hash is masked. \b before the keyword avoids hyphenated words
+    # (password-policy, secret-key) and the digit requirement avoids prose.
+    $text =~ s/\b(secret|password)\s+(\d)\s+(\S+)/$1 $2 ?***?/gi;
     return $text;
 }
 
@@ -19850,6 +19664,13 @@ sub page_head {
     my $main_attr = (defined $main_class && $main_class ne '')
         ? qq{ class="} . esc($main_class) . qq{"} : '';
 
+    # External stylesheet: BASE_URL + CSS_BASE_URL + the file, cache-busted by
+    # the running version so each release is picked up without a hard reload.
+    # BASE_URL/CSS_BASE_URL are validated URL paths (read_config) with trailing
+    # slashes stripped, so joining with '/' yields a clean absolute URL path
+    # that the browser merges with the site FQDN.
+    my $css_href = esc("$BASE_URL$CSS_BASE_URL/fetchconfig-web.css?v=" . APP_VERSION);
+
     # The menu and user/logout controls only make sense once logged in;
     # show_login_form() calls page_head() with no $user, so the title bar
     # is just the logo/name there.
@@ -19936,7 +19757,7 @@ sub page_head {
                 $su->('Verify email setup',                          '?action=tool_verify_email'),
                 $su->('Templates',                                    '?action=view_templates'),
                 $su->('Upload report logo',                           '?action=tool_logo'),
-                $su->('View fetchconfig log',                         '?action=view_log'));
+                $su->('View last fetchconfig schedule log',           '?action=view_log'));
         }
 
         # User: Change your password for all; admin extras. Each is its own page.
@@ -19958,7 +19779,7 @@ sub page_head {
             my ($label, $file) = @_;
             return () unless $hdir ne '' && -r "$hdir/$file";
             # Static documents open in a NEW tab (the Help page itself does not).
-            my $href = esc("$HELP_BASE_URL/$file");
+            my $href = esc("$BASE_URL/$file");
             return qq{<a role="menuitem" href="$href" target="_blank" rel="noopener">}
                  . esc($label) . qq{</a>};
         };
@@ -20055,8 +19876,21 @@ sub page_head {
                 . qq{ <a href="$user_page">Change password</a></div>};
         }
 
-        # First non-empty by priority.
-        ($warn_banner) = grep { $_ ne '' } ($fatal, $version, $external, $pwnag);
+        # Config-sanity: the stylesheet is now an external file served from
+        # WEB_DIR via CSS_BASE_URL. If it is not on disk where WEB_DIR expects
+        # it, every page is unstyled -- a serious misconfiguration -- so show a
+        # prominent red banner pointing at the config file. WEB_DIR is the
+        # on-disk root; CSS_BASE_URL is the (URL and on-disk) sub-path.
+        my $css_cfg = '';
+        if (defined $WEB_DIR && $WEB_DIR ne ''
+            && ! -f "$WEB_DIR$CSS_BASE_URL/fetchconfig-web.css") {
+            $css_cfg = qq{<div class="fatal-error"><strong>}
+                . qq{Your fetchconfig-web directories are not configured correctly, }
+                . qq{check your } . esc($CONFIG_FILE) . qq{</strong></div>};
+        }
+
+        # First non-empty by priority (CSS misconfig outranks the rest).
+        ($warn_banner) = grep { $_ ne '' } ($css_cfg, $fatal, $version, $external, $pwnag);
         $warn_banner = '' unless defined $warn_banner;
     }
 
@@ -20066,7 +19900,7 @@ sub page_head {
     # have no backdrop.
     my $body_class = defined $user ? 'app-body' : 'login-body';
     my $backdrop_css = defined $user ? '' : qq{
-  body.login-body { background: #23303d url('$IMAGE_BASE_URL/back.jpg') center center / cover no-repeat fixed;
+  body.login-body { background: #23303d url('$BASE_URL$IMAGE_BASE_URL/back.jpg') center center / cover no-repeat fixed;
                     min-width: 0; }
   /* The login page must fit the viewport without scrollbars (down to
      1024x768). The body is a full-height flex column (header, main, footer);
@@ -20087,634 +19921,8 @@ sub page_head {
 <head>
 <meta charset="UTF-8">
 <title>$t</title>
-<style>
-$backdrop_css
-  /* Sticky footer: the body is a full-height flex column so the footer sits at
-     the bottom of the viewport on short pages, and after the content (reached
-     by scrolling) on long pages. */
-  html { min-height: 100%; }
-  /* The page never renders below 900px wide: the body itself carries the
-     min-width so, when the viewport is narrower, the WHOLE page (header,
-     content, footer) stays 900px and the window scrolls horizontally instead
-     of clipping the content. (The login page opts out below.) */
-  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
-         margin: 0; background: #f4f5f7; color: #222;
-         display: flex; flex-direction: column; min-height: 100vh;
-         min-width: 900px; box-sizing: border-box; }
-  body > main { flex: 1 0 auto; align-self: stretch; }
-  body > footer.app-footer { flex: 0 0 auto; margin-top: auto; }
-  header.app-titlebar { display: flex; align-items: center; gap: 1.4em;
-               background: #fff; border-bottom: 1px solid #ddd; padding: 0.6em 1em;
-               position: relative; z-index: 200; }
-  .app-titlebar-brand { display: flex; align-items: center; gap: 0.6em; }
-  header.app-titlebar img { width: 32px; height: 32px; border-radius: 6px; display: block; }
-  header.app-titlebar .app-name { font-size: 1.15em; font-weight: 600; color: #23303d; }
-  nav.menu { display: flex; align-items: center; gap: 1.1em; }
-  nav.menu a.menu-flat { color: #1a5fb4; text-decoration: none; font-weight: 500; font-size: 0.95em; }
-  nav.menu a.menu-flat:hover { text-decoration: underline; }
-  /* Application-style dropdown menus in the title bar. */
-  .menu-group { position: relative; }
-  .menu-trigger { background: none; border: none; cursor: pointer; font: inherit;
-    color: #1a5fb4; font-weight: 500; font-size: 0.95em; padding: 0.2em 0.1em;
-    display: inline-flex; align-items: center; gap: 0.25em; }
-  .menu-trigger:hover .menu-label { text-decoration: underline; }
-  .menu-caret { font-size: 0.7em; opacity: 0.8; text-decoration: none; }
-  .menu-dropdown { display: none; position: absolute; top: 100%; left: 0; z-index: 1000;
-    min-width: 13em; margin-top: 0.3em; background: #fff; border: 1px solid #cdeede;
-    border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.14); padding: 0.3em 0; }
-  .menu-group.open .menu-dropdown { display: block; }
-  .menu-dropdown a { display: block; padding: 0.45em 1.1em; color: #1a5fb4;
-    text-decoration: none; font-size: 0.93em; white-space: nowrap; }
-  .menu-dropdown a:hover { background: #e8faf1; text-decoration: none; }
-  .user-info { margin-left: auto; color: #555; font-size: 0.9em; white-space: nowrap; }
-  .user-info a { color: #1a5fb4; text-decoration: none; }
-  .user-info a:hover { text-decoration: underline; }
-  .logout-form { display: inline; margin: 0; }
-  .linkbtn { background: none; border: none; padding: 0; margin: 0; cursor: pointer;
-             color: #1a5fb4; font: inherit; text-decoration: none; }
-  .linkbtn:hover { text-decoration: underline; }
-  footer.app-footer { text-align: center; color: #888; font-size: 0.8em;
-               padding: 1.5em 1em; }
-  /* Shown only when the viewport is narrower than the 900px minimum, warning
-     that part of the page is off-screen (reachable by scrolling right). */
-  .narrow-warning { display: none; }
-  \@media (max-width: 900px) {
-    .narrow-warning { display: block; position: sticky; left: 0;
-      background: #fbe9e7; color: #b00020; border-bottom: 1px solid #f0b4ab;
-      padding: 0.5em 1em; font-size: 0.9em; font-weight: 500;
-      width: 100vw; box-sizing: border-box; }
-  }
-  /* Never let the content shrink below 900px: on a narrower window the body
-     gets a horizontal scrollbar instead of the content being cut off. Above
-     900px (full pages) the content grows to fill the window. */
-  html, body { overflow-x: auto; }
-  main { max-width: 900px; box-sizing: border-box;
-         margin: 2em auto; padding: 0 1em; }
-  /* The side-by-side compare page opts into a wider column so two 90-char
-     config panes can sit next to each other; normal pages stay at 900px
-     for readable line lengths. Capped so it still centres on very wide
-     monitors rather than stretching edge to edge. */
-  main.wide { max-width: 1600px; }
-  /* Check-result pages (empty / suffix backup checks): ~30% wider than the
-     default 900px so the tool output box needs less horizontal scrolling,
-     while still narrowing to fit smaller browser canvases. */
-  main.checkout { max-width: 1170px; }
-  /* The Devices page uses the full browser width -- its table plus the
-     statistics box benefit from all the horizontal space. The 5% side
-     padding gives the "5% free" margins on the left and right for all of the
-     page content (heading, filters, table, stats). */
-  main.full { max-width: none; margin: 2em 0; padding: 0 5%; }
-  /* Help page: 80% of the screen width (centred), with a sensible cap so the
-     text measure stays readable on very wide monitors. */
-  main.help80 { max-width: 80%; width: 80%; margin: 2em auto; padding: 0 1em; }
-  h1 { font-size: 1.4em; }
-  table.list { border-collapse: collapse; width: 100%; background: #fff; }
-  table.list th, table.list td { border: 1px solid #ddd; padding: 0.3em 0.5em; text-align: left; white-space: nowrap; }
-  table.list th { background: #eaecef; }
-  table.list tr:hover td { background: #f0f6ff; }
-  table.list a { color: #1a5fb4; text-decoration: none; }
-  table.list a:hover { text-decoration: underline; }
-  /* table.list a (above) otherwise wins on specificity over .btn's own
-     color, which would leave an <a class="btn"> inside a table.list
-     rendered in the same blue as its own background -- unreadable. */
-  table.list a.btn, table.list a.btn:hover { color: #fff; text-decoration: none; }
-  pre.config { background: #1e1e1e; color: #d4d4d4; padding: 1em; overflow-x: auto;
-               font-family: Consolas, Menlo, "Courier New", monospace; font-size: 0.9em;
-               border-radius: 4px; white-space: pre; }
-  .config-wrap { position: relative; margin-bottom: 3.5em; }
-  .copy-btn { position: absolute; top: 0.6em; right: 0.6em; display: flex;
-              align-items: center; gap: 0.35em; background: rgba(255,255,255,0.08);
-              border: 1px solid rgba(255,255,255,0.3); color: #d4d4d4; border-radius: 4px;
-              padding: 0.35em 0.6em; font-size: 0.85em; cursor: pointer; }
-  .copy-btn:hover { background: rgba(255,255,255,0.18); }
-  .copy-btn svg { width: 14px; height: 14px; fill: currentColor; }
-  /* Unified diff coloring: sits on the same dark pre.config background as
-     a plain config view, so additions/removals read against it. */
-  pre.config .d-add { color: #6ee787; }
-  pre.config .cfg-comment { color: #6ee787; }
-  pre.config .cfg-comment-danger { color: #ff7b72; font-weight: 700; }
-  .dir-alias-path { margin-left: 0.4em; }
-  .dir-alias-warn { margin-left: 0.4em; font-weight: 600; }
-  .fr-cmd { margin-left: 0.4em; }
-  .opt-hint { margin-left: 0.4em; font-size: 0.9em; }
-  pre.config .d-del { color: #ff7b72; }
-  pre.config .d-hunk { color: #79c0ff; }
-  /* Syntax highlighting (backup content view). Dark-theme palette on the
-     same #1e1e1e config background. Token classes come from the per-model
-     highlighters (see highlight_config); adding a model reuses these. */
-  pre.config.hl .hl-comment { color: #7f8c98; font-style: italic; }
-  pre.config.hl .hl-kw      { color: #79c0ff; }
-  pre.config.hl .hl-iface   { color: #c07cff; }
-  pre.config.hl .hl-ip      { color: #7ee787; }
-  pre.config.hl .hl-num     { color: #f0b866; }
-  pre.config.hl .hl-string  { color: #a5d6ff; }
-  /* Template state-machine verbs (Tools -> Template viewer). */
-  pre.config.hl .hl-tgreen  { color: #56d364; }               /* expect */
-  pre.config.hl .hl-tred    { color: #ff7b72; }               /* send* */
-  pre.config.hl .hl-tpurple { color: #d2a8ff; }               /* goto, done */
-  pre.config.hl .hl-tdir    { color: #39c5cf; }               /* directives */
-  pre.config.hl .hl-tstate  { color: #79c0ff; font-weight: 700; } /* state names */
-  /* Template editor split view */
-  .tpl-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5em; margin: 0 0 0.6em; }
-  .tpl-title { margin: 0.2em 0 0.4em; }
-  .tpl-title .tpl-path { font-weight: normal; font-size: 0.7em; }
-  .tpl-dirty { color: #c0362c; font-weight: 700; }
-  .tpl-info { cursor: help; color: #0075be; margin-left: 0.3em; }
-  .tpl-model-warn { margin-left: 0.4em; font-weight: 600; }
-  /* Tighten the result box so the panes sit right under it. */
-  .tpl-edit-form .config-wrap { margin: 0.4em 0; }
-  .tpl-edit-form .config-wrap p { margin: 0.2em 0; }
-  .tpl-split { display: flex; gap: 1em; align-items: stretch; margin: 0.4em 0 0; }
-  .tpl-pane { flex: 1 1 50%; min-width: 0; display: flex; flex-direction: column; }
-  .tpl-pane-title { font-family: var(--font-head, inherit); font-weight: 700; color: #23303d;
-                    margin: 0 0 0.35em; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.85em; }
-  .tpl-editor { width: 100%; height: 60vh; box-sizing: border-box; resize: vertical;
-                font-family: Consolas, Menlo, "Courier New", monospace; font-size: 0.9em;
-                line-height: 1.4; padding: 1em; border: 1px solid #ccc; border-radius: 4px;
-                background: #1e1e1e; color: #d4d4d4; white-space: pre; overflow: auto; }
-  .tpl-preview { height: 60vh; margin: 0; overflow: auto; box-sizing: border-box; }
-  \@media (max-width: 860px) { .tpl-split { flex-direction: column; } .tpl-editor, .tpl-preview { height: 40vh; } }
-  /* Side-by-side diff: a light two-column table matching the app's other
-     list tables. Each side is monospaced; changed/added/removed rows are
-     tinted, and a per-row gutter shows the source line number. */
-  /* Scroll container for the side-by-side table: bounded to the page
-     column width (max-width:100%) so the table -- which is deliberately
-     wider than 900px -- scrolls horizontally *inside this box* instead of
-     overflowing the page and clipping the right-hand column. */
-  .sbs-scroll { max-width: 100%; overflow-x: auto; }
-  /* Size the table to its own (wide) columns rather than squeezing into the
-     available width; the surrounding .sbs-scroll wrapper scrolls it if the
-     viewport is narrower than the two panes.
-     Each text column is 92ch: 90 characters of monospace content plus room
-     for the 0.6em horizontal cell padding, so config lines up to 90 chars
-     wide never wrap. Longer lines still wrap (pre-wrap) within the column. */
-  table.sbs { border-collapse: collapse; width: max-content; table-layout: fixed;
-              background: #fff;   /* white base so the green tool-section box does
-                                     not bleed through and mute the diff colours */
-              font-family: Consolas, Menlo, "Courier New", monospace; font-size: 0.85em; }
-  table.sbs col.gutter { width: 3.5em; }
-  table.sbs col.side { width: 92ch; }
-  table.sbs th { background: #eaecef; border: 1px solid #ddd; padding: 0.4em 0.6em;
-                 text-align: left; font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; }
-  table.sbs td { border: 1px solid #e3e3e3; padding: 0.1em 0.6em; vertical-align: top;
-                 background: #fff;   /* explicit white; the d-add/d-del/d-chg rules override */
-                 white-space: pre-wrap; word-break: break-all; }
-  table.sbs td.ln { text-align: right; color: #999; background: #f6f8fa; white-space: nowrap;
-                    user-select: none; -webkit-user-select: none; }
-  table.sbs tr.d-add td.txt { background: #e6ffec; }
-  table.sbs tr.d-del td.txt { background: #ffebe9; }
-  table.sbs tr.d-chg td.txt { background: #fff8c5; }
-  table.sbs td.empty { background: #fafbfc; }
-  .diff-legend { font-size: 0.85em; color: #555; margin: 0.4em 0 0.8em; }
-  .diff-legend .sw { display: inline-block; width: 0.9em; height: 0.9em; border: 1px solid #ccc;
-                     vertical-align: middle; margin: 0 0.2em 0 0.8em; border-radius: 2px; }
-  .diff-legend .sw-add { background: #e6ffec; }
-  .diff-legend .sw-del { background: #ffebe9; }
-  .diff-legend .sw-chg { background: #fff8c5; }
-  .diff-legend .sw-uni-add { background: #6ee787; }
-  .diff-legend .sw-uni-del { background: #ff7b72; }
-  .login-box { position: relative; max-width: 320px; margin: 4em auto; background: #fff; padding: 2em;
-               border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,0.15); }
-  .login-forgot { margin: 0.8em 0 0; font-size: 0.9em; }
-  .inline-email-form { display: inline-flex; gap: 0.3em; align-items: center; margin: 0; }
-  .inline-email-form input[type=text] { width: 16em; }
-  table.list td.user-email-cell { white-space: nowrap; }
-  .login-icon { position: absolute; top: 1em; right: 1em; width: 100px; height: 100px; }
-  /* Reserve space for the top-right icon: the heading clears it horizontally,
-     and the form starts below it so it never overlaps the first field. The
-     icon is 100px tall at top:1em, so ~7em of clearance from the box top. */
-  .login-box h1 { margin: 0; min-height: 100px; padding-right: 112px; }
-  /* Pages that reuse the white card but have no top-right icon (forgot /
-     reset password) don't need the icon clearance. */
-  .login-box.no-icon h1 { min-height: 0; padding-right: 0; margin-bottom: 0.5em; }
-  .login-box label { display: block; margin: 0.8em 0 0.2em; font-size: 0.9em; }
-  .login-box input[type=text], .login-box input[type=password] {
-      width: 100%; box-sizing: border-box; padding: 0.4em; margin-top: 0.2em; }
-  .login-box input[type=submit] { margin-top: 1.2em; padding: 0.5em 1em; }
-  .error { color: #b00020; }
-  .login-notice { color: #1a5fb4; background: #eaf2fb; border: 1px solid #9bc3e6;
-                  border-radius: 4px; padding: 0.5em 0.7em; font-size: 0.9em; }
-  /* .btn is used on both <button> and <a>; normalise the box model so the two
-     render at exactly the same height (buttons otherwise carry UA line-height
-     and font defaults that make them a bit taller/shorter than links). */
-  .btn { display: inline-block; background: #1a5fb4; color: #fff; border: none;
-         border-radius: 4px; padding: 0.5em 1em; font-size: 0.95em; cursor: pointer;
-         text-decoration: none; white-space: nowrap; box-sizing: border-box;
-         font-family: inherit; line-height: 1.2; vertical-align: middle;
-         text-align: center; }
-  .btn:hover { background: #164a8f; }
-  .action-row { display: flex; align-items: center; gap: 0.6em; margin: 0.8em 0; }
-  /* Backup Now spinner overlay */
-  #backup-overlay, .backup-overlay { position: fixed; inset: 0; z-index: 200;
-                    background: rgba(20,30,40,0.6);
-                    display: flex; align-items: center; justify-content: center; }
-  /* Custom confirmation dialog -- same look as the spinner box. */
-  .fc-modal { position: fixed; inset: 0; z-index: 300; background: rgba(20,30,40,0.6);
-              display: flex; align-items: center; justify-content: center; }
-  /* Device-note paper icon: outline by default, slightly brighter when a note
-     exists (has-note). It is a bare button so it sits inline in tables/headings. */
-  /* The paper-note emoji has its own baseline offset, so an inline button sits
-     low and off-centre. Make the button a flex box centred on both axes, and
-     size it to a square so the glyph lands dead-centre in the Note column. */
-  .note-icon { display: inline-flex; align-items: center; justify-content: center;
-               width: 1.6em; height: 1.6em; background: none; border: none;
-               cursor: pointer; font-size: 1.05em; line-height: 1; padding: 0;
-               opacity: 0.45; vertical-align: middle; }
-  .note-icon:hover { opacity: 0.9; }
-  .note-icon.has-note { opacity: 1; }
-  td.note-cell { text-align: center; width: 2.2em; }
-  /* In the "Backups for <device>" heading the icon follows the h1 text; nudge
-     it onto the text's optical centre. */
-  h1 .note-icon { vertical-align: 0.05em; }
-  .fc-note-box { width: 32em; max-width: 92vw; max-height: 90vh; overflow: auto; text-align: left; }
-  .fc-note-title { margin: 0 0 0.2em; }
-  .fc-note-dev { margin: 0 0 0.6em; font-family: monospace; }
-  .fc-note-text { width: 100%; box-sizing: border-box; font-family: monospace; font-size: 0.9em;
-                  resize: vertical; max-height: 55vh; min-height: 6em; }
-  .fc-note-keep { display: block; margin: 0.5em 0; font-size: 0.9em; }
-  .fc-note-status { min-height: 1.2em; margin: 0.2em 0 0.6em; font-size: 0.85em; }
-  .fc-modal-box { background: #fff; border-radius: 10px; padding: 1.8em 2em 1.5em;
-                  box-shadow: 0 8px 30px rgba(0,0,0,0.3); max-width: min(90vw, 440px); text-align: left; }
-  .fc-modal-msg { margin: 0; font-size: 1.05em; color: #16232e; line-height: 1.5; }
-  .fc-modal-row { display: flex; align-items: flex-start; gap: 0.9em; margin: 0 0 1.3em; }
-  .fc-modal-icon { flex: 0 0 auto; line-height: 0; margin-top: 0.05em; }
-  .fc-modal-icon svg { display: block; }
-  /* Show the check by default (normal), the triangle when the dialog is danger. */
-  .fc-modal .fc-icon-danger { display: none; }
-  .fc-modal.fc-danger .fc-icon-danger { display: inline-block; }
-  .fc-modal.fc-danger .fc-icon-normal { display: none; }
-  .fc-modal-actions { display: flex; justify-content: flex-end; gap: 0.7em; }
-  .fc-btn-cancel { background: #e7e9ec; color: #333; }
-  .fc-btn-cancel:hover { background: #d7dade; }
-  .backup-overlay-box { background: #fff; border-radius: 10px; padding: 2em 2.6em;
-                        box-shadow: 0 8px 30px rgba(0,0,0,0.3); text-align: center;
-                        max-width: 90vw; }
-  .backup-spinner { width: 3em; height: 3em; margin: 0 auto 0.8em;
-                    border: 0.35em solid #d7e5f2; border-top-color: #1a5fb4;
-                    border-radius: 50%; animation: fcspin 0.9s linear infinite; }
-  \@keyframes fcspin { to { transform: rotate(360deg); } }
-  .backup-elapsed { font-size: 2.4em; font-weight: 700; color: #16232e; line-height: 1.1; }
-  /* Last-run status lines: 1/4 of the counter's font size; labels black,
-     values coloured by their class below. */
-  .backup-laststats { font-size: 1.2em; color: #000; margin-top: 0.6em; line-height: 1.5; }
-  .backup-laststats .st-success   { color: #178a3a; }   /* green  */
-  .backup-laststats .st-failed    { color: #c00; }      /* red    */
-  .backup-laststats .st-skipped   { color: #000; }      /* black  */
-  .backup-laststats .ch-unchanged { color: #178a3a; }   /* green  */
-  .backup-laststats .ch-changed   { color: #1a5fb4; }   /* blue   */
-  .backup-laststats .ch-forced    { color: #1a5fb4; }   /* blue   */
-  .backup-laststats .ch-unknown   { color: #000; }      /* black  */
-  .backup-patience { margin-top: 0.9em; color: #8a4b00; font-size: 0.98em; white-space: nowrap; }
-  /* Status page: State + Changed cell colours (per spec). Labels/values are
-     plain except these. */
-  #status-table .st-success { color: #178a3a; }   /* green */
-  #status-table .st-failed  { color: #c00; }       /* red   */
-  #status-table .st-skipped { color: #1a5fb4; }    /* blue  */
-  #status-table .st-na      { color: #888; }       /* N/A muted */
-  #status-table .ch-unchanged { color: inherit; }  /* normal text */
-  #status-table .ch-changed { color: #1a5fb4; }    /* blue  */
-  #status-table .ch-forced  { color: #1a5fb4; }    /* blue  */
-  #status-table .ch-unknown { color: #c00; }       /* red   */
-  #status-table .ch-na      { color: #888; }       /* N/A muted */
-  .dev-filter-row { display: flex; align-items: center; gap: 0.8em; margin: 0.8em 0; flex-wrap: wrap; }
-  .filter-label { font-size: 0.9em; color: #555; display: flex; align-items: center; gap: 0.4em; }
-  .action-row form { margin: 0; }
-  .filter-box { width: 100%; box-sizing: border-box; padding: 0.5em 0.7em; margin: 0.8em 0;
-                font-size: 0.95em; border: 1px solid #ccc; border-radius: 4px; }
-  .filter-box:focus { outline: none; border-color: #1a5fb4; }
-  .filter-row { display: flex; align-items: center; gap: 0.6em; margin: 0.8em 0; flex-wrap: wrap; }
-  .filter-row .filter-box { flex: 1 1 12em; margin: 0; }
-  .filter-row .filter-select { flex: 0 1 16em; padding: 0.5em 0.7em; font-size: 0.95em;
-                               border: 1px solid #ccc; border-radius: 4px; background: #fff; }
-  .filter-row .filter-select:focus { outline: none; border-color: #1a5fb4; }
-  .filter-row .btn { flex: 0 0 auto; }
-  .filter-row .page-size-label { flex: 0 0 auto; font-size: 0.9em; color: #555; display: flex; align-items: center; gap: 0.4em; }
-  .filter-row .page-size-label .filter-select { flex: 0 0 auto; }
-  table.list th.sortable { cursor: pointer; user-select: none; -webkit-user-select: none; }
-  table.list th.sortable:hover { background: #dfe3e8; }
-  table.list th .sort-ind { color: #1a5fb4; font-size: 0.9em; }
-  .no-match { color: #888; font-style: italic; }
-  .success { color: #1a7f37; }
-  .muted { color: #888; font-style: italic; }
-  .btn-danger { background: #b00020; }
-  .btn-danger:hover { background: #8c0019; }
-  .btn-green { background: #66bb6a; }
-  .btn-green:hover { background: #549d58; }
-  .btn-gray { background: #8a9199; }
-  .btn-gray:hover { background: #737b83; }
-  .breadcrumb { display: flex; align-items: center; gap: 0.5em; margin: 0 0 1em 0; }
-  .breadcrumb .sep { color: #888; }
-  main h2 { font-size: 1.1em; margin-top: 1.8em; }
-  /* User edit page: grouped fieldsets, a bounded wrapped site-access summary,
-     and a right-aligned action row. */
-  .ue-group { border: 1px solid #d0d7de; border-radius: 6px; margin: 0 0 1.1em;
-              padding: 0.6em 1em 0.9em; max-width: 640px; }
-  .ue-group legend { font-weight: 600; color: #24292f; padding: 0 0.4em; }
-  .ue-field { display: inline-flex; align-items: baseline; gap: 0.6em; }
-  .ue-label { display: inline-block; min-width: 6.5em; color: #57606a; }
-  .ue-ro { font-family: monospace; }
-  .ue-hint { font-size: 0.85em; }
-  .ue-sites-wrap { margin: 0.2em 0 0.6em; }
-  .ue-sites-cell { display: inline-block; max-width: 600px; padding: 0.4em 0.6em;
-                   border: 1px solid #d0d7de; border-radius: 4px; background: #f6f8fa;
-                   white-space: normal; word-break: break-word; line-height: 1.5; }
-  .ue-actions { display: flex; justify-content: flex-end; gap: 0.8em;
-                max-width: 640px; margin-top: 0.4em; }
-  #ue-subrights { margin-left: 1.6em; }
-  .form-narrow { max-width: 360px; }
-  .form-narrow label { display: block; margin: 0.8em 0 0.2em; font-size: 0.9em; }
-  .form-narrow input[type=text], .form-narrow input[type=password] {
-      width: 100%; box-sizing: border-box; padding: 0.4em; margin-top: 0.2em; }
-  table.list form { margin: 0; }
-  .pw-warning { background: #ffe9a8; border-bottom: 1px solid #e6c34d; color: #6b5200;
-                padding: 0.6em 1em; font-size: 0.9em; }
-  .pw-warning a { color: #1a5fb4; }
-  /* Device table changed outside the application: prominent amber bar. */
-  .ext-change-warning { background: #fff3cd; border-bottom: 2px solid #e0a800; color: #7a5c00;
-                        padding: 0.6em 1em; font-size: 0.9em; }
-  .ext-change-warning a { color: #1a5fb4; }
-  /* Show fetchconfig-web.cfg: header, lighter group rows, white data rows;
-     invalid in red, nonexistent in gray, defaults always gray. */
-  table.cfg-view { width: 100%; }
-  table.cfg-view th { background: #d3dae3; }
-  table.cfg-view td { vertical-align: top; }
-  table.cfg-view td.cfg-st { min-width: 7em; }
-  table.cfg-view td.cfg-def, table.cfg-view td.cfg-range { white-space: normal; min-width: 9em; }
-  table.cfg-view tr.cfg-group td, table.cfg-view tr.cfg-group:hover td
-        { background: #eef1f5; font-weight: 600; }
-  table.cfg-view tr.cfg-invalid td.cfg-st, table.cfg-view tr.cfg-invalid td.cfg-key,
-  table.cfg-view tr.cfg-invalid td.cfg-val { color: #c0362c; font-weight: 600; }
-  table.cfg-view tr.cfg-nonexistent td { color: #999; }
-  table.cfg-view td.cfg-def { color: #888; }
-  table.cfg-view .cfg-note { font-size: 0.85em; font-weight: normal; color: #777;
-        white-space: normal; max-width: 22em; }
-  table.cfg-view .cfg-empty { color: #999; font-style: italic; font-weight: normal; }
-  .cfg-count-invalid { color: #c0362c; font-weight: 600; }
-  /* FATAL device-table problem: solid red bar, first below the title bar. */
-  .fatal-error { background: #c0362c; border-bottom: 2px solid #7a1c14; color: #fff;
-                 padding: 0.8em 1em; font-size: 1.05em; text-align: center; }
-  /* fetchconfig too-old / undetermined: a prominent red bar. */
-  .version-warning { background: #ffddd6; border-bottom: 2px solid #c0362c; color: #7a1c14;
-                     padding: 0.8em 1em; font-size: 1.02em; text-align: center; }
-  .version-warning code { background: rgba(0,0,0,0.06); padding: 0 0.3em; border-radius: 3px; }
-  /* Match the yes/no tag box to the small button height: same font size and
-     vertical padding, aligned on the same middle line. */
-  .tag-on, .tag-off { display: inline-block; vertical-align: middle;
-            border-radius: 4px; padding: 0.2em 0.6em; font-size: 0.85em;
-            line-height: 1.15; box-sizing: border-box; }
-  .tag-on  { background: #e6ffec; border: 1px solid #9bd9a8; color: #1a7f37; }
-  .tag-off { background: #f1f1f1; border: 1px solid #ccc;    color: #777; }
-  /* Blue "default" flag (device dir option equals its model default) -- same
-     shape as the on/off tags. The matching dropdown option is coloured to
-     match (desktop browsers honour option colours). */
-  .tag-default { display: inline-block; vertical-align: middle; border-radius: 4px;
-                 padding: 0.2em 0.6em; font-size: 0.85em; line-height: 1.15;
-                 box-sizing: border-box; background: #eaf2fb; border: 1px solid #9bc3e6;
-                 color: #1a5fb4; }
-  option.opt-default { color: #1a5fb4; }
-  .btn-small { padding: 0.2em 0.6em; font-size: 0.85em; vertical-align: middle;
-               line-height: 1.15; }
-  .checkbox-label { display: block; margin: 0.8em 0 0.2em; font-size: 0.9em; font-weight: normal; }
-  .checkbox-label.nowrap { white-space: nowrap; }
-  /* Green section boxes: equal left/right spacing comes from the box's own
-     horizontal padding (so wide children such as tables are inset the same on
-     both sides and never overflow). The coloured title bar spans the full box
-     width via a negative margin that cancels the padding. */
-  /* No overflow:hidden on the box -- that would clip (and make unreachable)
-     any content wider than the box. The title bar gets its own rounded top
-     corners instead, so the box can grow to fit wide content and the page
-     provides a single horizontal scrollbar when the window is narrow. */
-  /* The box grows to contain a wide table instead of letting the table spill
-     past its right edge: fit-content sizes it to its content, min-width:100%
-     keeps it at least as wide as the available area. box-sizing so the padding
-     is included. */
-  /* Title-bar program icon as the About trigger: strip button chrome. */
-  .app-about-btn { background: none; border: none; padding: 0; margin: 0;
-                   cursor: pointer; line-height: 0; display: inline-flex; }
-  .app-about-btn:focus-visible { outline: 2px solid #9bc3e6; outline-offset: 2px; border-radius: 4px; }
-  /* About dialog (reuses .fc-modal overlay). */
-  .fc-about-box { position: relative; text-align: left; max-width: 30em; }
-  .fc-about-close { position: absolute; top: 0.5em; right: 0.6em; background: none;
-                    border: none; font-size: 1.4em; line-height: 1; cursor: pointer;
-                    color: #777; }
-  .fc-about-close:hover { color: #333; }
-  .fc-about-title { margin: 0 0 0.3em; font-size: 1.25em; color: #16232e; }
-  .fc-about-lead { margin: 0 0 1em; color: #555; }
-  .fc-about-table { border-collapse: collapse; margin: 0 0 1em; width: 100%; }
-  .fc-about-table th { text-align: left; font-weight: 600; color: #444;
-                       padding: 0.2em 1em 0.2em 0; vertical-align: top; white-space: nowrap; }
-  .fc-about-table td { padding: 0.2em 0; color: #16232e; overflow-wrap: anywhere; }
-  .fc-about-license { margin: 0 0 1.3em; font-size: 0.9em; color: #555; }
-  .logo-thumb { max-width: 250px; max-height: 50px; vertical-align: middle;
-                background: #fff; border: 1px solid #eee; }
-  /* Footer warning lines: each on its own centred line, above the copyright
-     line. Security warnings red, operational warnings amber. */
-  .footer-warn { display: table; margin: 0 auto 0.5em; border-radius: 4px;
-                 padding: 0.25em 0.7em; font-size: 1.05em; font-weight: 600; }
-  .audit-warn    { color: #8a6d00; background: #fff3cd; border: 1px solid #ffe08a; }
-  .security-warn { color: #fff;    background: #c0362c; border: 1px solid #7a1c14; }
-  .footer-line   { display: block; }
-  .audit-filters { margin: 0.5em 0; display: flex; flex-wrap: wrap; gap: 0.6em; align-items: end; }
-  .audit-filters label { font-size: 0.85em; color: #444; display: flex; flex-direction: column; }
-  .audit-pager { margin: 0.5em 0; display: flex; gap: 0.5em; align-items: center; }
-  /* The audit table lives in a scroll wrapper so, however wide its content,
-     it stays INSIDE the green box (the box never has to grow past the page).
-     table.list gives width:100%; audit-list only tweaks density + wrapping. */
-  /* Full-width box (override the default fit-content tool box): the inner
-     scroll wrapper handles any overflow, so the box fills main.full exactly. */
-  #audit-section, #loginfail-section { width: 100%; min-width: 0; }
-  .audit-scroll { width: 100%; max-width: 100%; overflow-x: auto; }
-  /* Login-failures viewer: highlight keys currently in cooldown. */
-  tr.lf-row-throttled td { background: #fdecea; }
-  .lf-throttled { color: #c0362c; font-weight: 600; }
-  .audit-list th, .audit-list td { font-size: 0.82em; vertical-align: top;
-                                   white-space: normal; overflow-wrap: anywhere; }
-  .fs-group-title { margin: 1em 0 0.3em; font-size: 1em; color: #16232e; }
-  .logo-list, .disk-list { border-collapse: collapse; margin: 0.2em 0 1em; background: #fff; }
-  .logo-list th, .logo-list td,
-  .disk-list th, .disk-list td { border: 1px solid #d9d9d9; padding: 0.3em 0.6em;
-                                 text-align: left; font-size: 0.9em; vertical-align: middle; }
-  .logo-list th, .disk-list th { background: #f6f6f6; }
-  .user-section, .tool-section { background: #e8faf1; border: 1px solid #cdeede;
-                  border-radius: 6px; padding: 0 1.1em 1em; margin: 1em 0;
-                  box-sizing: border-box; width: fit-content; min-width: 100%; }
-  .user-section > h2 { margin: 0 -1.1em 0.8em; font-size: 1.15em; background: #b7e6cd;
-                       border-bottom: 1px solid #a9dcc2; padding: 0.45em 1.1em;
-                       border-radius: 5px 5px 0 0; }
-  /* Blue variant of the tool-section box, used on the Devices page so the
-     device list is visually distinct from the green statistics panel. */
-  .tool-section-blue { background: #eaf2fb; border: 1px solid #c7dcf2; border-radius: 6px;
-                       box-sizing: border-box; padding: 0 1.1em 1em; margin: 1em 0; }
-  .tool-section-blue > .tool-section-title { background: #bcd6f5; }
-  .tool-section-title { margin: 0 -1.1em 0.8em; font-size: 1.15em; background: #b7e6cd;
-                        border-bottom: 1px solid #a9dcc2; padding: 0.45em 1.1em;
-                        border-radius: 5px 5px 0 0; }
-  /* Tables inside a section fill the box's (padded) content width. */
-  .user-section table.list, .tool-section table.list { width: 100%; }
-  .tool-section h3 { font-size: 1.02em; margin-bottom: 0.2em; }
-  .scan-progress { width: 22em; max-width: 100%; height: 1.1em; vertical-align: middle; }
-  .scan-list { margin: 0.4em 0 0; }
-  .scan-list li { font-family: Consolas, Menlo, monospace; font-size: 0.9em; }
-  .checkbox-label input { margin-right: 0.4em; }
-  /* fetchconfig log viewer */
-  .log-view { margin-top: 0.6em; }
-  .log-section { margin: 0.15em 0; }
-  /* Reports page */
-  .prune-box { margin: 1.2em 0; padding: 0.8em 1em; border: 1px solid #ddd;
-    border-radius: 6px; background: #fafafa; }
-  .state { font-family: monospace; font-size: 0.78em; padding: 0.05em 0.4em;
-    border-radius: 3px; }
-  .state-changed { color: #fff; background: #2451c4; }
-  .state-new { color: #fff; background: #0e7c8c; }
-  .state-unchanged { color: #666; border: 1px solid #ccc; }
-  .state-failed, .state-diff-unavailable, .state-worker-failed { color: #fff; background: #c4432b; }
-  pre.diff.rep-diff { background: #10171c; color: #dce8ec; padding: 0.8em 1em;
-    border-radius: 6px; overflow-x: auto; font-family: monospace; font-size: 0.82em;
-    line-height: 1.4; white-space: pre; }
-  pre.diff.rep-diff .d-old  { color: #ff6b6b; }
-  pre.diff.rep-diff .d-new  { color: #51d88a; }
-  pre.diff.rep-diff .d-hunk { color: #7f929b; }
-  .log-head { cursor: pointer; font-family: Consolas, Menlo, monospace;
-              padding: 0.15em 0.3em; border-radius: 4px; user-select: none; }
-  .log-head:hover { background: #d7f0e2; }
-  .log-toggle { display: inline-block; width: 1.1em; text-align: center;
-                font-weight: 700; color: #555; }
-  .log-name { font-weight: 700; }          /* section name in bold */
-  .log-name-ok   { color: #178a3a; }        /* [name] green (success) */
-  .log-name-fail { color: #c00; }           /* [name] red (failed)   */
-  .log-body { margin: 0.2em 0 0.4em 1.4em; }
-  .log-preamble { margin: 0.2em 0 0.4em; }
-  .tabbar { display: flex; gap: 0.3em; border-bottom: 1px solid #ddd; margin-bottom: 1em; }
-  .tabbar .tab { border: 1px solid #ddd; border-bottom: none; background: #eef1f4;
-                 border-radius: 5px 5px 0 0; padding: 0.45em 0.9em; font-size: 0.92em;
-                 cursor: pointer; color: #1a5fb4; white-space: nowrap; }
-  .tabbar .tab.active { background: #fff; font-weight: 600; color: #23303d; position: relative; top: 1px; }
-  .panel-actions { margin: 0 0 0.8em; display: flex; align-items: center; gap: 0.8em; flex-wrap: wrap; }
-  .edit-filter { display: inline-flex; align-items: center; gap: 0.4em; flex-wrap: wrap; }
-  .edit-filter .filter-box { margin: 0; width: 14em; box-sizing: border-box; padding: 0.35em 0.5em;
-                             font-size: 0.9em; border: 1px solid #ccc; border-radius: 4px; }
-  .dev-pager { display: flex; align-items: center; gap: 0.8em; margin: 0 0 0.8em; }
-  .dev-pager .pageinfo { font-size: 0.9em; color: #555; }
-  .dev-pager button[disabled] { opacity: 0.5; cursor: default; }
-  /* Floating Top/Bottom jump buttons (side-by-side view), pinned to the
-     bottom-right so they never overlap the title bar's Log out link. */
-  .page-nav { position: fixed; right: 1em; bottom: 1em; z-index: 50;
-              display: flex; flex-direction: column; gap: 0.4em; }
-  .page-nav .btn { box-shadow: 0 1px 4px rgba(0,0,0,0.25); opacity: 0.9; }
-  .page-nav .btn:hover { opacity: 1; }
-  \@media print { .page-nav { display: none; } }
-  /* main.full already provides the 5% free margins on the left and right;
-     here we just place the table (variable width) and the statistics box
-     with a 5% gap between them. */
-  /* Both boxes start at the same y (align-items: flex-start). The green box
-     covers only its own content (it is NOT stretched to the blue box's height).
-     The device table is contained inside the blue box and scrolls horizontally
-     there, so it can never spill past the box and slide under the green box. */
-  .dev-layout { display: flex; align-items: flex-start; gap: 1em; flex-wrap: wrap; }
-  .dev-main { flex: 1 1 40em; min-width: 0; margin: 0; display: flex; }
-  /* min-width:0 lets the blue box shrink to its flex track; overflow:hidden
-     clips the box so the inner scroll container is the thing that scrolls. */
-  .dev-main > .tool-section-blue { flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; }
-  /* The table area scrolls horizontally WITHIN the blue box instead of
-     overflowing it and sliding under the statistics box. */
-  #dev-table-scroll { max-width: 100%; overflow-x: auto; }
-  .dev-main #dev-table { width: 100%; min-width: 40em; }
-  /* The stats box keeps its content width and does not shrink; the device
-     column's 40em min-width forces flex-wrap to drop this box onto its own
-     line below the table on narrow windows -- it never overlaps. */
-  .dev-stats { flex: 0 0 auto; width: max-content; max-width: 100%;
-               background: #e8faf1; border: 1px solid #cdeede; border-radius: 6px;
-               padding: 0.6em 1.1em 1em; }
-  .dev-stats h2 { font-size: 1.1em; margin-top: 0.4em; }
-  .dev-stats-table { width: auto; min-width: 12em; }
-  /* Site filter is short (site codes), so half the width of the other selects. */
-  #site-filter { max-width: 9em; }
-  /* Same small size/colour as the page footer (footer.app-footer). */
-  .dev-loadtime { font-size: 0.8em; color: #888; margin: 0.6em 0 0; }
-  .render-time { font-size: 0.8em; color: #888; margin: 0.6em 0 0; text-align: right; }
-  .render-diag { font-size: 0.8em; color: #888; margin: 0.4em 0 0; font-family: monospace; }
-  /* When the row is too narrow for both boxes, flex-wrap drops the stats box
-     onto its own line; this makes it span the full width there (it is the only
-     item on that line) instead of sitting at its min-width. */
-  /* The page never renders narrower than 900px (min-width floor); below ~940px
-     viewport it starts scrolling horizontally. Force the stats box to stack
-     BELOW the table there -- flex-direction: column is honoured identically by
-     every browser, unlike flex-wrap math at the min-width edge. */
-  \@media (max-width: 940px) {
-    .dev-layout { flex-direction: column; }
-    .dev-main, .dev-stats { flex: 0 0 auto; width: 100%; min-width: 0; max-width: 100%; }
-  }
-  /* Collapsed device rows in the editor: a compact summary line (Edit button +
-     Device-ID / Model / Site) that expands into a full .rec-card on demand. */
-  /* Summary line is a grid; the expanded card (.dev-row-card) spans all columns
-     below it. The grid is kept even when open so the summary never disappears. */
-  .dev-row { display: grid; grid-template-columns: 5.5em 2fr 1fr 1.5fr 2fr;
-             align-items: center; gap: 0.6em; padding: 0.35em 0.6em;
-             border-bottom: 1px solid #eee; }
-  .dev-row.dev-row-open { border: 1px solid #ddd; border-radius: 5px;
-             background: #fff; margin-bottom: 0.7em; }
-  .dev-row-card { grid-column: 1 / -1; }
-  .dev-row-head { font-weight: 600; color: #555; background: #f6f6f6;
-             border-bottom: 1px solid #ddd; }
-  .dev-row-id   { font-family: monospace; }
-  /* Red dot after the Device-ID when this device has unsaved edits (not merely
-     expanded/collapsed). The head row never gets it. */
-  .dev-row.dev-edited:not(.dev-row-head) .dev-row-id::after {
-    content: ''; display: inline-block; width: 0.55em; height: 0.55em;
-    margin-left: 0.5em; border-radius: 50%; background: #b00020;
-    vertical-align: middle; }
-  .dev-row-site { color: #1a7f37; }
-  .dev-row-comment { color: #555; overflow-wrap: anywhere; }
-  .dev-row.dev-row-nosite .dev-row-site::after { content: '\2014'; color: #b00020; }
-  /* Collapsed (card fetched but hidden): hide the card wrapper, keep summary. */
-  .dev-row.dev-row-collapsed .dev-row-card { display: none; }
-  .rec-card { border: 1px solid #ddd; border-radius: 5px; background: #fff;
-              padding: 0.7em 0.9em; margin-bottom: 0.7em; }
-  .rec-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4em 0.6em; margin-bottom: 0.6em; }
-  .rec-head label { font-size: 0.85em; color: #555; }
-  .rec-head input, .rec-head select { padding: 0.3em 0.4em; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9em; }
-  .opt-list { display: flex; flex-direction: column; gap: 0.35em; }
-  .opt-field { display: flex; align-items: center; gap: 0.4em; flex-wrap: wrap; }
-  .opt-field label { min-width: 12em; font-family: Consolas, Menlo, monospace; font-size: 0.85em; }
-  .opt-field input, .opt-field select { padding: 0.25em 0.4em; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9em; }
-  .opt-req { color: #b00020; }
-  .opt-unknown { color: #b07a00; font-size: 0.8em; font-style: italic; }
-  .opt-unit { color: #888; font-size: 0.85em; }
-  .opt-del { background: none; border: none; color: #b00020; font-size: 1.1em; cursor: pointer; line-height: 1; }
-  .reveal-btn { background: none; border: 1px solid #ccc; border-radius: 4px; font-size: 0.8em;
-                padding: 0.15em 0.5em; cursor: pointer; color: #1a5fb4; }
-  .add-option { margin-top: 0.5em; }
-  .add-option select { padding: 0.25em 0.4em; border: 1px dashed #999; border-radius: 4px;
-                       font-size: 0.85em; color: #1a5fb4; }
-  .save-row { display: flex; gap: 0.6em; align-items: center; margin: 0.6em 0 1em; flex-wrap: wrap; }
-  .btn-row { display: flex; gap: 0.6em; flex-wrap: wrap; align-items: center; }
-  .delete-old-row { margin-top: 1em; padding-top: 0.8em; border-top: 1px solid #cdeede; }
-  .mask-label { font-size: 0.9em; color: #555; display: inline-flex; align-items: center; gap: 0.3em; }
-  .mask-label input { margin: 0; }
-  .bulk-textarea { width: 100%; box-sizing: border-box; height: 60vh; min-height: 18em;
-                   font-family: Consolas, Menlo, monospace; font-size: 0.85em; line-height: 1.4;
-                   border: 1px solid #444; border-radius: 4px; padding: 0.7em; white-space: pre;
-                   background: #1e1e1e; color: #d4d4d4; }
-  .row-actions { display: flex; gap: 0.5em; align-items: center; }
-  /* Per-site access UI */
-  .site-any { color: #c0362c; font-weight: 600; }
-  /* A site dropdown with no site chosen shows red (placeholder state); once a
-     real site is selected it reverts to normal. The dropdown list itself uses
-     normal text so the options are not inconsistently coloured. */
-  select.site-select.site-unset { color: #c0362c; border-color: #c0362c; }
-  select.site-select option { color: #141a1f; }
-  /* Users table Sites column: wrap long comma lists (~60 chars) instead of
-     stretching the row; the <span> carries the full list as a tooltip. */
-  .user-sites-cell { max-width: 32em; white-space: normal; overflow-wrap: anywhere; }
-  .site-checklist { max-height: 22em; overflow: auto; border: 1px solid #cdeede;
-    padding: 0.5em 0.8em; border-radius: 6px; margin: 0.5em 0; background: #fff; }
-  .site-opt { display: block; padding: 0.15em 0; }
-  /* Sites management table: one edit form per row via display:contents */
-  .contents-form { display: contents; }
-  .site-table td .site-code-in { width: 8em; }
-  .site-table td .site-desc-in { width: 100%; min-width: 14em; box-sizing: border-box; }
-  .site-table td { vertical-align: middle; }
-</style>
+<link rel="stylesheet" href="$css_href">
+<style>$backdrop_css</style>
 </head>
 <body class="$body_class">
 <header class="app-titlebar">

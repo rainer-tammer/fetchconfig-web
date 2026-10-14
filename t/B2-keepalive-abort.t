@@ -148,7 +148,7 @@ SKIP: {
     local *main::copy_button_html = sub { '' }; local *main::copy_button_script = sub { '' };
     local *CGI::param = sub { return; };
     my ($o, $at_run, $seen_ka) = ('');
-    local *main::run_empty_bk_delete = sub { $at_run = $o; $seen_ka = ref $main::RUN_KEEPALIVE; ("", undef, "Run aborted", 1) };
+    local *main::run_scan_delete = sub { $at_run = $o; $seen_ka = ref $main::RUN_KEEPALIVE; ("", undef, "Run aborted", 1) };
     open(my $c, '>', \$o); my $sv = select($c); main::do_empty_bk_delete_data('admin'); select($sv); close($c);
     like($at_run // '', qr/Content-Type/, 'empty_bk: header printed before the scan');
     is($seen_ka, 'CODE', 'empty_bk: keepalive set during the scan');

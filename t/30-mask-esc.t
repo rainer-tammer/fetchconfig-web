@@ -29,6 +29,29 @@ is(main::mask_secrets('ip ssh host-key'), 'ip ssh host-key', 'host-key not maske
 like(main::mask_secrets('wpa-passphrase 0861d33aXXXX303f'),
      qr/wpa-passphrase \?\*\*\*\?/, 'wpa-passphrase masked');
 unlike(main::mask_secrets('wpa-passphrase 0861d33aXXXX303f'), qr/0861d33a/, 'wpa passphrase value gone');
+
+# Cisco IOS hashed secrets: "secret <type> <hash>" / "password <type> <hash>".
+like(main::mask_secrets('enable secret 9 $14$Y4y4$in9MZd4jxxxxAsC4g'),
+     qr/secret 9 \?\*\*\*\?/, 'enable secret 9 hash masked');
+unlike(main::mask_secrets('enable secret 9 $14$Y4y4$in9MZd4jxxxxAsC4g'),
+       qr/\$14\$/, 'enable secret 9 hash value gone');
+like(main::mask_secrets('username x privilege 15 secret 9 $14$abcXYZ'),
+     qr/secret 9 \?\*\*\*\?/, 'username secret 9 hash masked');
+like(main::mask_secrets('username logicvein privilege 15 password 7 0000000000614B5B495742'),
+     qr/password 7 \?\*\*\*\?/, 'username password 7 hash masked');
+unlike(main::mask_secrets('username logicvein privilege 15 password 7 0000000000614B5B495742'),
+       qr/614B5B/, 'password 7 hash value gone');
+like(main::mask_secrets('enable password 7 070C285F4D06'),
+     qr/password 7 \?\*\*\*\?/, 'enable password 7 hash masked');
+like(main::mask_secrets('username admin secret 5 $1$abc$def'),
+     qr/secret 5 \?\*\*\*\?/, 'secret 5 (MD5) hash masked');
+# Must NOT over-mask: hyphenated keywords and prose without a type digit.
+is(main::mask_secrets('password-policy minimum-length 8'),
+   'password-policy minimum-length 8', 'password-policy not masked');
+is(main::mask_secrets('service password-encryption'),
+   'service password-encryption', 'password-encryption not masked');
+is(main::mask_secrets('description secret project 7'),
+   'description secret project 7', 'prose "secret <word>" (no type digit) not masked');
 # Aruba CX virtual-controller key and the indented auth-server "key" line.
 like(main::mask_secrets('virtual-controller-key 10abcDEF737'),
      qr/virtual-controller-key \?\*\*\*\?/, 'virtual-controller-key masked');

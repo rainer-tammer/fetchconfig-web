@@ -24,7 +24,36 @@ use File::Path qw(make_path);
 use Cwd qw(abs_path);
 use Exporter 'import';
 
-our @EXPORT_OK = qw(load_cgi cgi_path make_config stub_libdir);
+our @EXPORT_OK = qw(load_cgi cgi_path css_source make_config stub_libdir state_changing_actions);
+
+# Parse the %STATE_CHANGING qw(...) list from the source and return it as a
+# set hashref { action => 1 }. Formatting-independent: tests should check
+# membership with this rather than matching exact adjacent words in the source,
+# so reflowing the qw() list (one-per-line vs grouped) does not break them.
+sub state_changing_actions {
+    my ($src) = @_;
+    unless (defined $src) {
+        open(my $fh, '<', cgi_path()) or die $!;
+        local $/; $src = <$fh>; close($fh);
+    }
+    # %STATE_CHANGING = map { $_ => 1 } qw( ... );  (qw body may span lines)
+    my ($body) = $src =~ /%STATE_CHANGING\s*=\s*map\s*\{[^}]*\}\s*qw\((.*?)\)/s;
+    return {} unless defined $body;
+    my %set = map { $_ => 1 } grep { length } split /\s+/, $body;
+    return \%set;
+}
+
+# Slurp the external stylesheet (fetchconfig-web.css, extracted from the .cgi
+# in 2.00). Tests that assert on CSS rules read this instead of the .cgi source.
+sub css_source {
+    my $here = abs_path(__FILE__);
+    my ($vol, $dir) = File::Spec->splitpath($here);
+    my $root = abs_path(File::Spec->catdir($dir, File::Spec->updir, File::Spec->updir));
+    my $css  = File::Spec->catfile($root, 'fetchconfig-web.css');
+    open(my $fh, '<', $css) or die "cannot read $css: $!";
+    local $/; my $s = <$fh>; close $fh;
+    return $s;
+}
 
 # Locate fetchconfig-web.cgi relative to this file (t/lib -> project root).
 sub cgi_path {
@@ -102,12 +131,20 @@ sub make_config {
     my $sess = File::Spec->catdir($dir, 'sessions');       mkdir $sess;
     my $fcp  = File::Spec->catdir($dir, 'fc');             mkdir $fcp;
     mkdir File::Spec->catdir($fcp, 'fetchconfig');
+    # WEB_DIR is a temp web root holding css/fetchconfig-web.css, so the
+    # page_head CSS-presence check (WEB_DIR + CSS_BASE_URL + the file) finds a
+    # stylesheet and does not raise the "directories not configured" banner.
+    my $web = File::Spec->catdir($dir, 'htdocs'); mkdir $web;
+    mkdir File::Spec->catdir($web, 'css');
+    _touch(File::Spec->catfile($web, 'css', 'fetchconfig-web.css'));
     my %cfg = (
         DEVICE_TABLE     => $dt,
         FETCHCONFIG_PATH => $fcp,
         FETCHCONFIG_BIN  => 'fetchconfig.pl',
         SESSION_DIR      => $sess,
         DBinst           => 'fc', DBuser => 'fc', DBhost => 'localhost',
+        WEB_DIR          => $web,
+        CSS_BASE_URL     => '/css',
         %over,
     );
     my $path = File::Spec->catfile($dir, 'fetchconfig-web.cfg');
