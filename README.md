@@ -5,9 +5,9 @@ title bar and logo shown on every page, and a Devices / Status / User / Help
 menu (plus a Setup item for accounts with the edit or admin right) in the
 title bar's nav row:
 
-> **Requires fetchconfig 9.69 or newer.** fetchconfig-web reads the installed
+> **Requires fetchconfig 9.71 or newer.** fetchconfig-web reads the installed
 > version from `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and shows a
-> warning banner (on every page, after login) if it is older than 9.69 or
+> warning banner (on every page, after login) if it is older than 9.71 or
 > cannot be determined. The minimum is set by the `MIN_FETCHCONFIG_VERSION`
 > constant in `fetchconfig-web.cgi`.
 
@@ -197,7 +197,7 @@ each of these in turn.
 For an experienced operator, the shortest path to a running instance:
 
 1. **Install the prerequisites** -- Perl with DBI/DBD::Pg, CGI and
-   Algorithm::Diff; PostgreSQL; and fetchconfig 9.69+ (see
+   Algorithm::Diff; PostgreSQL; and fetchconfig 9.71+ (see
    [Requirements](#requirements)).
 2. **Create the user database** -- run `perl fetchconfig-web-dbsetup.pl`
    (see [The user database](#the-user-database)).
@@ -1056,7 +1056,7 @@ on the table as three tabs -- **Devices**, **Defaults (per model)**, and
   fields driven by a per-model **option catalog** (transcribed from the
   fetchconfig README): masked secret fields (`pass`/`enable`/`password`)
   with a show toggle, on/off toggles (`changes_only`, `on_fetch_cat`,
-  and ProCurve's `debug`), numeric fields, a `;`-separated recipients field
+  and the universal `debug` toggle), numeric fields, a `;`-separated recipients field
   for email `to`, a `timezone` selector, and text/path fields. Mandatory
   options are marked; an option not recognized for the model is kept and
   flagged "(unrecognized)" rather than dropped.
@@ -1200,28 +1200,28 @@ point, and the save reports its path in that case.
 The editor's option catalog is easy to extend: each model maps to a set of
 `{option => {type, mandatory}}` entries in `%MODEL_CATALOG`, built from a
 shared common set (`timeout` is optional everywhere -- fetchconfig defaults it
-to 30 seconds). `procurve` and `procurve-ssh` use the common set plus an
-optional `enable` (manager/enable password) and `debug=on|off`; `comware-ssh`
-uses the common set plus `debug`; `cisco-sg300` adds optional `enable` and
+to 30 seconds -- and `debug=on|off`, the session-log toggle, is available on
+every model as of fetchconfig 9.71). `procurve` and `procurve-ssh` use the common set plus an
+optional `enable` (manager/enable password); `cisco-sg300` adds optional `enable` and
 `show_cmd`; `dell` adds optional `show_cmd`; `mikrotik` is user/pass only (no
 `enable`). The catalog covers all
 registered models, including `hirschmann` and `zyxel`
 (user/pass/repository/keep mandatory; `enable` and `show_cmd`
-optional), with `zyxel` also accepting `debug=on|off`, `planet-ssh` (PLANET
+optional), `planet-ssh` (PLANET
 managed switches, Cisco-IOS-like over SSH -- user/pass mandatory; `enable`,
-`show_cmd`, `debug`, `banner_timeout` and `type_delay` optional), `aruba-cx-ssh` (Aruba CX / AOS-CX over SSH -- user/pass mandatory,
-no `enable`; `show_cmd`, `debug`, `banner_timeout` and `prompt_settle_ms`
+`show_cmd`, `banner_timeout` and `type_delay` optional), `aruba-cx-ssh` (Aruba CX / AOS-CX over SSH -- user/pass mandatory,
+no `enable`; `show_cmd`, `banner_timeout` and `prompt_settle_ms`
 optional), `nexus-ssh` (Cisco Nexus / NX-OS over SSH -- same option set as
-`aruba-cx-ssh`: user/pass mandatory, no `enable`; `show_cmd`, `debug`,
+`aruba-cx-ssh`: user/pass mandatory, no `enable`; `show_cmd`,
 `banner_timeout` and `prompt_settle_ms` optional), `mediant-sbc` (AudioCodes
 Mediant SBC / gateway, current Cisco-style CLI -- user/pass/`enable`
 mandatory; optional `transport`=`ssh`|`telnet`|`auto` (default `ssh`;
 `auto` falls back to telnet only when no SSH service answers), plus
-`pager_cmd`, `show_cmd`, `debug`, `banner_timeout` and `prompt_settle_ms`), the
+`pager_cmd`, `show_cmd`, `banner_timeout` and `prompt_settle_ms`), the
 template-driven `generic` model (see "The generic (template-driven) model"
 above), and the
 web-managed binary-backup models `tplink-web-sg105e` and `procurve-web-1700`
-(common set + `debug=on|off`, no `enable`/`show_cmd` since they have no CLI;
+(common set, no `enable`/`show_cmd` since they have no CLI;
 `procurve-web-1700` also makes `user` optional, as the switch has only a
 manager password -- see "Web-UI (binary) backups" below).
 

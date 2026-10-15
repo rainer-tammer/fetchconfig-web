@@ -1,7 +1,7 @@
 use strict; use warnings;
 use Test::More;
 use FindBin; use lib "$FindBin::Bin/lib";
-use FCWebTest qw(load_cgi make_config);
+use FCWebTest qw(load_cgi make_config cgi_path);
 
 my ($cfg) = make_config();
 load_cgi($cfg); main::read_config();
@@ -175,7 +175,7 @@ ok(!(grep { ($_->[5]//'') eq 'keep' } @ROWS), 'unchanged option not logged');
     # An in-app write (restore, site rename) changes the content but records the
     # new token via audit_record_device_table_token(), so the next check must
     # NOT flag it as an external change. Without that call the restore tripped a
-    # false "changed outside this application" banner.
+    # false "modified outside of fetchconfig-web" banner.
     $TOK = '400.0:40:' . ('c' x 32);   # new content, as a restore would produce
     main::audit_record_device_table_token($good, 'admin');   # the app records it
     @rows=(); main::audit_check_device_table_change('admin');
@@ -226,24 +226,33 @@ ok(!(grep { ($_->[5]//'') eq 'keep' } @ROWS), 'unchanged option not logged');
     local *main::fatal_error_banner = sub { '' };
 
     # (a) in-request global (editor-open case)
-    local $main::EXTERNAL_CHANGE_NOTICE = 'The device table was changed outside this application.';
+    local $main::EXTERNAL_CHANGE_NOTICE = 'The device table has been modified outside of fetchconfig-web since it was last written.';
     my $h = main::page_head('Edit', 'admin');
     like($h, qr/<div class="ext-change-warning"/, 'editor-open shows the external-change banner');
+    # The notice carries the on-disk owner and the file's mtime (yyyy-mm-dd / HH:MM:SS).
+    {
+        my $src = do { open(my $fh,'<',cgi_path()) or die $!; local $/; <$fh> };
+        like($src, qr/\(getpwuid\(\$uid\)\)\[0\]/, 'owner is the real stat() file owner');
+        like($src, qr/file date \$fdate/, 'notice includes the file date');
+        like($src, qr/%04d-%02d-%02d \/ %02d:%02d:%02d/, 'file date is yyyy-mm-dd / HH:MM:SS');
+    }
 
     # (b) one-shot after login: persisted notice, no global
     local $main::EXTERNAL_CHANGE_NOTICE = undef;
-    $STATE{'external_notice:admin'} = 'The device table was changed outside this application.';
+    $STATE{'external_notice:admin'} = 'The device table has been modified outside of fetchconfig-web since it was last written.';
     my $h1 = main::page_head('Devices', 'admin');
     like($h1, qr/<div class="ext-change-warning"/, 'first page after login shows the banner');
     my $h2 = main::page_head('Devices', 'admin');
     unlike($h2, qr/<div class="ext-change-warning"/, 'banner is one-shot (gone on the next page)');
 
     # The audit-log link is admin-only (others cannot open the audit log).
-    local $main::EXTERNAL_CHANGE_NOTICE = 'The device table was changed outside this application.';
+    local $main::EXTERNAL_CHANGE_NOTICE = 'The device table has been modified outside of fetchconfig-web since it was last written.';
     {
         local *main::user_is_admin = sub { 1 };
         my $ha = main::page_head('Edit', 'admin');
         like($ha, qr/action=tool_audit/, 'admin banner includes the audit-log link');
+        like($ha, qr{>audit log</a>}, 'link text is "audit log"');
+        unlike($ha, qr{>the audit log</a>}, 'link text is not "the audit log"');
     }
     {
         local *main::user_is_admin = sub { 0 };

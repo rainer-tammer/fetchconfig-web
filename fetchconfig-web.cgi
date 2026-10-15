@@ -74,12 +74,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.01';
+use constant APP_VERSION => '2.02';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.01';
+use constant APP_VERSION_INTERNAL => '2.02';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -87,7 +87,7 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.69';
+use constant MIN_FETCHCONFIG_VERSION => '9.71';
 
 # --- Login throttle (see login_record_failure / login_is_throttled) ---
 use constant LOGIN_MAX_FAILURES  => 5;     # failures in the window before throttling
@@ -1873,16 +1873,33 @@ sub audit_check_device_table_change {
         $dbh->disconnect; return;
     }
     if (defined $cur && $cur ne '' && _token_md5($cur) ne _token_md5($prev)) {
+        # Who owns the on-disk table and when it was last written -- the real
+        # stat() owner (uid -> name, or the raw uid) and mtime, shown to help an
+        # admin trace the external change.
         my $owner = '';
+        my $fdate = '';
         if ($DEVICE_TABLE && -e $DEVICE_TABLE) {
-            my $uid = (stat($DEVICE_TABLE))[4];
-            $owner = defined $uid ? (eval { (getpwuid($uid))[0] } // $uid) : '';
+            my @st  = stat($DEVICE_TABLE);
+            my $uid = $st[4];
+            $owner  = defined $uid ? (eval { (getpwuid($uid))[0] } // $uid) : '';
+            if (defined $st[9]) {
+                my @lt = localtime($st[9]);
+                $fdate = sprintf('%04d-%02d-%02d / %02d:%02d:%02d',
+                    $lt[5] + 1900, $lt[4] + 1, $lt[3], $lt[2], $lt[1], $lt[0]);
+            }
+        }
+        # "(owner: X - file date yyyy-mm-dd / HH:MM:SS)" -- each part only when known.
+        my $meta = '';
+        if ($owner ne '' || $fdate ne '') {
+            my @bits;
+            push @bits, "owner: $owner"        if $owner ne '';
+            push @bits, "file date $fdate"     if $fdate ne '';
+            $meta = ' (' . join(' - ', @bits) . ')';
         }
         audit(dbh => $dbh, action => 'external_change', username => $username,
               object_type => 'table', object_id => _basename($DEVICE_TABLE // ''),
               old_value => $prev, new_value => $cur,
-              detail => 'device table changed outside the application'
-                      . ($owner ne '' ? " (file owner: $owner)" : ''));
+              detail => 'device table changed outside the application' . $meta);
         app_state_set($dbh, 'device_table_token', $cur, $username);
         # Surface it to the user. Two ways, because detection can happen either
         # in the current request (editor open -> banner shows immediately) or in
@@ -1890,8 +1907,8 @@ sub audit_check_device_table_change {
         #  1) set the in-request global for the editor-open case;
         #  2) persist a one-shot per-user notice in app_state, which page_head
         #     reads and clears on the next page (covers the post-login redirect).
-        my $msg = 'The device table was changed outside this application since it '
-                . 'last wrote it' . ($owner ne '' ? " (file owner: $owner)" : '') . '.';
+        my $msg = 'The device table has been modified outside of fetchconfig-web '
+                . 'since it was last written' . $meta . '.';
         $EXTERNAL_CHANGE_NOTICE = $msg;
         app_state_set($dbh, "external_notice:$username", $msg, $username);
     }
@@ -13727,6 +13744,8 @@ my %COMMON_OPTS = (
     comment                => { type => 'text',   mandatory => 0 },
     to                     => { type => 'recipients', mandatory => 0 },
     site                   => { type => 'enum_site', mandatory => 0 },
+    # Session-log toggle, universal across all models (fetchconfig 9.71+).
+    debug                  => { type => 'debug', mandatory => 0 },
     # Device locking (fetchconfig 9.69+). lock_dir is a directory-alias option
     # resolved against the 'lock' allow-list kind, like template_dir.
     lock                   => { type => 'enum_onoff', mandatory => 0 },
@@ -13751,7 +13770,6 @@ sub _model_opts { my (%extra) = @_; return { %COMMON_OPTS, %extra }; }
 my %MODEL_CATALOG = do {
     my $enable    = { enable => { type => 'secret', mandatory => 1 } };
     my $ios_extra = { %$enable, show_cmd => { type => 'text', mandatory => 0 } };
-    my $procurve  = { debug => { type => 'debug', mandatory => 0 } };
     # Hirschmann and Zyxel: user/pass mandatory (common set), enable OPTIONAL
     # (their firmware/accounts typically land straight on the privileged
     # prompt -- read defensively), and an optional show_cmd like the Cisco
@@ -13780,7 +13798,6 @@ my %MODEL_CATALOG = do {
                                  prompt_tail      => { type => 'text', mandatory => 0 },
                                  ssh_extra_opts   => { type => 'text', mandatory => 0 },
                                  template_dir     => { type => 'path', mandatory => 0 },
-                                 debug            => { type => 'debug', mandatory => 0 },
                                  show_cmd         => { type => 'text', mandatory => 0 }),
 
         # Group A -- user/pass/enable (+ common)
@@ -13816,13 +13833,13 @@ my %MODEL_CATALOG = do {
         # optional. Zyxel additionally accepts the debug=on|off session-log
         # option (same as ProCurve).
         'hirschmann'      => _model_opts(%$hirsch),
-        'zyxel'           => _model_opts(%$hirsch, %$procurve),
+        'zyxel'           => _model_opts(%$hirsch),
 
         # PLANET managed switches (Cisco-IOS-like CLI over SSH). user/pass
         # mandatory; enable + show_cmd optional (like zyxel), plus debug,
         # banner_timeout, and type_delay (ms between typed characters, to
         # work around the device dropping bursts of input after a prompt).
-        'planet-ssh'      => _model_opts(%$hirsch, %$procurve,
+        'planet-ssh'      => _model_opts(%$hirsch,
                                          banner_timeout   => { type => 'int', mandatory => 0 },
                                          type_delay       => { type => 'int', mandatory => 0 }),
 
@@ -13830,7 +13847,7 @@ my %MODEL_CATALOG = do {
         # has none -- an admin account is required). Optional show_cmd, debug,
         # banner_timeout and prompt_settle_ms (ms to wait for output to go
         # idle before matching the prompt; default 150, 0 disables).
-        'aruba-cx-ssh'    => _model_opts(%$procurve,
+        'aruba-cx-ssh'    => _model_opts(
                                          show_cmd         => { type => 'text', mandatory => 0 },
                                          banner_timeout   => { type => 'int',  mandatory => 0 },
                                          prompt_settle_ms => { type => 'int',  mandatory => 0 }),
@@ -13839,7 +13856,7 @@ my %MODEL_CATALOG = do {
         # has none -- the account must land on the "#" prompt). Optional
         # show_cmd, debug, banner_timeout and prompt_settle_ms. Same option
         # set as aruba-cx-ssh.
-        'nexus-ssh'       => _model_opts(%$procurve,
+        'nexus-ssh'       => _model_opts(
                                          show_cmd         => { type => 'text', mandatory => 0 },
                                          banner_timeout   => { type => 'int',  mandatory => 0 },
                                          prompt_settle_ms => { type => 'int',  mandatory => 0 }),
@@ -13848,7 +13865,7 @@ my %MODEL_CATALOG = do {
         # (default), telnet, or auto (SSH first, telnet fallback only when no
         # SSH service answers). user/pass/enable mandatory. Optional transport
         # (ssh|telnet|auto), show_cmd, debug, banner_timeout, prompt_settle_ms.
-        'mediant-sbc'     => _model_opts(%$enable, %$procurve,
+        'mediant-sbc'     => _model_opts(%$enable,
                                          transport        => { type => 'enum_transport', mandatory => 0 },
                                          pager_cmd        => { type => 'text', mandatory => 0 },
                                          show_cmd         => { type => 'text', mandatory => 0 },
@@ -13860,23 +13877,23 @@ my %MODEL_CATALOG = do {
 
         # procurve / procurve-ssh: user/pass mandatory; optional enable
         # (manager/enable password) + debug=on|off session log.
-        'procurve'        => _model_opts(%$procurve, enable => { type => 'secret', mandatory => 0 }),
-        'procurve-ssh'    => _model_opts(%$procurve, enable => { type => 'secret', mandatory => 0 }),
+        'procurve'        => _model_opts(enable => { type => 'secret', mandatory => 0 }),
+        'procurve-ssh'    => _model_opts(enable => { type => 'secret', mandatory => 0 }),
         # comware-ssh: user/pass only + debug=on|off session log.
-        'comware-ssh'     => _model_opts(%$procurve),
+        'comware-ssh'     => _model_opts(),
         # (dell and cisco-sg300 are defined in Group B above.)
 
         # TP-Link Easy Smart (web-GUI scrape, no CLI). Common set + the
         # debug=on|off HTTP-transcript option. Its backups are opaque binary
         # files stored uuencoded, so this model has no syntax highlighter and
         # the config view offers a download instead (see download_tplink_config).
-        'tplink-web-sg105e' => _model_opts(%$procurve),
+        'tplink-web-sg105e' => _model_opts(),
 
         # HP ProCurve 1700 (web-GUI scrape, no CLI). Same binary/uuencoded
         # web-UI handling as tplink-web-sg105e, but the switch has only a
         # manager password -- the "user" option is ignored, so it's optional
         # here. Common set with user optional, + debug.
-        'procurve-web-1700' => _model_opts(%$procurve,
+        'procurve-web-1700' => _model_opts(
                                            user => { type => 'text', mandatory => 0 }),
 
         # HP ProCurve ProVision (incl. 4000M/8000M) backed up over SNMP+TFTP.
@@ -19885,16 +19902,17 @@ sub page_head {
                 # Only admins may open the audit log, so only they get the link;
                 # a user with just the edit-device-table right sees the notice.
                 my $review = $is_admin
-                    ? qq{ Review it in <a href="} . esc(script_url() . '?action=tool_audit')
-                      . qq{">the audit log</a>.}
+                    ? qq{ You can review these changes in <a href="}
+                      . esc(script_url() . '?action=tool_audit')
+                      . qq{">audit log</a>.}
                     : '';
                 # On the device-table editor and the bulk editor, make clear
                 # that what is loaded below already reflects that external
                 # change -- so the user is editing the current on-disk table,
                 # not a stale copy, and saving will build on it.
                 my $here = ($title eq 'Edit device table' || $title eq 'Bulk edit devices')
-                    ? ' The editor below has loaded this changed table, so you are'
-                      . ' editing the current content.'
+                    ? ' The editor below has loaded the externally updated table,'
+                      . ' so you are currently editing the latest contents.'
                     : '';
                 $external = qq{<div class="ext-change-warning">&#9888; } . esc($ext)
                     . esc($here) . $review . qq{</div>};

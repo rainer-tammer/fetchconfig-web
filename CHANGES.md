@@ -1,5 +1,19 @@
 # fetchconfig-web -- change log
 
+## 2.02
+
+Requires fetchconfig 9.71 or newer.
+
+* The `debug=on|off` session-log toggle is now available on every model in the
+  device-table editor (it became a universal option in fetchconfig 9.71). It
+  was moved into the editor's common option set, so the previous per-model
+  `debug` entries were removed.
+* Minimum fetchconfig raised to 9.71 (was 9.69).
+* Reworded the "device table modified outside fetchconfig-web" editor warning
+  for clarity; the audit-log link text is now "audit log".
+  The notice now also shows the on-disk file owner and the table's last-written
+  date/time (yyyy-mm-dd / HH:MM:SS).
+
 ## 2.01
 
 Maintenance release.

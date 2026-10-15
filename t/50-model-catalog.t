@@ -41,4 +41,11 @@ ok(is_mand('cisco-ios','user') && is_mand('cisco-ios','pass')
 ok(is_mand('procurve-snmp','community'), 'procurve-snmp community mandatory');
 ok(!has_opt('procurve-snmp','user'),     'procurve-snmp has no user');
 
+
+# debug=on|off is a universal option (fetchconfig 9.71) -- every model exposes it.
+for my $m (main::known_models()) {
+    ok(scalar(grep { $_ eq 'debug' } main::model_option_keys($m)),
+       "model $m exposes debug");
+}
+
 done_testing();
