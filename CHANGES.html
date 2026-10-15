@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fetchconfig-web -- change log</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+         color: #222; background: #f4f5f7; margin: 0; line-height: 1.5; }
+  main { max-width: 820px; margin: 0 auto; padding: 2em 1.2em 4em; }
+  h1 { font-size: 1.6em; margin: 0 0 1em; }
+  h2 { margin: 1.6em 0 0.2em; padding: 0.3em 0.6em; background: #b7e6cd;
+       border-radius: 6px; font-size: 1.25em; }
+  h3 { margin: 1.1em 0 0.3em; color: #1f4e79; font-size: 1.05em;
+       border-bottom: 1px solid #cdeede; padding-bottom: 0.15em; }
+  ul { margin: 0.4em 0 0.8em; padding-left: 1.3em; }
+  li { margin: 0.35em 0; }
+  p  { margin: 0.5em 0; }
+  code { font-family: Consolas, Menlo, "Courier New", monospace;
+         background: #eef1f4; padding: 0 0.3em; border-radius: 3px;
+         font-size: 0.92em; }
+</style></head><body><main>
+<h1>fetchconfig-web -- change log</h1>
+<h2 id="2.01">2.01</h2>
+<p>Maintenance release.</p>
+<ul>
+<li>Fixed report deep links from notification emails: opening a <code>?action=view_report&amp;file=...</code> link while logged out now returns to that exact report after authenticating (the <code>file=</code> argument was previously dropped across the login). The carried argument is re-validated with the target action&#x27;s own validator so only a safe report file / template path is kept; <code>valid_report_name</code> was tightened to a safe character set.
+</ul>
+<h2 id="2.00">2.00</h2>
+<p>Major release consolidating 1.53-1.63. Requires fetchconfig 9.69 or newer.</p>
+<p>Database: adds users.download_full_config and the device_notes table</p>
+<p>(run fetchconfig-web-dbupdate-1.62.sql on an existing install).</p>
+<h3>Highlights</h3>
+<ul>
+<li>User management redesigned: slim user list -&gt; per-user edit page (identity, permissions, site access, password); one save writes all fields and logs one audit line per changed permission. Permissions live in one place only.
+<li>Device notes: a per-device free-text note (optionally &quot;keep&quot;), with a notes viewer and an orphaned-notes cleanup tool.
+<li>Unmasked-config right: the config view is always masked; a per-user download_full_config right gates the unmasked copy/download, both audited.
+<li>Device locking (fetchconfig 9.69): lock / lock_dir / lock_retry / lock_retry_time device options, lock_dir resolved against a &quot;directory: lock&quot; allow-list; a lock-skip shows as the &quot;skipped&quot; state.
+</ul>
+<h3>Security</h3>
+<ul>
+<li>Host-header reset-link poisoning fixed: reset links use a configured SITE_URL only; no SITE_URL -&gt; no reset mail.
+<li>Session ids, reset tokens and password salts come from /dev/urandom with a loop on short reads and fail closed (no weak rand() fallback).
+<li>Reset tokens hashed with SHA-256; login/reset throttling hardened (no timing oracle, no FastCGI-worker exhaustion); forgot-password audits every outcome.
+<li>Password policy (length and character classes), config-file permission check, HSTS/Cache-Control headers, and a login-failures viewer.
+<li>Config masking extended to switch-config secret forms (SNMP community, RADIUS/TACACS keys, WPA passphrases, Aruba CX controller/auth-server keys) and to Cisco IOS hashed secrets -- &quot;secret &lt;type&gt; &lt;hash&gt;&quot; and &quot;password &lt;type&gt; &lt;hash&gt;&quot; (enable secret, username secret/password), in both the plain and syntax-highlighted backup views.
+</ul>
+<h3>Other</h3>
+<ul>
+<li>All notification emails (test, password reset, admin verify) share one modern HTML style (program icon via a CID image so Thunderbird/Outlook show it inline) plus a plain-text part; the reset mail has a &quot;Set a new password&quot; button.
+<li>Consistent UI: every tool/editor/compare/result page uses the green tool-section box; the Devices list uses a blue box with the statistics box beside it; menu labels match the page titles.
+<li>The stylesheet moved out of the CGI into an external, cacheable file, fetchconfig-web.css, linked with a ?v=&lt;version&gt; cache-buster and served from WEB_DIR via CSS_BASE_URL. Config reworked into web paths: WEB_DIR (filesystem root, presence checks), BASE_URL (URL root), and CSS_BASE_URL/FONT_BASE_URL/ IMAGE_BASE_URL sub-paths (defaults /css, /fonts, /images). HELP_DIR, HELP_FILE and HELP_BASE_URL are removed (help.html is a fixed name under WEB_DIR); a missing stylesheet shows a red &quot;directories not configured&quot; banner. The login backdrop image loads from BASE_URL + IMAGE_BASE_URL + /back.jpg. Ship fetchconfig-web.css into WEB_DIR/css (see INSTALL).
+<li>Fixed report deep links from notification emails: opening a ?action=view_report&amp;file=... link while logged out now returns to that exact report after authenticating (the file= argument was previously dropped across the login). The argument is re-validated with the action&#x27;s own validator so only a safe report file / template path is carried; valid_report_name was tightened to a safe character set.
+<li>Removed the DEVICE_ID_FIELD config key: the Device-ID is always the second column of a device-table line, so the knob only confused (and the main parser ignored it anyway).
+<li>The log viewer is renamed &quot;View last fetchconfig schedule log&quot; (menu, page and box title); the box title now shows the log&#x27;s date and time.
+<li>Tool-output pages (Backup Now, orphaned/empty backup and directory check/delete) now use the full window width; the dark result box fills it and scrolls long lines internally instead of forcing the whole page to scroll.
+<li>The &quot;Backups for &lt;device&gt;&quot; page drops the &quot;Check for empty backups&quot; button (and its now-unused checkempty action); a 0-byte (empty) backup row is highlighted red instead. The site-wide Tools -&gt; Empty backup cleanup is unaffected.
+<li>Ships favicon.ico. FastCGI deployment (FCGI optional). Every function now carries a uniform header block.
+</ul>
+<h2 id="1.52">1.52</h2>
+<ul>
+<li>Requires fetchconfig 9.67 or newer (MIN_FETCHCONFIG_VERSION bumped from 9.65); the version warning banner and the required-version notes updated accordingly.
+<li>Version bumped to 1.52.
+</ul>
+<h2 id="1.51">1.51</h2>
+<ul>
+<li>Fixed: user add/change/delete, permission changes (edit/admin rights, site assignment, report-download right) and site add/edit/delete were not recorded in the audit log -- the database handle was disconnected before the audit call, so the write was silently lost. audit() now detects a dead handle (via ping) and opens its own connection, and those callers no longer pass the closed handle. The set_user_sites entry now records which site codes were added/removed (and old-&gt;new), and the add_user entry spells out the rights. The report-download right change now logs grant vs revoke (like the edit/admin right changes) instead of a flat &quot;updated&quot; message.
+<li>The device-table external-change tripwire no longer fails silently: if its app_state record cannot be read/written (e.g. the table is missing or not granted to the web user), a footer warning is shown instead of the check quietly doing nothing. A real content change is logged as external_change on login and editor open; an mtime-only touch is intentionally ignored. The detection now also shows the user a visible amber banner (on editor open, and once on the first page after login via a one-shot app_state notice), not just an audit-log row. The banner links to the audit log only for admins (a user with just the edit-device-table right sees the notice without the link, since they cannot open the audit log). On the device-table editor the banner also notes that the editor has loaded the changed table, so the user is editing the current on-disk content (not a stale copy). The bulk editor does the same: it now runs the tripwire on a fresh open and carries the same &quot;editing the current content&quot; note. (Fixed a regression where a stale DBI errstr on the shared handle made app_state reads look like failures, silently disabling the tripwire even though the token was stored.)
+<li>Audit log. New append-only audit_log table (and a small app_state table) recording state-changing actions: device-table saves (one row per changed option, old -&gt; new), restores, backup runs, deletes/cleanups, user add/ change/delete, password changes/resets (never the password), site changes, logo upload/delete, template save/revert, plus logins / failed logins / logout and denied attempts (CSRF, out-of-site). Secret option values (pass/enable/SNMP community) are stored as ***.
+<li>Immutability (Level B): the web DB user gets INSERT + SELECT on audit_log only -- no UPDATE/DELETE -- so the log cannot be altered or erased from the app; only a DBA can. Audit writes are fail-open: on failure the action still completes and a yellow warning is shown in the footer.
+<li>External-change tripwire: the app records the device table&#x27;s content token after its own writes and, on login and when the editor opens, logs an external_change entry if the table was modified outside the application.
+<li>Tools -&gt; Audit log viewer (admin only): 100 rows/page, newest first, fetched by AJAX (the table is never sent whole), First/Prev/Next/Last navigation, filters (user/action/object/text/date range) and CSV export.
+<li>New standalone PostgreSQL 8.2-compatible script fetchconfig-web-audit.sql to add the audit tables to an existing database (also folded into fetchconfig-web-dbupdate.sql); fresh installs get them via fetchconfig-web-dbsetup.pl.
+<li>Fixed: audit entries for actions that did not pass an explicit user (e.g. empty/orphan cleanup, backup_now) logged the session id instead of the username -- current_user() returned the session id (current_session&#x27;s first element) rather than the username. The Audit log page now uses the wide layout and its table sits in a scroll wrapper inside the green box (the box fills the width and contains the table instead of overflowing).
+<li>Audit log page: added a Reload button (Filter | Clear | Reload | Export CSV) that re-fetches the current page.
+<li>New documents: LICENSE-ADDITIONS.md/.html (GPLv3 Section 7 additional terms -- EU/German liability and warranty adaptation, severability, German/EU governing law) and PRIVACY.md/.html (GDPR notes; the software runs on the operator&#x27;s own system and the operator is the data controller; the provider stores no data).
+<li>New fetchconfig-web-clean-audit.pl: prune old audit-log rows with a privileged DB role (-t days to keep, -l preview, -s print the create-role SQL, -l requires -t, -u/-p or prompt for credentials, -v/-h). The prune is itself recorded in the audit log (action audit_prune, including the -t value), so the create-role SQL grants SELECT + INSERT + DELETE on audit_log (and the id sequence). The prune never deletes the audit_prune records themselves, so the pruning history is kept, and it writes a prune record only when rows were actually deleted (a run that removed nothing logs nothing). A failure to WRITE that prune record (e.g. the role was granted INSERT on audit_log but not USAGE on audit_log_id_seq) is now reported instead of being silent: the delete still succeeds and a warning names the missing grant. Version/copyright follow the config overrides.
+<li>Added cpanfile (mirrors Makefile.PL prerequisites) to document the Perl module dependencies and support <code>cpanm --installdeps .</code>. (GitHub&#x27;s dependency graph and Dependabot do not support CPAN, so no dependabot.yml is shipped.)
+<li>Audit log viewer: the Old -&gt; New column wraps long values -- after the arrow when present (&gt;60 chars), otherwise at the nearest whitespace near 50 chars (40-60), or a hard break at 60 if there is no whitespace there.
+<li>render-doc.py now also renders the GPLv3 LICENSE verbatim to LICENSE.md and LICENSE.html (preformatted, not reflowed).
+<li>The Help menu is now a dropdown: Help (help.html or internal), Documentation fetchconfig-web, Documentation fetchconfig, GNU GPL v3, Additional terms, and Privacy policy -- each static doc shown only if present in the help directory and opened in a new browser tab (the Help page itself opens in the same tab). Help config split: HELP_DIR (filesystem dir, for the existence check) + HELP_FILE (filename) + HELP_BASE_URL (URL base, for the menu links), with the old full-path HELP_FILE still accepted. Removed the obsolete &quot;Fetchconfig manual&quot; topic from help.html. The internal help fallback is now a short notice that help.html is missing from the web help directory and should be copied from the source package, rather than a duplicate feature description.
+<li>Audit log viewer: added a second First/Prev/Next/Last pager at the bottom (left-aligned, like the other pages); both pagers stay in sync. Added the floating Top / Bottom scroll buttons that the other pages have.
+<li>Email config: a gray hint after the &quot;to&quot; field notes that multiple recipients may be separated by &quot;;&quot;.
+<li>Backup Now now has a wall-clock timeout (BACKUP_TIMEOUT, default 120s, 0 disables): a device that never responds no longer blocks the request. On a timeout the run is terminated and the partial tool output is still shown. The Backup Now page now shows the tool output whenever there is any -- even on an error/timeout (previously output was hidden on any error). Success is judged from the output (fetchconfig always exits 0): an &quot;error:&quot; line, or a &quot;backup_state=failed&quot; line in the stats block, means FAILED. The audit log records OK/FAILED accordingly; the meaningless exit status is no longer logged.
+<li>Replaced the per-device &quot;Check devices for empty backups&quot; tool with an &quot;Empty Backup Cleanup&quot; tool (modelled on Empty Directory Cleanup): a Check (fetchconfig.pl -Z) and a Delete (-Z -D) that scan all devices at once for zero-byte backups, with a spinner and the tools output layout. The spinner now stays on the result page until the (slow) -Z scan finishes: the page renders the spinner immediately and fetches the result fragment by AJAX (with a no-JS fallback). The delete does the same -- its AJAX POST carries the CSRF token (and the action in the body, so the multipart POST reaches the right handler instead of falling through to the Devices page), and its no-JS fallback is a POST form. Success is taken from the summary line (rc 1 = &quot;found some&quot;, not an error). The delete is audited. The per-device -z check remains on each device&#x27;s backup page. (The old all-device scan code -- check_empty_one / device_empty_status -- was removed.) Help and README updated accordingly (empty backups is a cleanup, not a scan; dropped from the MAX_PARALLEL_SCAN tool list). The Tools menu entry is now &quot;Empty Backup Cleanup&quot; (the old &quot;Check devices for empty backups&quot; label was removed).
+<li>Version bumped to 1.51.
+</ul>
+<p>#</p>
+<h2 id="1.50">1.50</h2>
+<ul>
+<li>New Tools -&gt; Disk space page: free/total space and use% for every repository directory (global REPOSITORY + per-device/default repository=) and the report_dir, grouped by filesystem (one table per filesystem, &quot;Filesystem 1/2/...&quot;); the size figures are read once per filesystem and shown black on the first directory and gray on the rest (the device id is no longer shown -- it is not useful across AIX/Linux). &quot;unknown&quot; when a filesystem can&#x27;t be read; missing directories listed under &quot;Unavailable&quot;. The tool now also lists the directory: allow-list repository/report directories (not just the ones in use), with a Source column: configured / allowed / allowed and configured ($aliases expanded to real paths for matching). Uses the optional Filesys::Df module (loaded lazily; the tool shows an install hint if it is absent, the app is unaffected).
+<li>The title-bar program icon now opens an About dialog (program name, internal version APP_VERSION_INTERNAL, configured/effective version, copyright [config COPYRIGHT or the built-in default], installed fetchconfig.pl version, GPLv3 note; OK/Esc/backdrop to close). The page footer also falls back to the built-in copyright when none is configured, instead of ending in a bare dash.
+<li>Report logo handling. The report_logo editor option is now a drop-down of the image files (.png/.jpg/.gif, up to 25, case-sensitive) in the report_dir, with a red warning if the directory holds more than 25. New Tools -&gt; Upload report logo page uploads a logo into the report_dir (&lt;=100KB, PNG/JPEG/GIF verified by magic bytes, safe case-preserved filename) and lists existing logos with a Delete button and an inline base64 preview (the report directory is not web-served, so previews are embedded as data: URIs). The stored value is the bare filename.
+<li>Fixed two edited-card round-trip bugs: a collapsed edited device no longer auto-expands after Preview -&gt; Back to editor, and its red dot (and its edits) are no longer lost on the first or a repeated round-trip. The &quot;Back to editor&quot; render now embeds the full card in a collapsed row (fields still submit), carries r{n}_edited, and only re-opens rows that were actually open.
+<li>Device editor: a device whose fields have been changed (not merely expanded) now shows a red dot after its Device-ID. The marker tracks real edits (field input/change, option add/remove, new device) and survives a Preview -&gt; Back to editor round-trip.
+<li>Password changes now rotate/invalidate sessions. A self password change mints a fresh session (seamless) and invalidates the user&#x27;s other sessions; an admin reset of another user signs that user out everywhere (admin resetting their own non-protected account is rotated like a self-change). A request with a stale session cookie now lands on the login page with a &quot;Your session has ended&quot; notice instead of a blank form. Session cookie construction is shared via session_cookie(); clear_pw_warning_if_changed preserves the login_time.
+<li>New config key SESSION_MAX_LIFETIME (seconds, default 86400, 0 disables): an absolute cap that force-expires a session that long after login regardless of activity, so a captured cookie cannot be kept alive indefinitely. Session files now carry a 5th line (login time); legacy 4-line files load and are upgraded in place.
+<li>Fixed: expired session files were only removed when their own cookie was presented again, so files from abandoned cookies accumulated in SESSION_DIR. A login now runs a throttled sweep (at most once per SESSION_TTL) that reaps any session past its idle timeout or absolute cap.
+<li>backup_and_write_table: on a partial write failure the message now states plainly that the table may be incomplete, names the pre-write backup, and tells the admin to restore it via Tools -&gt; Restore device table (or copy it back on the server), noting a full disk / FS error as the likely cause.
+<li>The device_table.lock flock target is created mode 0600.
+<li>Documented (README + INSTALL): device-table .bak files are not pruned automatically (how to prune), and the empty device_table.lock is expected and must not be deleted while running.
+<li>make test now runs cleanly: the test harness (t/lib/FCWebTest.pm) silences the &quot;Subroutine/Constant subroutine ... redefined&quot; and &quot;used only once&quot; noise that a deliberate second load of the CGI produced, and make_config skips undef overrides. No change to the shipped application.
+<li>The test harness no longer prints &quot;Subroutine ... redefined&quot; / &quot;used only once&quot; / uninitialized-value warnings when a test loads the CGI more than once (e.g. to switch config). FCWebTest::load_cgi now filters that reload noise and make_config skips undef overrides; the affected tests set no warnings &quot;once&quot;. Cosmetic only - no test outcome changed (271 tests pass).
+<li>Restore device table now participates in the concurrency guard: its confirm shows the live table&#x27;s last-modified time/age, and the restore takes the writer lock and re-checks the staleness token under it, so a restore started against a table that has since changed is refused instead of silently discarding the newer change (Gap C, Layers 1-2).
+<li>New INSTALL.md (rendered to INSTALL.html by render-doc.py): a step-by-step installation and upgrade guide. render-doc.py: clearer usage errors (reversed args / missing input now print a usage message and exit cleanly instead of a traceback). render-doc.py now derives the page title/lede from the input document so it renders both README.md and INSTALL.md. Corrected the Perl requirements: Digest::MD5 and Time::HiRes listed; the phantom Digest::SHA / MIME::Base64 requirements removed (neither is used -- MD5 is used deliberately to avoid a Digest::SHA dependency on older Perls such as AIX).
+<li>Concurrency hardening of device-table writes. The staleness token is now &lt;hires-mtime&gt;:&lt;size&gt;:&lt;md5&gt; (Time::HiRes::stat for sub-second mtimes on AIX JFS2 / Linux XFS, plus a content digest), so a same-second rewrite is detected. Save, Bulk edit and the site-code rename now take an exclusive flock on a sidecar lock file, re-check the token under the lock and write while holding it, closing the check-then-write race in which two near-simultaneous saves could silently overwrite each other.
+<li>Documentation brought up to date (README.md and help.html): collapsed device editor and on-demand card loading, Site/comment filters and top+bottom pager, Save changes / view-only Preview / Reject all changes, directory drop-downs showing $ALIAS + path, and the blue &quot;default&quot; flag.
+<li>Device editor: an expanded card had two Collapse buttons; removed the redundant bottom one, leaving the single Collapse button on the summary line.
+<li>The editor Defaults tab now shows &quot;No per-model defaults are defined&quot; when the device table has no default: lines, instead of appearing completely empty (notably for a site-limited read-only user).
+<li>CRITICAL FIX: Preview -&gt; Back to editor could wipe default-definition passwords and drop devices. The rebuilt records could be compacted, so field indices no longer matched the on-disk table: the masked-secret write-back read the wrong record (wiping passwords, defaults included) and a too-small rec_count dropped high-index devices. Records now carry their original disk index and rec_count covers the highest index, so everything round-trips correctly.
+<li>Device editor: when SHOW_RENDER_TIME=1, expanding a device now shows the per-card AJAX timing below the table (&quot;Last card: N ms (server M ms) - K cards loaded&quot;); edit_card returns its server render time in an X-Render-Time header.
+<li>Fixed: a freshly-added template_dir / repository / on_fetch_run option now gets the blue &quot;default&quot; flag and option colouring (previously only options present when the card was opened were tagged, and an added generic template_dir did not highlight the default directory because its default is reported as a $alias rather than a path).
+<li>Editor: the green &quot;Save changes without preview&quot; button is now just &quot;Save changes&quot;; the Preview raw table page is view-only (its Save button removed -- use &quot;Back to editor&quot; to save). The Bulk edit editor keeps its own Save.
+<li>Fixed a severe editor bug: Preview raw table -&gt; Back to editor could change a device&#x27;s model (e.g. generic -&gt; nexus-ssh) because the reconstructed record order no longer matched the on-disk table that the collapsed rows re-fetch from. &quot;Back to editor&quot; re-renders only the devices that were expanded as cards (carrying the submitted values); the rest stay collapsed. Nothing is lost or mis-indexed.
+<li>The generic model= option is labelled &quot;model template&quot; (vs the device Model).
+<li>New config key SHOW_RENDER_TIME (0|1, default 0): when 1, it shows the load/render-time lines across the UI (device list, status, log, template list, and the device-table editor render time). Off by default, so these are now hidden unless enabled.
+<li>Device editor: when a device&#x27;s repository=, on_fetch_run= (directory part), or (for generic) template_dir= equals its model&#x27;s default: value, a blue &quot;default&quot; flag is shown beside the dropdown and the matching option is coloured blue, so it is clear the device is using the model default.
+<li>Directory drop-downs (template_dir, repository, report_dir, on_fetch_run) now show both the $alias and the directory it expands to in each option, instead of just the $alias.
+<li>Device editor: the device-list First/Prev/Next/Last pager is shown both above and below the list.
+<li>Fixed template_dir inheritance for generic devices: a device with no template_dir= now inherits the default: line&#x27;s template_dir and lists that directory&#x27;s templates (which fetchconfig -t tags as &quot;default&quot;); a device with its own template_dir= still lists only that directory. Fixed in the editor model drop-down, its live JS refresh, and the save-time validation.
+<li>Editor collapsed rows now show a Comment column after Site, and the device filter gains a searchable Site drop-down (alongside Device-ID and comment). Fixed: collapsing a previously-expanded device left the row blank -- the summary line (ID/Model/Site/Comment) now stays and the card is hidden below it.
+<li>New config key HTTPS_ENABLED (0|1, default 0, in the misc section of /etc/fetchconfig-web.cfg and the fetchconfig-web-dbsetup.pl template): set to 1 to add the Secure flag to the session cookie when served over HTTPS, instead of editing the source. Documented in README.
+<li>The HTML documentation sidebar is now built from the actual document structure (Part 1-4 and their subsections) instead of a stale hardcoded list, and ###/#### headings get id anchors so the nav links resolve.
+<li>Device-table editor rewritten for large tables: devices now show as collapsed summary rows (Device-ID / Model / Site) and the full editable card is fetched on demand (?action=edit_card) when a row is expanded. Un-expanded devices round-trip verbatim on save. For ~2500 devices this cuts the page from ~9.5 MB to ~1 MB and the DOM from ~198k to ~18k elements (editor loads ~5-20x faster).
+<li>Code cleanup: removed three unused section-renderer subs left over from the combined Tools page and corrected a stale comment on show_tools.
+<li>Normalised .btn so &lt;button&gt; and &lt;a&gt; buttons render at the same height (e.g. Save vs Cancel on the Assign-sites page were slightly mismatched).
+<li>Fixed back links that led to the empty User landing instead of the users table: the Edit-sites breadcrumb/Cancel, the reset-password breadcrumb, and the change-password warning link now go to the right page.
+<li>Fixed the login box size/centering that the sticky-footer layout change had disturbed (box is now flex-centered with a fixed width).
+<li>CRITICAL FIX: saving the device table as a site-limited editor could wipe the pass= of the edited devices (the masked-password write-back resolved the original by a sequential field index that did not match the table position). Editor field indices now use the record&#x27;s real table position, so masked passwords are always restored to their correct value on save.
+<li>Users table: the Grant/Revoke and Edit sites buttons now come first in their cell, before the current-state text / site list, and the yes/no tag matches the button height.
+<li>Fixed narrow-window layout: the 900px minimum is now enforced on the body (so the whole page scrolls horizontally below 900px instead of clipping); green section boxes now grow (fit-content) to fully contain a wide table instead of the table spilling past the box edge, and no longer clip content that is wider (the box grows and the whole page scrolls horizontally), and a red banner appears below the menu when the window is under 900px.
+<li>Fixed: the &quot;Users list&quot; menu item (and the redirects after user-management actions) now show the users table again instead of the &quot;pick from the menu&quot; landing message.
+<li>The orphaned-backup / empty-directory delete tools now report the number of items deleted (parsed from fetchconfig&#x27;s summary) instead of a vague &quot;nothing needed deleting, or ... removed successfully&quot; message.
+<li>Fixed stale messages that referred to the removed &quot;Tools page&quot;: the orphan / empty-directory check results now name the specific cleanup tool.
+<li>Renamed &quot;Orphaned Configuration Cleanup&quot; to &quot;Orphaned Backup Cleanup&quot;.
+<li>Fixed: comparing/viewing device-table backups in the Restore tool no longer fails with &quot;device not available&quot; (the per-device guard applied only when a device is actually referenced). Dropdown menus now float above page content; the orphan/empty-cleanup result pages use a green &quot;&lt;- &lt;tool&gt;&quot; breadcrumb at the top instead of a bottom button and the restore compare/view pages label their back button &quot;Restore device table&quot;. The copyright footer sticks to the bottom of short pages and follows the content on long pages.
+<li>Editor: &quot;Cancel&quot; is now &quot;Reject all changes&quot; (red) and reloads the table from disk after a confirm. Preview shows only &quot;Back to editor&quot;. Tools/User landing pages prompt to pick from the menu; every tool sub-screen returns to its own tool. Add-user / change-password errors return to that page with the message above the form. Removed leftover back buttons (Sites, Check site assignment, log/template viewers).
+<li>The title bar now uses application-style drop-down menus (Devices, Setup devices, Tools, User); Status/Reports moved under Devices; the Setup page is the read-only highlighted view (edit/bulk are menu entries). Each Tools and User menu item is now its own single-function page (one page per tool / per user action, no overview page, no back buttons). New Tools entry &quot;Check site assignment&quot; lists devices with no site=. Edit device table and Bulk edit lost their back button; the device list no longer nests a second scrollbar.
+<li>site= is now a mandatory, non-deletable, auto-added device option rendered as a drop-down; saving a device with no site is blocked. For a site-limited user the requirement applies only to their own devices (others are preserved). The read-only Defaults view shows one merged box per model (last value wins). The Users Sites column wraps long lists; the layout keeps a 900px minimum with a horizontal scrollbar on narrower windows.
+<li>A site code can no longer be deleted while it is used by a device (previously only a user assignment blocked deletion); enforced in the UI and server-side.
+<li>Green section boxes now inset their content equally on the left and right (padding on the box, tables at full content width), so wide tables are no longer flush/clipped on the right. The User page also uses the full-width layout.
+<li>The User page Users table has a &quot;Full Report&quot; column (the download-full-report right, with a grant/revoke toggle for site-limited users) between &quot;Edit device&quot; and &quot;Sites&quot;; the edit-right heading is shortened to &quot;Edit device&quot;. (Fixed the column so the granted state is actually shown.)
+<li>The Status page shows the site code as its first column; the Devices page shows it as the second column and adds a site filter drop-down (like the model filter), with a &quot;(no site)&quot; choice.
+<li>Device editor: site= is a drop-down (code + description). Devices without a site show a red &quot;no site assigned&quot; and get the option added automatically on load; an unassigned site is not written back. The &quot;no site assigned&quot; entry is a red placeholder shown only until a real site is picked, after which it is no longer selectable; dropdown colours are consistent. The &quot;+ add option&quot; site entry is a drop-down too.
+<li>Fixed: saving a user&#x27;s site assignment crashed (undefined redirect helper); site_id now uses multi_param and the login &quot;next&quot; is read in scalar context, clearing the CGI &quot;param called in list context&quot; warnings.
+</ul>
+<p>+ Per-site device access: a device may carry a site=&lt;code&gt; tag, site codes are</p>
+<p>defined in the database (new sites / user_sites tables) and users are assigned</p>
+<p>one or more codes. A site-limited user sees and edits only their devices --</p>
+<p>the Devices/Status/Reports pages are filtered, direct device URLs are guarded,</p>
+<p>Setup opens the device editor only (Devices tab; Defaults view-only; no</p>
+<p>Email/Reporting, Bulk edit or raw view), Tools stays admin-only, and saves are</p>
+<p>merged into the full table server-side (other devices/sections preserved).</p>
+<p>Site 0 (&quot;any site&quot;/All sites) means unrestricted; admin always has it. Reports</p>
+<p>show only the user&#x27;s device sections, and downloading the full report needs a</p>
+<p>per-user right. Admins manage site codes (add/edit/delete, with atomic code</p>
+<p>rename that updates site= in the device table) and per-user assignments from</p>
+<p>the User page. The site-management and assign-sites pages use the same green</p>
+<p>section box as the rest of the User page. Run the PostgreSQL 8.2-compatible</p>
+<p>fetchconfig-web-dbupdate.sql to enable it on</p>
+<p>an existing install (all users start unrestricted). fetchconfig.pl ignores</p>
+<p>site=. The update script grants the web user privileges</p>
+<p>on the new tables, and site add/edit/delete now report database errors (and</p>
+<p>recreate a missing sites_id_seq) instead of failing silently. The initial</p>
+<p>setup</p>
+<p>script also grants the web user access to the new site tables.</p>
+<h2 id="1.15">1.15</h2>
+<ul>
+<li>After logging in, an unauthenticated user who opened a specific page URL (e.g. ?action=report) is returned to that page instead of always landing on Devices. Only a whitelist of read-only landing actions is honoured (no open redirect, no state-changing action).
+<li>The Status page table is wrapped in the same green &quot;tool-section&quot; box as the Tools pages, for a consistent look.
+</ul>
+<p>+ The template viewer (Tools) and the new Reports page use the backup-table</p>
+<p>style: the green &quot;tool-section&quot; box with a bordered list and View/Edit/</p>
+<p>Download/Delete as buttons.</p>
+<p>+ New &quot;Reports&quot; page (top menu, between Status and Setup): lists the HTML</p>
+<p>change-reports fetchconfig writes into the email: report_dir, newest first,</p>
+<p>with styled table and button actions; View (collapsible per-device diffs,</p>
+<p>parsed and escaped, Expand/Collapse</p>
+<p>all), Download (streamed as an attachment through the CGI), Delete, and a</p>
+<p>&quot;delete reports older than N days&quot; prune. All file access goes through the</p>
+<p>login since the web server cannot read the report directory directly.</p>
+<ul>
+<li>Removed the per-device &quot;Check backup suffixes&quot; button from the backups page; the Tools page &quot;Check devices for consistent backup suffixes&quot; covers this.
+</ul>
+<p>+ New template-driven &quot;generic&quot; model: a device selects model=generic and a</p>
+<p>model=&lt;template&gt; option, with model= rendered as a drop-down of the templates</p>
+<p>fetchconfig reports. Adopts fetchconfig&#x27;s tab-separated --list-allowed-dirs /</p>
+<p>-t output and its exit codes (a missing directory blocks the editor and</p>
+<p>viewer with the fetchconfig output; &quot;stay&quot; is highlighted as a transition).</p>
+<p>+ Tools: &quot;Template viewer&quot; lists the generic-model templates read-only with</p>
+<p>syntax highlighting, and &quot;Template editor&quot; edits them in a split view with a</p>
+<p>syntax check, single .tmpl.bak backup, revert, and unsaved-changes guard.</p>
+<p>Template writes go through a new privileged helper</p>
+<p>(fetchconfig-web-install-template.pl, run via sudo, configured by</p>
+<p>TEMPLATE_HELPER); non-regular files (symlinks, hard links) are refused.</p>
+<p>+ Directory allow-list: the device table may carry &quot;directory:&quot; lines</p>
+<p>(repository / template / fetch_run / report, each $ALIAS + path), read</p>
+<p>server-side from</p>
+<p>the table so they cannot be forged and written back verbatim, armored with</p>
+<p>&quot;must be edited on the server&quot; comments (shown red in the Setup view). When</p>
+<p>present, the editor&#x27;s repository=, template_dir= and on_fetch_run fields</p>
+<p>become drop-downs of the allowed aliases (expanded path shown in gray;</p>
+<p>on_fetch_run splits into a directory + a command field), saved lines store the</p>
+<p>$ALIAS, and a table using a directory not on the list cannot be saved.</p>
+<p>+ New config keys FONT_BASE_URL, IMAGE_BASE_URL, HELP_BASE_URL (URL-path bases,</p>
+<p>validated at startup) and TEMPLATE_HELPER; integer config keys now report a</p>
+<p>clear configuration error on an invalid value instead of silently defaulting.</p>
+<p>+ A device-table save is now validated by fetchconfig (-t and</p>
+<p>--list-allowed-dirs against the exact bytes) before being written, so an</p>
+<p>invalid table never reaches disk; the Bulk edit page runs the same checks.</p>
+<p>+ Added a Makefile.PL and a t/ unit-test suite (Test::More), plus</p>
+<p>imageconvert.pl</p>
+<p>(encodes an image as a base64 Perl snippet, with README.imageconvert).</p>
+<ul>
+<li>Model-option audit against the fetchconfig README (timeout optional everywhere, plus per-model option corrections).
+<li>Custom confirmation dialogs replace the browser&#x27;s confirm(); wider, full-width layout for the config/compare/log/backup views; editor, preview and bulk-edit action buttons moved to the top of the page.
+<li>Documentation restructured into parts with a table of contents and quick start. Minimum required fetchconfig version is now 9.65; fetchconfig-web is 1.15.
+</ul>
+<h2 id="1.12">1.12</h2>
+<p>+ New models: &quot;mediant-sbc&quot; (AudioCodes Mediant SBC, Cisco-style CLI;</p>
+<p>user/pass/enable, optional transport=ssh|telnet|auto, adds an enum_transport</p>
+<p>editor field and an AudioCodes-syntax highlighter) and &quot;nexus-ssh&quot; (Cisco</p>
+<p>Nexus / NX-OS over SSH, with a dedicated NX-OS highlighter).</p>
+<p>+ Tools: run the device scans (without-backups / empty / suffix) in parallel,</p>
+<p>controlled by MAX_PARALLEL_SCAN (1..5, default 1); the progress line shows how</p>
+<p>many scan processes are active. Fixed intermittent scan failures by rewriting</p>
+<p>session files atomically (temp file + rename) and hardening child-process I/O</p>
+<p>(EINTR retry, checked waitpid, ASCII-safe JSON); each failed device now shows</p>
+<p>why.</p>
+<p>+ Tools: new &quot;Empty Directory Cleanup&quot; (fetchconfig.pl -e / -e -D) and &quot;Check</p>
+<p>devices for consistent backup suffixes&quot; (fetchconfig.pl -s), plus a per-device</p>
+<p>&quot;Check backup suffixes&quot; button; and, under Restore device table, &quot;Delete</p>
+<p>backups older than N days&quot; (always keeps the newest).</p>
+<p>+ Login page shows a full-page backdrop image (IMAGE_BASE_URL/back.jpg) behind</p>
+<p>the title bar, login box and bottom-centred footer. New config keys</p>
+<p>FONT_BASE_URL and IMAGE_BASE_URL (URL-path bases for fonts and images).</p>
+<ul>
+<li>Config: the fetchconfig executable is now two keys -- FETCHCONFIG_PATH (install dir, also used to find Constants.pm) and FETCHCONFIG_BIN (executable name); the old single full-path form is no longer accepted. The page footer shows the installed fetchconfig version, and a warning banner appears if it is older than the required minimum or cannot be determined.
+</ul>
+<p>+ Device-table editor: numeric time fields show their unit (s / ms); the Email</p>
+<p>tab gained optional &quot;port&quot; and &quot;tls&quot; (off|starttls|ssl) options; the</p>
+<p>aruba-cx-ssh model gained optional prompt_settle_ms. Fixed: coriant-8600 no</p>
+<p>longer wrongly requires an &quot;enable&quot; password.</p>
+<p>+ Backup-filename parsing tolerates fetchconfig&#x27;s filename_append_suffix (the</p>
+<p>backup list dates/times stay correct and &quot;Download latest configuration&quot;</p>
+<p>keeps a dotted suffix, else .cfg). Empty-backup check also recognises</p>
+<p>fetchconfig&#x27;s newer &quot;N zero-byte backup(s)&quot; message.</p>
+<ul>
+<li>Security hardening: device ids/usernames reject a leading &quot;-&quot; (central valid_id, so an id can&#x27;t be read as a CLI option); unsalted {SHA} password hashes removed ($apr1$/$1$/$5$/$6$/DES kept); session cookie SameSite=Lax; uniform 2s delay on failed logins; Backup-Now cleartext temp file auto-removed on exit; SESSION_TTL is now an idle timeout; numeric/boolean config keys validated with fallback to defaults.
+</ul>
+<p>+ Licensed under the GNU GPL v3+ (headers in both programs, LICENSE file, README</p>
+<p>section). render-doc.py runs on Python 3 and 2.7. Documentation reworked</p>
+<p>(added a &quot;How fetchconfig.pl is invoked&quot; reference and a security overview;</p>
+<p>wider HTML manual). APP_VERSION is a built-in constant, overridable by the</p>
+<p>config.</p>
+<h2 id="1.11">1.11</h2>
+<p>+ Config file default path is now /etc/fetchconfig-web.cfg (was</p>
+<p>/etc/fetchconfig.cfg); rename on upgrade.</p>
+<p>+ Backup list: new &quot;Download latest configuration&quot; button (newest backup as</p>
+<p>&quot;&lt;Device-ID&gt;-YYMMDD-HHMMSS.cfg&quot;, web-binary models as their decoded file).</p>
+<p>+ New &quot;Status&quot; page (nav, between Devices and Setup): a table of every device&#x27;s</p>
+<p>last-run status from the per-device .status files -- Device-ID, start/end</p>
+<p>date+time, duration, state and changed, colour-coded, with dropdown filters,</p>
+<p>sorting, paging and a load-time line (N/A when no status file).</p>
+<p>+ Tools: new &quot;View fetchconfig log&quot; -- opens the scheduled (cron) run&#x27;s output</p>
+<p>(FETCHCONFIG_LOG) on its own page, split into collapsible per-device sections</p>
+<p>(green ok / red failed, failed expanded), with Expand/Collapse all and a</p>
+<p>LOG_MAX_DEVICES cap (default 1000).</p>
+<p>+ Backup Now overlay: shows the elapsed runtime (with a &quot;this can take a while&quot;</p>
+<p>note after 10s) and, when a per-device .status file exists (fetchconfig</p>
+<p>&gt;= 9.52), the last run&#x27;s runtime/state/changed.</p>
+<p>+ Devices page: statistics panel shows a &quot;Device table load time&quot;.</p>
+<p>+ Device-table editor, Email tab: added the optional &quot;footer&quot; option.</p>
+<ul>
+<li>Fixed: with multiple email: lines the editor wrongly reported from/to/smtp missing (the mandatory check now merges all email: lines); and email: values are no longer needlessly quoted for spaces (only commas force quoting).
+<li>Button labels made sentence case app-wide (Backup now, Compare selected, ...).
+</ul>
+<h2 id="1.10">1.10</h2>
+<p>+ New device models: &quot;procurve-snmp&quot; (HP ProCurve ProVision incl. 4000M/8000M,</p>
+<p>backed up over SNMP+TFTP -- no user/pass, mandatory &quot;community&quot; secret,</p>
+<p>masked; text backup, no highlighter); &quot;aruba-cx-ssh&quot; (Aruba CX / AOS-CX over</p>
+<p>SSH, no enable, with a dedicated AOS-CX highlighter); &quot;planet-ssh&quot; (PLANET</p>
+<p>managed switches, Cisco-IOS-like, reuses the IOS highlighter);</p>
+<p>&quot;tplink-web-sg105e&quot; and &quot;procurve-web-1700&quot; (web-managed, no CLI: opaque</p>
+<p>uuencoded backups, so Compare/checkboxes are hidden and the view offers a</p>
+<p>Download of the transparently uudecoded binary; procurve-web-1700 makes user</p>
+<p>optional).</p>
+<p>+ Devices page: added a Hostname column with its own filter (IPv4 sorts numeric,</p>
+<p>then names); the pager gained First/Last buttons (editor Devices tab too); the</p>
+<p>&quot;+ Add model defaults&quot; button adds at the top.</p>
+<ul>
+<li>Fixed UTF-8 handling: backups with non-ASCII characters (e.g. umlauts) are now decoded before display (no mojibake), and the Copy button&#x27;s legacy fallback puts UTF-8 text on the clipboard correctly over plain HTTP.
+</ul>
+<h2 id="1.9">1.9</h2>
+<p>+ New device model &quot;zyxel&quot; (user/pass/repository/keep/timeout mandatory; enable,</p>
+<p>show_cmd, debug optional), with a dedicated IOS-like highlighter.</p>
+<h2 id="1.8">1.8</h2>
+<p>+ Device-table editor (Setup -&gt; Edit device table): a structured three-tab</p>
+<p>editor (Devices / Defaults / Email) driven by a per-model option catalog,</p>
+<p>replacing raw-table editing. Masked-secret fields with keep-on-save, per-model</p>
+<p>&quot;+ add option&quot; menus, host validation (IPv4/IPv6/FQDN), duplicate-ID checks, a</p>
+<p>&quot;Preview raw table&quot; step, an mtime concurrency guard, and a timestamped backup</p>
+<p>to $BACKUP_DEVICE_TABLE before each save (table overwritten in place; option</p>
+<p>parsing/serialisation matches fetchconfig exactly). Devices tab paginates at</p>
+<p>100 and has Device-ID/comment filters (cookie-persisted).</p>
+<p>+ Bulk Edit (Setup, admin only): plain-text editor for the device lines only;</p>
+<p>saving replaces the DEVICES SECTION with all-or-nothing validation, the mtime</p>
+<p>guard and a backup (default:/email: untouched).</p>
+<p>+ Tools (admins only): &quot;Check for orphaned backups&quot; / &quot;Delete orphaned backups&quot;</p>
+<p>(fetchconfig -o / -o -D); &quot;Devices without backups&quot; and &quot;Check devices for</p>
+<p>empty backups&quot; scans (fetchconfig -l / -z) with a live progress bar and</p>
+<p>Start/Cancel; and &quot;Restore device table&quot; -- list the timestamped backups with</p>
+<p>View / Restore / Delete (Restore backs up first; strict name validation) and</p>
+<p>compare any two configs (unified or side-by-side, newer green / older red,</p>
+<p>quote-aware; passwords masked with a reveal checkbox).</p>
+<p>+ &quot;admin_function&quot; per-user right (a full admin, like the built-in admin),</p>
+<p>managed from the User page; new users-table column (see README for the upgrade</p>
+<p>SQL).</p>
+<p>+ Config syntax highlighting on the backup view for cisco-ios / cisco-ios-ssh</p>
+<p>(extensible per-model registry; cosmetic only, same masking/escaping).</p>
+<p>+ New device model &quot;hirschmann&quot; (user/pass/repository/keep/timeout mandatory;</p>
+<p>enable, show_cmd optional).</p>
+<p>+ UI: model filter is a dropdown of models in use (cookie-persisted); a live</p>
+<p>&quot;devices filtered&quot; count; floating Top/Bottom nav on long pages; editor action</p>
+<p>buttons moved to the top; User page areas separated into boxes.</p>
+<ul>
+<li>Fixed: &quot;Check devices for empty backups&quot; misparsed the single-device -z output and treated -z exit 1 (&quot;empties found&quot;) as an error; and the read-only Compare form used the wrong enctype.
+</ul>
+<h2 id="1.7">1.7</h2>
+<p>+ Intermediate development version introducing the first structured</p>
+<p>device-table editor; superseded by the consolidated 1.8 above.</p>
+<h2 id="1.6">1.6</h2>
+<p>+ User accounts moved from the htpasswd file to a PostgreSQL database</p>
+<p>(DBI/DBD::Pg). Standalone setup script fetchconfig-web-dbsetup.pl creates</p>
+<p>the database/table, can import existing htpasswd accounts, and can write</p>
+<p>/etc/fetchconfig.cfg. New-password hashing is pure-Perl Apache MD5</p>
+<p>($apr1$), so the htpasswd binary and its sudo rule are no longer needed.</p>
+<p>+ Per-user &quot;edit_device_table&quot; right (grantable from the User page) that</p>
+<p>also grants read access to the Setup page.</p>
+<p>+ Default-password login warning until an account changes away from the</p>
+<p>default password.</p>
+<p>+ All configuration moved to an external file, /etc/fetchconfig.cfg</p>
+<p>(key = value); only the config-file path, app title, and cookie name stay</p>
+<p>hard-coded.</p>
+<h2 id="1.5-and-earlier">1.5 and earlier</h2>
+<p>+ Login, device list with live filter and sortable Model/Device-ID columns,</p>
+<p>per-device backup list with Date/Time columns, backup content view with</p>
+<p>copy-to-clipboard, unified &quot;Compare&quot; and &quot;Side by Side&quot; diff views,</p>
+<p>&quot;Backup Now&quot; and &quot;Check Empty Backups&quot;, the read-only Setup page, in-UI</p>
+<p>user management, and the Help page. CSRF protection and server-side</p>
+<p>session store throughout.</p>
+</main></body></html>

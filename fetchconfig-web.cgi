@@ -74,12 +74,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.00';
+use constant APP_VERSION => '2.01';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.00';
+use constant APP_VERSION_INTERNAL => '2.01';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -1308,7 +1308,9 @@ sub main {
             my $had_cookie = exists $cookies{$COOKIE_NAME};
             my $notice = $had_cookie
                 ? 'Your session has ended. Please log in again.' : undef;
-            show_login_form(undef, $action, $notice);
+            my $deep_arg = $cgi->param('file');
+            $deep_arg = $cgi->param('path') unless defined $deep_arg;
+            show_login_form(undef, $action, $notice, $deep_arg);
         }
         # CSRF check for the authenticated state-changing actions (login/logout
         # are handled separately: login has no session yet, and logout is
@@ -3714,11 +3716,23 @@ my %LOGIN_LANDING = map { $_ => 1 } qw(
 #   $next
 ################################################################################
 sub login_next_url {
-    my ($next) = @_;
+    my ($next, $arg) = @_;
     return script_url() unless defined $next && $next =~ /^[a-z_]+$/
                               && $LOGIN_LANDING{$next};
     return script_url() if $next eq 'devices';   # bare URL is the devices page
-    return script_url() . '?action=' . $next;
+    my $url = script_url() . '?action=' . $next;
+    # Carry a deep-link argument for the actions that take one, re-validated
+    # here with the action's own validator so only a safe value is appended
+    # (report file name / template path). Anything else is dropped.
+    if (defined $arg && $arg ne '') {
+        if    ($next eq 'view_report'   && valid_report_name($arg)) {
+            $url .= '&file=' . CGI::escape($arg);
+        }
+        elsif ($next eq 'view_template' && template_path_ok($arg)) {
+            $url .= '&path=' . CGI::escape($arg);
+        }
+    }
+    return $url;
 }
 
 ################################################################################
@@ -3811,7 +3825,8 @@ sub do_login {
         # Return the user to the page they originally asked for (captured as a
         # hidden "next" in the login form), if it is a safe landing action;
         # otherwise the default Devices page.
-        my $dest = login_next_url(scalar $cgi->param('next'));
+        my $dest = login_next_url(scalar $cgi->param('next'),
+                                  scalar $cgi->param('next_arg'));
         print std_header(-cookie => $cookie, -location => $dest, -status => '302 Found');
     } else {
         # Slow down online brute-force attempts. Applied on every failure --
@@ -3877,9 +3892,17 @@ sub script_url {
 #   $notice
 ################################################################################
 sub show_login_form {
-    my ($error, $next, $notice) = @_;
+    my ($error, $next, $notice, $next_arg) = @_;
     # Fall back to the "next" the browser submitted (e.g. a failed login retry).
     $next = $cgi->param('next') unless defined $next;
+    # The deep-link argument for actions that take one (view_report -> file,
+    # view_template -> path). Captured from the original request, or resubmitted
+    # on a failed-login retry. Re-validated at emit and at redirect time.
+    unless (defined $next_arg) {
+        $next_arg = $cgi->param('next_arg');
+        $next_arg = $cgi->param('file') unless defined $next_arg;
+        $next_arg = $cgi->param('path') unless defined $next_arg;
+    }
     print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Login');
     print qq{<div class="login-box">\n};
@@ -3899,6 +3922,15 @@ sub show_login_form {
     # user returns there afterwards. Only validated action names are kept.
     if (defined $next && $next =~ /^[a-z_]+$/ && $LOGIN_LANDING{$next}) {
         print qq{<input type="hidden" name="next" value="} . esc($next) . qq{">\n};
+        # Carry the deep-link argument only when it passes the target action's
+        # own validator, so nothing unsafe is round-tripped through the form.
+        my $ok = (defined $next_arg && $next_arg ne '')
+              && ( ($next eq 'view_report'   && valid_report_name($next_arg))
+                || ($next eq 'view_template' && template_path_ok($next_arg)) );
+        if ($ok) {
+            print qq{<input type="hidden" name="next_arg" value="}
+                . esc($next_arg) . qq{">\n};
+        }
     }
     print qq{<label>Username<br>};
     print $cgi->textfield(-name => 'username', -autocomplete => 'username');
@@ -9433,7 +9465,10 @@ sub valid_report_name {
     my ($f) = @_;
     return 0 unless defined $f && $f ne '';
     return 0 if $f =~ m{[/\\]} || $f =~ /\.\./;
-    return $f =~ /^report-.*\.html$/ ? 1 : 0;
+    # fetchconfig report files are report-<digits/dashes>.html; restrict to a
+    # safe character set (letters, digits, '.', '_', '-') so no HTML-unsafe or
+    # shell-unsafe character can ride through, e.g. across the login deep link.
+    return $f =~ /^report-[A-Za-z0-9._-]*\.html$/ ? 1 : 0;
 }
 
 ################################################################################

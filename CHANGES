@@ -1,3 +1,15 @@
+2.01
+====
+
+Maintenance release.
+
+* Fixed report deep links from notification emails: opening a
+  ?action=view_report&file=... link while logged out now returns to that exact
+  report after authenticating (the file= argument was previously dropped across
+  the login). The carried argument is re-validated with the target action's own
+  validator so only a safe report file / template path is kept;
+  valid_report_name was tightened to a safe character set.
+
 2.00
 ====
 Major release consolidating 1.53-1.63. Requires fetchconfig 9.69 or newer.
@@ -51,6 +63,12 @@ Other
   WEB_DIR); a missing stylesheet shows a red "directories not configured"
   banner. The login backdrop image loads from BASE_URL + IMAGE_BASE_URL +
   /back.jpg. Ship fetchconfig-web.css into WEB_DIR/css (see INSTALL).
+* Fixed report deep links from notification emails: opening a
+  ?action=view_report&file=... link while logged out now returns to that exact
+  report after authenticating (the file= argument was previously dropped across
+  the login). The argument is re-validated with the action's own validator so
+  only a safe report file / template path is carried; valid_report_name was
+  tightened to a safe character set.
 * Removed the DEVICE_ID_FIELD config key: the Device-ID is always the second
   column of a device-table line, so the knob only confused (and the main parser
   ignored it anyway).
@@ -149,7 +167,7 @@ Other
   names
   the missing grant. Version/copyright follow the config overrides.
 * Added cpanfile (mirrors Makefile.PL prerequisites) to document the Perl module
-  dependencies and support `cpanm --installdeps .`. (GitHub's dependency graph
+  dependencies and support cpanm --installdeps .. (GitHub's dependency graph
   and Dependabot do not support CPAN, so no dependabot.yml is shipped.)
 * Audit log viewer: the Old -> New column wraps long values -- after the arrow
   when present (>60 chars), otherwise at the nearest whitespace near 50 chars
@@ -204,12 +222,6 @@ Other
 * Version bumped to 1.51.
 
 #
-# CHANGES -- fetchconfig-web
-#
-# fetchconfig-web is a web front-end for the fetchconfig network device
-# configuration backup tool. Newest changes first.
-#
-
 1.50
 ====
 * New Tools -> Disk space page: free/total space and use% for every repository

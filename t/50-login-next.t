@@ -22,4 +22,20 @@ is(main::login_next_url('http://evil.com'), $base, 'off-site url rejected');
 is(main::login_next_url('../x'),            $base, 'traversal rejected');
 is(main::login_next_url('report&file=x'),   $base, 'param injection rejected');
 
+
+# --- deep-link argument carried across login (view_report file=, 2.00) ---
+is(main::login_next_url('view_report','report-20261015-002557.html'),
+   main::script_url().'?action=view_report&file=report-20261015-002557.html',
+   'view_report deep link keeps a valid file= across login');
+like(main::login_next_url('view_template','x.tmpl'), qr/action=view_template/,
+   'view_template landing is accepted');
+# malicious / invalid args are dropped (not appended)
+for my $bad ('../../etc/passwd','report-<script>.html','report-x".html','notreport.html') {
+    unlike(main::login_next_url('view_report',$bad), qr/file=/,
+           "view_report drops unsafe file arg: $bad");
+}
+# an arg for an action that does not take one is ignored
+unlike(main::login_next_url('view_log','anything'), qr/[&?](file|path|next_arg)=/,
+       'view_log carries no deep-link arg');
+
 done_testing();
