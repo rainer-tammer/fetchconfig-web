@@ -1,4 +1,159 @@
-# fetchconfig-web -- change log
+# fetchconfig-web -- Change Log
+
+Release history for fetchconfig-web, newest version first.
+
+## 2.06
+
+Requires fetchconfig 9.72. Template management: upload and delete templates
+from the Templates page.
+
+* **Requires fetchconfig 9.72 or newer** (was 9.71). `MIN_FETCHCONFIG_VERSION`
+  is now `9.72`; an older installation still runs but raises the persistent
+  version-warning banner after login.
+* **`prompt_settle` removed from the `generic` model.** fetchconfig 9.72 dropped
+  the option entirely -- it was a no-op -- so it is gone from the generic model's
+  option catalog and from the template-editor syntax highlighting. An existing
+  `prompt_settle=` on a device line is **not** discarded: like any option outside
+  a model's catalog it is preserved on save and shown as an "(unrecognized)"
+  free-text chip, so you can delete it at your leisure. Note this does not affect
+  `prompt_settle_ms`, a different and still-current option on `aruba-cx-ssh`,
+  `nexus-ssh` and `mediant-sbc`.
+* The standalone tools `fetchconfig-web-clean-resets.pl` and
+  `fetchconfig-web-clean-audit.pl` reported version 2.00 in their banner; they
+  now carry the current version, as does the sample config written by
+  `fetchconfig-web-dbsetup.pl`.
+* **Upload a new template.** The Templates page has an "Upload template" button:
+  pick a `.tmpl` file and a configured template directory. The upload is text
+  only and capped at 100 KB, its name must be a safe `<model>.tmpl` (the generic
+  `model=` value), it is **syntax-checked before it is installed** (a file that
+  fails the check is never placed), and an **existing name is never overwritten**
+  (enforced atomically). The copy is done by the privileged helper, or directly
+  when the template directory is web-writable.
+* **Download a template.** Each row has a **Download** button (after Edit) that
+  sends the template file as a download.
+* **Generate a template from a HEX capture.** The Templates page has an "Upload
+  HEX capture" button: pick a `record-session.pl` `.hex` file, a template name,
+  a target directory and a syntax-highlighting scheme. The capture (text only,
+  1 MB max) is handed to `<FETCHCONFIG_PATH>/tools/generate_template.pl`, which
+  produces a **draft** generic-model template; the chosen scheme is stamped into
+  its header as `# syntax_style: <scheme>` (`auto` leaves it to detection), and
+  the result is then syntax-checked and installed exactly like a template upload
+  (100 KB template budget, no-overwrite, privileged atomic install). The
+  generated template is a draft -- review it and test against the device.
+* **Session recorder download.** The Upload HEX capture block offers downloads for
+  the session recorder -- `record_session.exe` (Windows) and the `record_session.py`
+  source -- served statically from `WEB_DIR`. The recorder is **not** shipped with
+  fetchconfig-web; each button appears only when its file is present (build the exe
+  from fetchconfig's `contrib/windows`), and the whole row is hidden when neither
+  is. Each download shows its size, date and a SHA-256 (computed and cached in
+  `SESSION_DIR`, re-hashed only when the file changes); the exe is unsigned, so a
+  SmartScreen/AV note is displayed.
+* **Rename an unused template.** Each row has a **Rename** action (between Edit
+  and Download) that opens a styled popup for the new name (prefilled with the
+  current stem) and renames the template within its directory, carrying the
+  `.bak` across. The new name must be a safe `<model>.tmpl`, must differ from the
+  current one, and never overwrites an existing template. A template in use by a
+  device cannot be renamed (greyed out, re-checked server-side).
+* **Delete an unused template.** Each row now has View / Edit / Rename /
+  Download / **Delete** actions and a **Used** column (Yes/No). A template that is
+  referenced by a device cannot be deleted -- its Delete button is greyed out,
+  and the delete is re-checked server-side. Delete removes the template and its
+  `.bak`.
+* "Used" is computed from the device table: a template is used when it is the
+  resolved template of some generic device (`model=` + `template_dir=`, with
+  default-section inheritance and `$alias` expansion). The result is cached per
+  request and refreshed after the device-table editor, the bulk editor or a
+  restore rewrites the table.
+* The privileged helper `fetchconfig-web-install-template.pl` is now v1.2, adding
+  `install-new` (create-if-absent, atomic), `delete`, and `rename` (atomic,
+  refuse-if-exists, moves the `.bak`) subcommands. The existing sudoers entry (the
+  script path) already covers them -- just redeploy the script.
+* Template helper errors shown in the UI are now condensed to the single error
+  line (an out-of-date helper no longer dumps its full `--help`), with a hint to
+  redeploy the helper when it does not recognise a subcommand.
+* The Help page now lists up to **15** additional help files per menu (`HELP_MAX_FILES`, previously 10).
+* **Dependency minimums corrected.** `Makefile.PL` and `cpanfile` previously
+  required `CGI` 4.53, `DBD::Pg` 3.15.0 and `DBI` 1.641, none of which the code
+  needs -- and `perl Makefile.PL` *failed* on stock RHEL 9 (CGI 4.51, DBD::Pg
+  3.14.2) and SLES 15 (CGI 4.46) as a result. The floors are now the versions
+  actually used: `CGI` 4.31 (the `-samesite` cookie floor), `DBD::Pg` 3.0.0 (no
+  `pg_*` driver attributes are used) and `DBI` 1.614 (what DBD::Pg itself
+  requires), so the stock packages of RHEL 9, SLES 15, Ubuntu LTS and Debian all
+  satisfy them. `cpanfile` now also declares the optional `Crypt::Bcrypt`,
+  `IO::Socket::SSL` and `FCGI`. Security guidance that cannot be a version floor
+  (distributions backport without bumping versions) moved into INSTALL.md.
+* **Documentation audited against the source.** Corrected throughout: the missing
+  sudoers rule for the template helper (without it every template write failed),
+  the per-distribution package names for RHEL 9 / SLES 15 / Ubuntu (incl. the
+  SLES modules that are not enabled by default, EPEL-only `Filesys::Df`, the
+  non-existent SLES `perl-FCGI`, and `Net::SMTP::SSL`, which the app does not
+  use), README's password-storage section (the app writes **bcrypt**, not
+  `$apr1$`) and login-hardening section (a database-backed per-IP/per-account
+  throttle, not a 2-second sleep), a documented `?action=checksuffix` that never
+  existed, three device-page buttons that do not exist, stale function names, the
+  request-lifecycle order in DEVELOPER.md, and assorted stale version/size values.
+* `run_check_empty()` removed -- dead code with no callers since the empty-backup
+  check became a repository-wide scan.
+* README's *CGI 4.53 patch for `start_html()`* section removed: the application
+  never calls `start_html()` (it emits its own `<head>`), so the patch could not
+  apply. A short note replaces it for anyone who applied it to an earlier release.
+* INSTALL.md gains an *Installing newer modules from CPAN* section (private
+  prefix via `cpanm -l`, or a global install), including the per-distribution
+  build prerequisites and how to point the CGI at a private prefix.
+* Documentation corrected on image embedding: the application is not a single
+  self-contained file. The title-bar logo and login icon are inlined as base64
+  for **load performance** (they arrive with the first response and cost no
+  extra request; the logo doubles as the report email's `cid:` image), while the
+  stylesheet, fonts, `favicon.ico`, the help tree and the login backdrop
+  `back.jpg` are deployed under `WEB_DIR` and served statically.
+* Document headers now read **Perl FCGI/CGI / language** instead of
+  *Perl CGI / single file*, and the surrounding prose no longer describes the
+  application as plain-CGI-only: the same script runs under FastCGI
+  (`mod_fcgid` + `FCGI`, the recommended deployment) or falls back to plain CGI.
+* A global `$CGI::POST_MAX` request-size cap (2 MB) is now set.
+
+## 2.04
+
+Bug fix: Backup Now no longer reports a false failure on an initial backup.
+
+* "Backup now" now takes its pass/fail verdict from the device's per-run
+  `.status` file (`backup_state`) -- the same signal fetchconfig records and the
+  summary email and backup overview already use -- instead of scraping the log
+  for an `error:` line. An initial backup logs a benign
+  `<model>: there is no latest config` (there is no prior config to diff
+  against) while the fetch still succeeds; that no longer trips a
+  "Backup run FAILED" message.
+* A hard error (timeout / fork failure) is still a failure. When no `.status`
+  file is available (an older fetchconfig, or a crash before it is written) the
+  log is still scanned as a fallback, with that benign line ignored, and a
+  genuine failure (bad enable password, unreachable device -> `backup_state =
+  failed`) is still reported.
+
+## 2.03
+
+Help menu restructured.
+
+* The Help menu is now served from a help tree, `<WEB_DIR><HELP_BASE_URL>`
+  (new `HELP_BASE_URL` config key, default `/help`). `help.html` lives directly
+  in it.
+* Two "additional help" sections -- "fetchconfig-web - additional help" and
+  "fetchconfig - additional help" -- are built by scanning the `fetchconfig-web/`
+  and `fetchconfig/` sub-directories of the help tree for `*.html` documents.
+  Each document's menu label is taken from its `<title>`; entries are sorted by
+  label and open in a new tab. You curate each menu simply by placing the files
+  you want exposed in the directory. The sub-directories are read-only to the
+  application (no web-server write access needed).
+* A sub-directory that is missing or holds no `*.html` shows a muted
+  "No additional helpfiles available - see INSTALL.md"; one with more than ten
+  `*.html` files shows a single "too many help documents in &lt;dir&gt;"
+  placeholder.
+* New **About** entry at the bottom of the Help menu, opening the same dialog as
+  the title-bar program icon.
+* The bundled help pages now carry a uniform `<title>` in the house style
+  (`fetchconfig-web &mdash; <Subtitle>`, em dash), so the auto-derived menu
+  labels are consistent.
+* The previous flat Help-menu list of fixed document names in `WEB_DIR` was
+  removed. See the Upgrading section of INSTALL for the migration steps.
 
 ## 2.02
 

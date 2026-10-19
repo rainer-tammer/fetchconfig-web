@@ -1,0 +1,111 @@
+# imageconvert.pl -- encode an image as a base64 blob for embedding in Perl
+
+fetchconfig-web inlines two small images -- the title-bar logo and the login
+icon -- directly in `fetchconfig-web.cgi` as base64 constants. The reason is
+**load performance, not packaging**: an inlined image travels inside the HTML of
+the first response, so it costs no second HTTP request and is painted with the
+page rather than one round trip later. The title-bar logo earns its place twice
+over, as it is also the `cid:` inline image of the report email, where a link to
+a web-server file is not a usable option.
+
+`imageconvert.pl` generates those constants: it reads an image and writes a
+ready-to-paste Perl snippet that assigns the image, base64-encoded, to a scalar
+variable.
+
+The application is **not** a single self-contained file. The stylesheet, the
+fonts, `favicon.ico`, the help tree and the login backdrop `back.jpg` (roughly
+600 KB) are all deployed as ordinary files under `WEB_DIR` and served from the
+web server -- see `CSS_BASE_URL`, `FONT_BASE_URL`, `IMAGE_BASE_URL` and
+`HELP_BASE_URL` in the main README. Inlining is reserved for images that are
+small *and* needed in the first paint of the page that uses them. Anything
+larger belongs on disk: base64 inflates the payload by about a third, an inlined
+image cannot be cached by the browser, and that cost is paid again on every
+single page load.
+
+## Requirements
+
+Perl 5 with the core module `MIME::Base64` (part of the standard library since
+Perl 5.8, so no extra installation is normally needed).
+
+## Usage
+
+```
+imageconvert.pl <input-image> <output-file> <var-name>
+```
+
+| Argument | Meaning |
+|----------|---------|
+| `input-image` | Path to the image (or any binary file) to encode. |
+| `output-file` | File to write the generated Perl snippet to. Use `-` to write to standard output instead. |
+| `var-name` | The Perl scalar variable name for the blob, e.g. `LOGO_BASE64`. A leading `$` is accepted and ignored. It must be a valid Perl identifier (letters, digits, underscore; not starting with a digit). |
+
+Options:
+
+| Option | Effect |
+|--------|--------|
+| `-h`, `--help` | Show the built-in help and exit. |
+| `-V`, `--version` | Show the version and exit. |
+
+## Output format
+
+The generated snippet looks exactly like this (base64 wrapped at 80 columns):
+
+```perl
+my $LOGO_BASE64 = do {
+    local $/;
+    my $raw = <<'B64';
+iVBORw0KGgoAAAANSUhEUgAAADIAAAAyCAYAAAAeP4ixAAAWfmNhQlgAABZ+anVtYgAAAB5qdW1kYzJw
+... (many more 80-character lines) ...
+B64
+    $raw =~ s/\s+//g;
+    $raw;
+};
+```
+
+The heredoc keeps the base64 readable in the source (wrapped lines); the
+`s/\s+//g` at the end strips the newlines at run time so `$LOGO_BASE64` holds
+one continuous base64 string. Use it wherever the app needs the image, e.g.:
+
+```
+<img src="data:image/png;base64,$LOGO_BASE64" alt="logo">
+```
+
+## Examples
+
+Write the snippet to a file:
+
+```
+imageconvert.pl logo.png logo-b64.pl LOGO_BASE64
+```
+
+Write to standard output (e.g. to pipe or redirect):
+
+```
+imageconvert.pl back.jpg - IMAGE_BASE64 > back-b64.pl
+```
+
+Then open the output, copy the whole `my $VAR = do { ... };` block, and paste it
+into `fetchconfig-web.cgi` in place of the existing constant.
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | success (or `--help` / `--version`) |
+| `1` | no arguments given (usage shown) |
+| `2` | an error occurred (a descriptive message is printed to stderr) |
+
+Error conditions are reported clearly, for example: input file missing, not
+readable, empty, or a directory; invalid variable name; output file not
+writable. On any error, nothing partial is left in the output file only if the
+`open` itself failed; if a write fails midway the message says so.
+
+## Copyright
+
+Copyright (C) 2026 Rainer Tammer.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the `LICENSE` file, or <https://www.gnu.org/licenses/>, for the
+full text.

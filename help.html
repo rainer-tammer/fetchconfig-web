@@ -4,26 +4,47 @@
    no fixed max-width cap here so the content fills that column. */
 .fchelp { color: #24313d; line-height: 1.6; }
 .fchelp * { box-sizing: border-box; }
-.fchelp .help-header { border-bottom: 3px solid #1a5fb4; padding-bottom: 0.8rem; margin-bottom: 1.4rem; }
+.fchelp .help-header { border-bottom: 3px solid #1a5fb4; padding-bottom: 0.8rem; margin-bottom: 1.2rem; }
 .fchelp .help-header h1 { font-size: 1.7rem; margin: 0 0 0.2rem; color: #16232e; letter-spacing: -0.01em; }
 .fchelp .help-header .lead { margin: 0; color: #55636e; font-size: 1.02rem; }
+.fchelp .roles { margin: 0.8rem 0 0; font-size: 0.9rem; color: #55636e; }
+.fchelp .roles .badge { margin-left: 0; }
+/* Table of contents, grouped by part. */
 .fchelp .toc { background: #f4f8fc; border: 1px solid #d7e5f2; border-radius: 8px;
-               padding: 0.9rem 1.1rem; margin: 0 0 1.8rem; }
+               padding: 0.9rem 1.1rem 1.1rem; margin: 0 0 1.8rem; }
 .fchelp .toc h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em;
-                  color: #6a7885; margin: 0 0 0.6rem; border: 0; padding: 0; }
-.fchelp .toc ul { list-style: none; margin: 0; padding: 0;
-                  display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 0.3rem 1.2rem; }
-.fchelp .toc li { margin: 0; }
+                  color: #6a7885; margin: 0 0 0.8rem; border: 0; padding: 0; }
+.fchelp .toc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+                    gap: 1rem 1.6rem; }
+.fchelp .toc-grid h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em;
+                       color: #16232e; margin: 0 0 0.3rem; border: 0; padding: 0; }
+.fchelp .toc ul { list-style: none; margin: 0; padding: 0; }
+.fchelp .toc li { margin: 0.12rem 0; }
 .fchelp .toc a { color: #1a5fb4; text-decoration: none; font-size: 0.93rem; }
 .fchelp .toc a:hover { text-decoration: underline; }
+/* Part divider between major groups of cards. */
+.fchelp .help-part { display: flex; align-items: baseline; gap: 0.8rem;
+                     margin: 1.8rem 0 0.9rem; }
+.fchelp .help-part:first-of-type { margin-top: 0.4rem; }
+.fchelp .help-part .n { font-size: 0.78rem; font-weight: 700; color: #1a5fb4;
+                        background: #e7f0fb; border: 1px solid #cfe0f4; border-radius: 999px;
+                        padding: 0.1rem 0.6rem; white-space: nowrap; }
+.fchelp .help-part h2 { font-size: 1.05rem; color: #16232e; margin: 0; border: 0; padding: 0;
+                        letter-spacing: 0.01em; }
+.fchelp .help-part .rule { flex: 1; height: 1px; background: #dde6ee; }
+/* Section cards. */
 .fchelp section.card { background: #fff; border: 1px solid #e2e8ee; border-radius: 8px;
                        padding: 1.1rem 1.4rem 1.2rem; margin: 0 0 1.1rem;
                        box-shadow: 0 1px 2px rgba(20,40,60,0.04); }
 .fchelp section.card > h2 { font-size: 1.18rem; color: #16232e; margin: 0 0 0.7rem;
                             padding-bottom: 0.45rem; border-bottom: 1px solid #eef2f6; }
+.fchelp section.card h3 { font-size: 0.98rem; color: #1f4e79; margin: 1rem 0 0.3rem;
+                          padding: 0; border: 0; }
 .fchelp .badge { display: inline-block; font-size: 0.68rem; font-weight: 600; text-transform: uppercase;
                  letter-spacing: 0.04em; color: #8a4b00; background: #fff2dc; border: 1px solid #f0d9ad;
                  border-radius: 999px; padding: 0.05rem 0.55rem; margin-left: 0.5rem; vertical-align: 0.12em; }
+.fchelp .badge.edit { color: #155d36; background: #e6f6ec; border-color: #bfe6cd; }
+.fchelp .badge.all  { color: #334155; background: #eef2f6; border-color: #d9e1ea; }
 .fchelp p { margin: 0.5rem 0; }
 .fchelp ul { margin: 0.5rem 0; padding-left: 1.3rem; }
 .fchelp li { margin: 0.35rem 0; }
@@ -31,541 +52,800 @@
 .fchelp code { background: #f2f5f8; border: 1px solid #e2e8ee; border-radius: 4px;
                padding: 0.05rem 0.35rem; font-size: 0.88em; color: #33335c; white-space: nowrap; }
 .fchelp strong { color: #16232e; }
-.fchelp .backtop { display: inline-block; font-size: 0.82rem; color: #8795a1; text-decoration: none; margin-top: 0.6rem; }
+/* Note / tip callout. */
+.fchelp .note { border-left: 4px solid #1a5fb4; background: #f4f8fc; border-radius: 0 6px 6px 0;
+                padding: 0.5rem 0.9rem; margin: 0.7rem 0; font-size: 0.95rem; }
+.fchelp .note.warn { border-left-color: #c0362c; background: #fcf1ef; }
+.fchelp .note .lbl { font-weight: 700; color: #16232e; }
+.fchelp .backtop { display: inline-block; font-size: 0.82rem; color: #8795a1; text-decoration: none; margin-top: 0.7rem; }
 .fchelp .backtop:hover { color: #1a5fb4; }
 .fchelp a { color: #1a5fb4; }
-.fchelp .manual-link { display: inline-block; margin-top: 0.3rem; font-weight: 600; }
 </style>
 
 <div class="fchelp" id="help-top">
 
 <div class="help-header">
-  <h1>fetchconfig-web &mdash; Help</h1>
+  <h1>fetchconfig-web &mdash; User Guide</h1>
   <p class="lead"><strong>fetchconfig-web</strong> is a web front-end for
-  <code>fetchconfig</code>, the tool that backs up network device
-  configurations on this network. It doesn't keep its own copy of anything or
-  re-implement the backup logic: every page runs the same
-  <code>fetchconfig.pl</code> command-line tool behind the scenes, so what you
-  see here always matches what the command line would produce.</p>
-<section>
-  <h2>Per-site device access</h2>
-  <p>If your account is limited to one or more <strong>sites</strong>, you see
-  and edit only the devices tagged with your site codes. The Devices, Status
-  and Reports pages are filtered to your sites, Setup opens straight into the
-  graphical device editor (Devices only; the Defaults tab is view-only; no
-  Email/Reporting or Bulk edit), and a device can be assigned only to a site you
-  hold. An administrator manages site codes and per-user assignments on the User
-  page.</p>
-</section>
-
+  <code>fetchconfig</code>, the tool that backs up network-device configurations
+  on this network. It keeps no copy of its own and re-implements none of the
+  backup logic: every page runs the same <code>fetchconfig.pl</code> command-line
+  tool behind the scenes, so what you see here always matches what the command
+  line would produce. This page is the complete user guide; use the contents
+  below to jump to a topic.</p>
+  <p class="roles">Who can use a feature is marked where it matters:
+  <span class="badge all">everyone</span> every logged-in user,
+  <span class="badge edit">editors</span> users with the device-table edit right,
+  <span class="badge">admins only</span> the <code>admin</code> account or a user
+  granted <em>admin functions</em>.</p>
 </div>
 
 <nav class="toc">
   <h2>Contents</h2>
-  <ul>
-    <li><a href="#help-menu">The menu bar</a></li>
-    <li><a href="#help-login">Logging in and out</a></li>
-    <li><a href="#help-devices">Devices</a></li>
-    <li><a href="#help-status">Device backup status</a></li>
-    <li><a href="#help-backups">Backups for a device</a></li>
-    <li><a href="#help-viewing">Viewing a backup</a></li>
-    <li><a href="#help-comparing">Comparing two backups</a></li>
-    <li><a href="#help-user">User accounts</a></li>
-    <li><a href="#help-setup">Setup &amp; editing the device table</a></li>
-    <li><a href="#help-tools">Tools</a></li>
-    <li><a href="#help-navigation">Getting around long pages</a></li>
-    <li><a href="#help-browser">Browser requirements</a></li>
-    <li><a href="#help-support">Getting help</a></li>
-  </ul>
+  <div class="toc-grid">
+    <div>
+      <h3>Getting started</h3>
+      <ul>
+        <li><a href="#help-menu">The menu bar</a></li>
+        <li><a href="#help-login">Logging in and out</a></li>
+        <li><a href="#help-account">Your account &amp; password</a></li>
+        <li><a href="#help-sites-access">Per-site access</a></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Devices &amp; backups</h3>
+      <ul>
+        <li><a href="#help-devices">The device list</a></li>
+        <li><a href="#help-status">Device backup status</a></li>
+        <li><a href="#help-notes">Device notes</a></li>
+        <li><a href="#help-backups">Backups for a device</a></li>
+        <li><a href="#help-viewing">Viewing a backup</a></li>
+        <li><a href="#help-comparing">Comparing backups</a></li>
+        <li><a href="#help-reports">Backup reports</a></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Editing the configuration</h3>
+      <ul>
+        <li><a href="#help-setup">The device table &amp; editor</a></li>
+        <li><a href="#help-bulk">Bulk edit</a></li>
+        <li><a href="#help-templates">Templates</a></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Administration</h3>
+      <ul>
+        <li><a href="#help-tools">Tools overview</a></li>
+        <li><a href="#help-users">Users</a></li>
+        <li><a href="#help-sites">Sites</a></li>
+        <li><a href="#help-audit">Audit log</a></li>
+        <li><a href="#help-loginfail">Login failures</a></li>
+        <li><a href="#help-restore">Restore device table</a></li>
+        <li><a href="#help-cleanup">Repository checks &amp; cleanup</a></li>
+        <li><a href="#help-diskspace">Disk space</a></li>
+        <li><a href="#help-cfg">Show fetchconfig-web.cfg</a></li>
+        <li><a href="#help-email">E-mail setup &amp; report logo</a></li>
+        <li><a href="#help-schedlog">Last schedule log</a></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Reference</h3>
+      <ul>
+        <li><a href="#help-helpmenu">Help menu &amp; About</a></li>
+        <li><a href="#help-navigation">Getting around long pages</a></li>
+        <li><a href="#help-security">Security &amp; privacy</a></li>
+        <li><a href="#help-browser">Browser requirements</a></li>
+        <li><a href="#help-support">Getting help</a></li>
+      </ul>
+    </div>
+  </div>
 </nav>
+
+<!-- ============================ PART 1 ============================ -->
+<div class="help-part"><span class="n">Part 1</span><h2>Getting started</h2><span class="rule"></span></div>
 
 <section class="card" id="help-menu">
   <h2>The menu bar</h2>
   <p>The bar across the top of every page holds application-style drop-down
   menus; click a menu name to open it and pick a function. Your username and a
-  <strong>Log out</strong> link sit on the right. The menus are:</p>
+  <strong>Log out</strong> link sit on the right, and the program icon on the far
+  left opens the <strong>About</strong> dialog. Which menus you see depends on
+  your permissions:</p>
   <ul>
-    <li><strong>Devices</strong> &mdash; Devices (the home page after
-        login), Device backup status, Backup reports, Device notes.</li>
-    <li><strong>Setup devices</strong> (only if you may edit the device table)
+    <li><strong>Devices</strong> <span class="badge all">everyone</span> &mdash;
+        Devices (the home page after login), Device backup status, Backup
+        reports, Device notes.</li>
+    <li><strong>Setup devices</strong> <span class="badge edit">editors</span>
         &mdash; Device table, Edit device table, Bulk edit devices. A site-limited
-        user sees only Edit device table.</li>
-    <li><strong>Tools</strong> (administrators only) &mdash; each tool on its
-        own page: Audit log, Check devices for consistent backup suffixes,
-        Check site assignment, Devices without backups, Disk space,
-        Empty backup cleanup, Empty directory cleanup, Orphaned backup cleanup, Restore device table,
-        Show fetchconfig-web.cfg, Verify email setup, Login failures, Orphaned notes cleanup, Templates, Upload report logo, View last fetchconfig schedule log.</li>
-    <li><strong>User</strong> &mdash; Change your password (everyone); Users,
-        Add user and Sites (administrators only).</li>
-    <li><strong>Help</strong> &mdash; this page.</li>
-    <li><strong>Program icon</strong> (far left) &mdash; click it to open an
-        <strong>About</strong> dialog showing the program version(s), copyright,
-        the installed <code>fetchconfig.pl</code> version and the licence.</li>
+        editor sees only Edit device table.</li>
+    <li><strong>Tools</strong> <span class="badge">admins only</span> &mdash; each
+        maintenance tool on its own page (see <a href="#help-tools">Part 4</a>).</li>
+    <li><strong>User</strong> &mdash; Change your password and Change your email
+        (everyone); Users, Add user and Sites (admins only).</li>
+    <li><strong>Help</strong> &mdash; this guide, the two
+        <em>additional help</em> sections, and About
+        (see <a href="#help-helpmenu">Help menu &amp; About</a>).</li>
   </ul>
 </section>
 
 <section class="card" id="help-login">
   <h2>Logging in and out</h2>
   <ul>
-    <li>Access requires a username and password. If your session has expired
-        or you open the site fresh, you'll see the login page; enter your
+    <li>Access requires a username and password. If you open the site fresh or
+        your session has expired, you'll see the login page; enter your
         credentials to continue.</li>
-    <li>Sessions last a limited time and then require logging in again. Use
-        <strong>Log out</strong> in the top-right when you're finished,
+    <li>Sessions last a limited time and then require logging in again. There is
+        also an absolute lifetime after which you must log in regardless of
+        activity. Use <strong>Log out</strong> (top-right) when you're finished,
         especially on a shared computer.</li>
-    <li>If you don't have an account, or have forgotten your password, ask an
-        <code>admin</code> user &mdash; they can create accounts and reset
-        passwords (see <a href="#help-user">User accounts</a>).</li>
+    <li>Repeated failed logins for a username or from one address are temporarily
+        throttled to slow down guessing; a successful login clears the counter.</li>
+    <li><strong>Forgot your password?</strong> If password-reset e-mail is
+        enabled on this installation, the login page shows a
+        <strong>Forgot password?</strong> link that e-mails you a time-limited
+        reset link. If it is not enabled, ask an administrator to reset it for
+        you (see <a href="#help-users">Users</a>).</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
+<section class="card" id="help-account">
+  <h2>Your account &amp; password <span class="badge all">everyone</span></h2>
+  <ul>
+    <li><strong>User &rarr; Change your password</strong> &mdash; enter your
+        current password, then the new one twice.</li>
+    <li><strong>User &rarr; Change your email</strong> &mdash; set or update the
+        address used for password-reset mail (when e-mail is enabled).</li>
+    <li><strong>Password rules.</strong> New passwords must meet this site's
+        policy &mdash; a minimum length and, optionally, required character types
+        (upper-case, lower-case, digits, special characters, or a minimum number
+        of distinct character classes). The form tells you if a password is too
+        weak; the exact rules are set by your administrator.</li>
+    <li><strong>Default-password banner.</strong> If your account still uses the
+        initial default password, a banner appears after login until you change
+        it. Please pick a new password promptly.</li>
+  </ul>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-sites-access">
+  <h2>Per-site access</h2>
+  <p>Accounts can be limited to one or more <strong>sites</strong>. If yours is,
+  you see and work with only the devices tagged with your site codes:</p>
+  <ul>
+    <li>The Devices, Status, Reports and Notes pages are filtered to your
+        sites, and a device can be assigned only to a site you hold.</li>
+    <li>If you may edit, <strong>Setup devices</strong> opens straight into the
+        graphical editor showing only your devices; the Defaults tab is
+        view-only, and there is no Email/Reporting or Bulk edit.</li>
+    <li>An <strong>unrestricted</strong> user (the built-in <code>admin</code>,
+        or anyone holding the special "all sites" code) sees everything.</li>
+  </ul>
+  <p>Administrators manage site codes and per-user assignments &mdash; see
+  <a href="#help-sites">Sites</a>.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<!-- ============================ PART 2 ============================ -->
+<div class="help-part"><span class="n">Part 2</span><h2>Devices &amp; backups</h2><span class="rule"></span></div>
+
 <section class="card" id="help-devices">
-  <h2>Devices</h2>
+  <h2>The device list <span class="badge all">everyone</span></h2>
   <ul>
     <li>The <strong>Devices</strong> page (also the home page) lists every
-        Device-ID known to fetchconfig, read from its device table. Purely
+        Device-ID known to fetchconfig, read from its device table. Pure
         configuration entries in that table, such as the notification
         <code>email:</code> line, are not devices and are not listed.</li>
-    <li>The list shows each device's <strong>Model</strong>,
-        <strong>Device-ID</strong>, <strong>Hostname</strong> and
-        <strong>Comment</strong>. Narrow it with the <strong>model
-        dropdown</strong> (choose one of the models in use, or &ldquo;all
-        models&rdquo;) and the <strong>Device-ID</strong>,
-        <strong>Hostname</strong> and <strong>Comment</strong> filter boxes
-        (each matches anywhere in that column). They all combine, and
-        <strong>Clear filter</strong> resets them. Your filter choices are
-        remembered, so they stay in effect if you leave the page and come
-        back.</li>
-    <li>Click a column header to sort by it. The <strong>Hostname</strong>
-        column is smart about IP addresses: numeric IP addresses are sorted in
-        real address order (so <code>10.1.1.1</code> comes after
-        <code>2.5.7.8</code>, not before it) and listed before named hosts,
-        which sort alphabetically.</li>
-    <li>A <strong>statistics</strong> panel in the upper-right shows the total
-        device count, how many devices currently match your filter, and how
-        many devices there are per model.</li>
-    <li>For long lists, choose how many devices to show <strong>Per
-        page</strong> and page through them with the <strong>First</strong> /
-        <strong>Prev</strong> / <strong>Next</strong> / <strong>Last</strong>
-        buttons &mdash; First and Last jump straight to the beginning or end.</li>
-    <li>Click a Device-ID to open its backup history.</li>
+    <li>Each row shows the device's <strong>Model</strong>,
+        <strong>Site</strong>, <strong>Device-ID</strong>,
+        <strong>Hostname</strong>, <strong>Comment</strong> and a
+        <strong>Note</strong> icon. Narrow the list with the <strong>model</strong>
+        and <strong>site</strong> drop-downs and the <strong>Device-ID</strong>,
+        <strong>Hostname</strong> and <strong>Comment</strong> filter boxes (each
+        matches anywhere in that column). The site drop-down also offers
+        <strong>(no site)</strong>, which picks out the devices that carry no
+        <code>site=</code> tag. The filters combine;
+        <strong>Clear filter</strong> resets them, and your choices are
+        remembered between visits.</li>
+    <li>Click the <strong>Model</strong>, <strong>Site</strong>,
+        <strong>Device-ID</strong> or <strong>Hostname</strong> header to sort by
+        that column (Comment and Note are not sortable).
+        The <strong>Hostname</strong> column
+        is smart about IP addresses: numeric addresses sort in real address order
+        (so <code>10.1.1.1</code> comes after <code>2.5.7.8</code>, not before)
+        and are listed before named hosts, which sort alphabetically.</li>
+    <li>A <strong>Statistics</strong> panel (upper-right) shows the total device
+        count, how many match your filter, and a per-model breakdown.</li>
+    <li>For long lists, choose how many rows to show <strong>Per page</strong>
+        and page through with <strong>First</strong> / <strong>Prev</strong> /
+        <strong>Next</strong> / <strong>Last</strong>.</li>
+    <li>Click a <strong>Device-ID</strong> to open its backup history; click the
+        <strong>Note</strong> icon to read or edit its note.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
 <section class="card" id="help-status">
-  <h2>Status</h2>
-  <p>The <strong>Status</strong> page shows, for every device, the result of
-  its most recent backup &mdash; read from the small status file each backup
-  writes. For each device you see the start and end date/time, how long it
-  took, whether it succeeded (<em>State</em>) and whether the configuration
-  changed (<em>Changed</em>).</p>
+  <h2>Device backup status <span class="badge all">everyone</span></h2>
+  <p>The <strong>Device backup status</strong> page shows, for every device, the
+  result of its most recent backup &mdash; read from the small status file each
+  backup writes. You see the start and end date/time, how long it took, whether
+  it succeeded (<em>State</em>) and whether the configuration changed
+  (<em>Changed</em>).</p>
   <ul>
     <li><strong>State</strong> is colour-coded: green for success, red for
-    failed, blue for skipped. <strong>Changed</strong> shows changed/forced in
-    blue and unchanged in the normal colour.</li>
-    <li>Devices that have no status file yet show <strong>N/A</strong> in every
-    column.</li>
-    <li>Use the <strong>State</strong> and <strong>Changed</strong> drop-downs
-    to filter the list (N/A can be filtered too); click a column header to
-    sort; and page through long lists with the Per-page selector and the
-    First / Prev / Next / Last buttons.</li>
-    <li>Click a Device-ID to open its backups &mdash; the back button there
-    returns you to the Status page.</li>
+        failed, blue for skipped. <strong>Changed</strong> shows changed/forced
+        in blue and unchanged in the normal colour.</li>
+    <li>Devices with no status file yet show <strong>N/A</strong> in the date,
+        time, duration, State and Changed columns; Site and Device-ID always
+        show their real values.</li>
+    <li>Filter with the <strong>State</strong> and <strong>Changed</strong>
+        drop-downs (N/A can be filtered too), sort by any column header, and page
+        through long lists.</li>
+    <li>Click a Device-ID to open its backups; the back button there returns you
+        to this page.</li>
+  </ul>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-notes">
+  <h2>Device notes <span class="badge all">everyone</span></h2>
+  <p>Every device can carry one free-text <strong>note</strong> &mdash; a handy
+  place for site contacts, change reminders or quirks.</p>
+  <ul>
+    <li>A paper-note icon (filled when a note exists) sits in the
+        <strong>Note</strong> column of the device list and next to the Device-ID
+        on the backups page. Click it to open a small dialog that loads the note,
+        lets you edit it and a <strong>Keep</strong> flag, and saves it.</li>
+    <li><strong>Devices &rarr; Device notes</strong> lists all notes you may see
+        (Device-ID, the start of the note, the Keep flag and the last-updated
+        time), with filters (Device-ID, Keep, date range), paging and a per-row
+        delete.</li>
+    <li>Notes honour site access &mdash; a site-limited user sees and edits only
+        notes for devices in their sites. The note text is never written to the
+        audit log (only that a note was set, cleared or deleted).</li>
+    <li>The <strong>Keep</strong> flag protects a note from the admin
+        <em>Orphaned notes cleanup</em> if its device is later removed.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
 <section class="card" id="help-backups">
-  <h2>Backups for a device</h2>
-  <p>Clicking a device shows all of its stored backups, newest first, in a
-  table with these columns:</p>
+  <h2>Backups for a device <span class="badge all">everyone</span></h2>
+  <p>Clicking a device shows all its stored backups, newest first:</p>
   <ul>
-    <li><strong>#</strong> &mdash; the backup's index (1 is the newest). Click
-        it to view that backup's full configuration.</li>
+    <li><strong>#</strong> &mdash; the backup's index (1 is newest). Click it to
+        view that backup's full configuration.</li>
     <li><strong>Date</strong> and <strong>Time</strong> &mdash; when the backup
-        was taken, read from the backup file's own name. The date is shown as
-        <code>YYYY-MM-DD</code>; the time includes the timezone (for example
+        was taken, read from the file's own name. The date is
+        <code>YYYY-MM-DD</code>; the time includes the timezone (e.g.
         <code>14:35:56 CEST</code>).</li>
-    <li><strong>Size</strong> &mdash; the size of the stored configuration.</li>
+    <li><strong>Size</strong> &mdash; the stored configuration's size. A
+        zero-byte (empty) backup row is highlighted in red so it stands out.</li>
     <li><strong>Path</strong> &mdash; where the file lives in the repository.</li>
   </ul>
   <p>The buttons above the table act on this device:</p>
   <ul>
-    <li><strong>Backup now</strong> &mdash; connects to the device right now
-        and fetches a fresh configuration. You'll be asked to confirm first,
-        because it opens a live connection to the device. While it runs, a
-        spinner with a running timer is shown (a backup can take a while, so
-        please be patient). The full run transcript (what it connected to,
-        what happened, and whether it succeeded) is shown, and if a
-        notification address is configured a backup-summary e-mail is sent,
-        exactly as a command-line backup would. When it finishes you're
-        returned to the backup list, which now includes the new backup.</li>
-    <li><strong>Empty backups</strong> &mdash; the backup list shows each
-        backup's byte size, and any zero-byte (empty) backup row is highlighted
-        in red, so empty captures stand out at a glance without a separate
-        check step.</li>
-    <li><strong>Check backup suffixes</strong> &mdash; checks that this
-        device's stored backups all use the same filename extension, and shows
-        the full result (including a per-file breakdown when they differ).
-        Read-only, in the same kind of output box.</li>
-    <li><strong>Download latest configuration</strong> &mdash; downloads the
-        most recent backup's configuration as a file. For normal devices it is
-        named <code>&lt;Device-ID&gt;-YYMMDD-HHMMSS.cfg</code> (date and time
-        taken from the backup); for the web-managed switches it is the decoded
-        binary config file.</li>
-    <li><strong>Compare selected</strong> and <strong>Side by side
-        selected</strong> &mdash; see <a href="#help-comparing">Comparing two
-        backups</a>.</li>
+    <li><strong>Backup now</strong> &mdash; connects to the device right now and
+        fetches a fresh configuration. You confirm first (it opens a live
+        connection); a spinner with a running timer shows while it works. The
+        full run transcript is shown, and if a notification address is configured
+        a backup-summary e-mail is sent &mdash; exactly as a command-line backup
+        would. Success/failure is taken from the backup's own status, so an
+        <em>initial</em> backup (no previous config to compare) is reported as a
+        success, not a failure. When it finishes you return to the backup list,
+        now including the new backup.</li>
+    <li><strong>Download</strong> &mdash; downloads the backup you picked in the
+        table's <strong>DL</strong> column as a file; if you haven't picked one
+        it asks you to select a configuration first. For normal devices it is
+        named <code>&lt;Device-ID&gt;-YYMMDD-HHMMSS.cfg</code>; for the
+        web-managed switches it is the decoded binary config file.</li>
+    <li><strong>Compare selected</strong> / <strong>Side by side selected</strong>
+        &mdash; see <a href="#help-comparing">Comparing backups</a>.</li>
   </ul>
+  <div class="note"><span class="lbl">Note.</span> The <strong>DL</strong> column
+  and the <strong>Download</strong> button are shown only to a user who holds the
+  <em>download/copy unmasked config</em> right; without it neither appears.</div>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
 <section class="card" id="help-viewing">
-  <h2>Viewing a backup</h2>
+  <h2>Viewing a backup <span class="badge all">everyone</span></h2>
   <ul>
     <li>Click a backup's <strong>#</strong> to see its full configuration in a
         monospaced block. For Cisco IOS, Cisco Nexus, ProCurve, Comware, Zyxel,
-        PLANET, Aruba CX and AudioCodes Mediant SBC
-        devices the
-        configuration is colour-highlighted (keywords, interfaces, IP
-        addresses, and so on) to make it easier to read; certificate dumps and
-        banners are left un-highlighted.</li>
-    <li>Use the <strong>Copy</strong> button to copy the whole configuration to
-        your clipboard in one click (the plain text is copied, without the
-        colour markup).</li>
-    <li>For your protection, anything that looks like a stored password in the
-        displayed text is masked (shown as <code>?***?</code>) throughout the
-        interface. This affects only what's shown on screen, never the backup
-        file itself.</li>
-    <li><strong>Web-managed switches without a CLI</strong> (TP-Link Easy
-        Smart and HP ProCurve 1700) are different: their backup is a binary
-        file, not text, so instead of showing it the page gives you a
-        <strong>Download</strong> button. The downloaded file (named
-        <code>&lt;Device-ID&gt;-switch.cfg</code> for ProCurve 1700, or
-        <code>&lt;Device-ID&gt;-config.cfg</code> for TP-Link) is ready to
-        upload to the switch's own config-restore page. For the same reason,
-        the Compare buttons are not shown for these switches.</li>
+        PLANET, Aruba CX and AudioCodes Mediant SBC devices the configuration is
+        colour-highlighted (keywords, interfaces, IP addresses, and so on);
+        certificate dumps and banners are left plain.</li>
+    <li>Use <strong>Copy</strong> to copy the whole configuration to your
+        clipboard (plain text, without the colour markup). For a user who holds
+        the <em>download/copy unmasked config</em> right the button is labelled
+        <strong>Copy unmasked</strong> and copies the unmasked configuration,
+        fetched from the server rather than from the masked page.</li>
+    <li>For your protection, anything that looks like a stored password is masked
+        (shown as <code>?***?</code>) everywhere in the interface. This affects
+        only what is displayed, never the backup file itself.</li>
+    <li><strong>Web-managed switches without a CLI</strong> (TP-Link Easy Smart,
+        HP ProCurve 1700) store a binary file, not text, so the page gives you a
+        <strong>Download</strong> button instead of a listing (named
+        <code>&lt;Device-ID&gt;-switch.cfg</code> or
+        <code>&lt;Device-ID&gt;-config.cfg</code>), ready to upload to the
+        switch's own restore page. That button too needs the
+        <em>download/copy unmasked config</em> right &mdash; without it the page
+        says you do not have the right to download device configurations. The
+        Compare buttons are not shown for these.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
 <section class="card" id="help-comparing">
-  <h2>Comparing two backups</h2>
+  <h2>Comparing backups <span class="badge all">everyone</span></h2>
   <ul>
-    <li>On a device's backup list, tick the checkboxes of exactly
-        <strong>two</strong> backups, then press one of the compare buttons.</li>
+    <li>On a device's backup list, tick exactly <strong>two</strong> backups,
+        then press a compare button.</li>
     <li><strong>Compare selected</strong> shows a single-column
         &ldquo;unified&rdquo; diff &mdash; the classic before/after view with
         changed lines marked in place.</li>
-    <li><strong>Side by side selected</strong> shows a two-column view with the
-        older backup on the left and the newer on the right, lined up so you
-        can read straight across. Long lines don't wrap up to a good width, and
-        the view widens to use the screen.</li>
-    <li>In both views the differences are colour-coded: <strong>green</strong>
-        for added lines, <strong>red</strong> for removed lines, and
-        <strong>amber</strong> for changed lines. If the two backups are
-        identical you'll be told so instead.</li>
+    <li><strong>Side by side selected</strong> shows a two-column view, older on
+        the left and newer on the right, lined up so you can read across; it
+        widens to use the screen.</li>
+    <li>Differences are colour-coded: <strong>green</strong> for added,
+        <strong>red</strong> for removed, <strong>amber</strong> for changed. If
+        the two backups are identical you are told so instead. Whitespace outside
+        quoted text is ignored, and passwords stay masked.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
-<section class="card" id="help-user">
-  <h2>User accounts</h2>
+<section class="card" id="help-reports">
+  <h2>Backup reports <span class="badge all">everyone</span></h2>
+  <p>The <strong>Devices &rarr; Backup reports</strong> page lists the HTML
+  change-reports fetchconfig writes after a scheduled run, newest first, with
+  <strong>View</strong>, <strong>Download</strong> and <strong>Delete</strong>
+  per report and a <strong>Delete reports older than N&nbsp;days</strong> control
+  (the newest is always kept).</p>
   <ul>
-    <li><strong>Change your password</strong> &mdash; available to everyone.
-        You must enter your current password, then the new one twice.</li>
-    <li>If your account is still using the default password, a banner appears
-        after you log in until you change it &mdash; please pick a new
-        password promptly.</li>
-    <li>If you are an <strong>admin</strong> (the <code>admin</code> account,
-        or any user granted <em>admin functions</em>), the User page also lets
-        you manage other accounts:
-      <ul>
-        <li>The <strong>User list</strong> shows username, email, an Admin
-            indicator, and <strong>Reset password</strong> / <strong>Delete</strong>
-            buttons. Click a username to open its edit page, where all of that
-            user's settings and permissions live.</li>
-        <li><strong>Add user</strong> &mdash; create a new account with a
-            username, password and optional email. The account starts with no
-            special permissions; you are taken straight to its edit page to set
-            them.</li>
-        <li><strong>Edit user</strong> (click a username) &mdash; one page to
-            set the email and permissions (Administrator, which overrides the
-            individual rights; edit device table; download full report;
-            download/copy unmasked config), view the assigned sites with a
-            button to the sites editor, and reset the password. Save writes
-            everything at once; Cancel/Return warn if you have unsaved changes.</li>
-        <li><strong>Delete</strong> &mdash; remove an account (the button next
-            to each user). The <code>admin</code> account itself can never be
-            deleted.</li>
-        <li><strong>Reset password</strong> (next to a user, or on the edit
-            page) &mdash; set a new password for that user <em>without</em>
-            needing their old one. It can't be used on the <code>admin</code>
-            account &mdash; admin's own password is only changed the normal way,
-            with the current password.</li>
-      </ul>
-    </li>
+    <li><strong>View</strong> opens the report inside fetchconfig-web, each device
+        shown as a collapsible section (<em>Expand all</em> /
+        <em>Collapse all</em>), with the diff text safely escaped.</li>
+    <li><strong>Download</strong> streams the original self-contained
+        <code>.html</code> file.</li>
+    <li>Reports are masked like everything else. Seeing the full, unmasked report
+        requires the <em>download full report</em> right; otherwise you see the
+        sections for your sites.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
+
+<!-- ============================ PART 3 ============================ -->
+<div class="help-part"><span class="n">Part 3</span><h2>Editing the configuration</h2><span class="rule"></span></div>
 
 <section class="card" id="help-setup">
-  <h2>Setup &amp; editing the device table</h2>
+  <h2>The device table &amp; editor <span class="badge edit">editors</span></h2>
+  <p>The <strong>Setup devices</strong> menu appears for the <code>admin</code>
+  account and any user with the device-table edit right. Because the device table
+  can hold device login credentials (on its <code>default:</code> lines), treat
+  this page as sensitive.</p>
   <ul>
-    <li>The <strong>Setup devices</strong> menu appears for the
-        <code>admin</code> account and for any user granted the device-table
-        edit right. Its <strong>Device table</strong> item shows the raw
-        fetchconfig device table exactly as the tool reads it, with a Copy
-        button; <strong>Edit device table</strong> opens the graphical editor
-        and <strong>Bulk edit devices</strong> the raw editor.</li>
-    <li>Because the device table can contain device login credentials (on its
-        <code>default:</code> lines), access is restricted this way and the
-        page should be treated as sensitive.</li>
-    <li><strong>Edit device table</strong> opens a structured editor with
-        three tabs &mdash; <strong>Devices</strong>, <strong>Defaults</strong>
-        (per model), and <strong>Email notification</strong>. On the Devices
-        tab each device is a compact <strong>collapsed row</strong>
-        (Device-ID / Model / Site / Comment); click <strong>Edit</strong> to
-        expand it into a full card of proper fields for the selected model, and
-        <strong>Collapse</strong> to fold it again. Use <em>+ add option</em> to
-        add a recognized option, <em>+ Add device</em> / <em>+ Add model
-        defaults</em> to add rows, and the &times; / Delete buttons to remove
-        options or whole entries. Filter the rows by <strong>Device-ID</strong>,
-        <strong>Site</strong> (a drop-down) and <strong>comment</strong>; the
-        filter is remembered between visits. Long lists paginate (100 per page)
-        with First/Prev/Next/Last above and below.</li>
-    <li><strong>Save changes</strong> writes the table (a timestamped backup is
-        taken first). <strong>Preview raw table</strong> shows exactly what would
-        be written, with passwords masked, and is view-only &mdash; use
-        <strong>Back to editor</strong> to return and save.
-        <strong>Reject all changes</strong> reloads from disk and discards your
-        edits. Passwords you don't change are kept (a masked
-        <code>\__unchanged__/</code> placeholder stands in for the stored value);
-        every device must have a <strong>site</strong> before the table saves.</li>
-    <li>If the device table has a <strong>directory allow-list</strong> (the
-        <code>directory:</code> lines, editable only on the server), the
-        <strong>repository</strong> and <strong>template_dir</strong> options
-        become drop-downs of the allowed directories; each entry shows its
-        <code>$ALIAS</code> together with the directory it expands to, and the
-        selected directory is also shown in gray beside the box. When a device's
-        <strong>repository</strong>, <strong>template_dir</strong> (generic
-        model) or <strong>on_fetch_run</strong> directory matches the value from
-        its model's <code>default:</code> line, a blue <strong>default</strong>
-        flag is shown and that option is coloured blue. The <code>on_fetch_run</code>
-        option (if allowed) is edited as a directory drop-down plus a command
-        field; if the allow-list sets <code>fetch_run</code> to <code>none</code>
-        it cannot be used. When a <code>report</code> directory is allow-listed,
-        the Email tab gains the report options (<code>report_dir</code> as a
-        drop-down, plus <code>write_report</code>, <code>email_max_diff</code>,
-        <code>web_report_url</code>, <code>report_logo</code> and
-        <code>report_days</code>). A table that uses a
-        directory not on the list opens with a red warning but cannot be saved
-        until it is fixed.</li>
-    <li>For the <strong>generic</strong> (template-driven) model, the
-        <code>model</code> option is a drop-down of the templates fetchconfig
-        reports (via <code>fetchconfig.pl -t</code>), scoped to the
-        <code>template_dir</code> in effect for that row. Pick the template for
-        the device, or set it once on a <strong>Defaults</strong> card for
-        <code>generic</code> so all generic devices inherit it. If you change
-        <code>template_dir</code>, the model list updates when you leave the
-        field; the information icon notes that templates added on disk appear
-        only after you reload the page.</li>
-    <li>The <strong>Email notification</strong> tab sets who gets the
-        backup-summary e-mail (the <code>from</code>, <code>to</code> and
-        <code>smtp</code> server, plus optional SMTP <code>user</code>/
-        <code>password</code>). The optional <strong>footer</strong> field is
-        the copyright / attribution line shown at the bottom of that e-mail;
-        leave it empty to use the default.</li>
-    <li>Passwords are shown masked (as <code>\__unchanged__/</code>). Leave a
-        masked field alone to keep the current password; type a new value to
-        change it. New devices need their password typed in.</li>
-    <li><strong>Preview raw table</strong> shows exactly what will be written
-        (passwords masked) without saving. From the preview you can
-        <strong>Save changes</strong> directly &mdash; your edits are kept
-        &mdash; or go <strong>Back to editor</strong> to keep working. The
-        editor's <strong>Save changes without preview</strong> button skips
-        the preview. On save, a timestamped backup of the previous table is
-        kept first. If someone else changed the table while you were editing,
-        the save is refused so your edits can't overwrite theirs; reload and
-        redo them.</li>
-    <li><strong>Bulk Edit</strong> <span class="badge">admins only</span>
-        opens a plain-text editor showing the whole device list, one device
-        per line, with passwords in plain text. Editing here is quick for
-        adding or changing many devices at once, but be careful:
-        <strong>saving replaces the entire device list</strong> with what's in
-        the box &mdash; a line you remove is deleted, and an empty box removes
-        all devices. The defaults and email settings are not affected. You're
-        asked to confirm, and if any line is invalid nothing is saved and the
-        problems are listed.</li>
+    <li><strong>Device table</strong> shows the raw fetchconfig device table
+        exactly as the tool reads it, with a Copy button (passwords masked).</li>
+    <li><strong>Edit device table</strong> opens a structured editor with three
+        tabs: <strong>Devices</strong>, <strong>Defaults</strong> (per model) and
+        <strong>Email notification</strong>.</li>
+  </ul>
+  <h3>Editing devices</h3>
+  <ul>
+    <li>Each device is a compact <strong>collapsed row</strong> (Device-ID /
+        Model / Site / Comment). Click <strong>Edit</strong> to expand it into a
+        full card of the proper fields for that model, and <strong>Collapse</strong>
+        to fold it again.</li>
+    <li>Use <em>+ add option</em> to add a recognized option, <em>+ Add device</em>
+        / <em>+ Add model defaults</em> to add rows, and the &times; / Delete
+        buttons to remove options or whole entries.</li>
+    <li>Filter rows by <strong>Device-ID</strong>, <strong>Site</strong> and
+        <strong>comment</strong> (remembered between visits); long lists paginate
+        (100 per page) with First/Prev/Next/Last above and below.</li>
+    <li>Every device must have a <strong>site</strong> before the table will
+        save.</li>
+  </ul>
+  <h3>Passwords</h3>
+  <p>Stored passwords are shown masked as <code>\__unchanged__/</code>. Leave a
+  masked field alone to keep the current password; type a new value to change it.
+  New devices need their password typed in.</p>
+  <h3>Allow-listed directories</h3>
+  <p>If the device table has a <strong>directory allow-list</strong> (the
+  <code>directory:</code> lines, editable only on the server), the
+  <strong>repository</strong> and <strong>template_dir</strong> options become
+  drop-downs of the allowed directories &mdash; each entry shows its
+  <code>$ALIAS</code> and the directory it expands to, with the resolved path in
+  gray beside the box. When a value matches the one on the model's
+  <code>default:</code> line, a blue <strong>default</strong> flag is shown. The
+  <code>on_fetch_run</code> option (if allowed) is a directory drop-down plus a
+  command field; report options appear on the Email tab when a
+  <code>report</code> directory is allow-listed. A table that uses a directory
+  not on the list opens with a red warning and cannot be saved until fixed.</p>
+  <h3>Generic (template-driven) devices</h3>
+  <p>For the <strong>generic</strong> model, the <code>model</code> option is a
+  drop-down of the templates fetchconfig reports, scoped to the
+  <code>template_dir</code> in effect for that row. Pick the template for the
+  device, or set it once on a <strong>Defaults</strong> card for
+  <code>generic</code> so all generic devices inherit it. Templates added on disk
+  appear after you reload the page. See <a href="#help-templates">Templates</a>.</p>
+  <h3>E-mail notification</h3>
+  <p>The <strong>Email notification</strong> tab sets who gets the backup-summary
+  e-mail (the <code>from</code>, <code>to</code> and <code>smtp</code> server,
+  plus optional SMTP user/password) and an optional <strong>footer</strong>
+  (the attribution line at the bottom of that e-mail; empty = default).</p>
+  <h3>Saving</h3>
+  <ul>
+    <li><strong>Preview raw table</strong> shows exactly what would be written
+        (passwords masked), view-only; from there you can
+        <strong>Save changes</strong> or go <strong>Back to editor</strong>. The
+        editor's <strong>Save changes without preview</strong> skips it.</li>
+    <li>On save, a timestamped backup of the previous table is kept first, so you
+        can always roll back (see <a href="#help-restore">Restore device
+        table</a>).</li>
+    <li><strong>Reject all changes</strong> reloads from disk and discards your
+        edits.</li>
+  </ul>
+  <div class="note"><span class="lbl">Note.</span> If someone else changed the
+  table while you were editing, the save is refused so your edits can't overwrite
+  theirs &mdash; reload and redo them.</div>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-bulk">
+  <h2>Bulk edit <span class="badge">admins only</span></h2>
+  <p><strong>Setup devices &rarr; Bulk edit devices</strong> opens a plain-text
+  editor showing the whole device list, one device per line, with passwords in
+  plain text. It is quick for adding or changing many devices at once.</p>
+  <div class="note warn"><span class="lbl">Careful.</span> Saving
+  <strong>replaces the entire device list</strong> with what's in the box &mdash;
+  a line you remove is deleted, and an empty box removes all devices. The
+  defaults and e-mail settings are not affected. You confirm first, and if any
+  line is invalid nothing is saved and the problems are listed.</div>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-templates">
+  <h2>Templates <span class="badge">admins only</span></h2>
+  <p>Template-driven (<strong>generic</strong>) devices are backed up using a
+  <code>*.tmpl</code> template that describes the device's login and commands.
+  <strong>Tools &rarr; Templates</strong>
+  lists the templates fetchconfig finds in the configured template directories,
+  one row per file, sorted by name. The same name may appear in more than one
+  directory (shown as separate rows with their directory).</p>
+  <p>Each row shows the template's size and modification time, a
+  <strong>Used</strong> column (whether a device currently uses it) and the
+  actions:</p>
+  <ul>
+    <li><strong>View</strong> &mdash; open the template read-only, with syntax
+        highlighting.</li>
+    <li><strong>Edit</strong> &mdash; open the split editor (see below).</li>
+    <li><strong>Rename</strong> &mdash; rename an <em>unused</em> template within
+        its directory. A popup asks for the new name (prefilled with the current
+        one); it must be a valid <code>model=</code> value and must not already
+        exist. The button is greyed out while a device still uses the template,
+        for the same reason as Delete &mdash; the name is what the device matches
+        on. The backup is carried over to the new name.</li>
+    <li><strong>Download</strong> &mdash; save the template file to your
+        computer.</li>
+    <li><strong>Delete</strong> &mdash; remove an <em>unused</em> template (and
+        its backup). The button is greyed out while a device still uses the
+        template; what is in use is re-checked at the moment you delete.</li>
+  </ul>
+  <h3>Upload a template</h3>
+  <p><strong>Upload template</strong> adds a new <code>.tmpl</code> file to a
+  template directory you choose. The file must be text and at most
+  <strong>100&nbsp;KB</strong>, its name is the generic <code>model=</code> value
+  (letters, digits, <code>._-</code> and a <code>.tmpl</code> extension), it is
+  <strong>syntax-checked before it is installed</strong> (a file that fails the
+  check is never placed), and an existing name is <strong>never overwritten</strong>.</p>
+  <h3>Generate a template from a HEX capture</h3>
+  <p><strong>Upload HEX capture</strong> builds a starter template from a session
+  recorded with <code>record-session.pl</code>. Choose the <code>.hex</code> file
+  (text, at most <strong>1&nbsp;MB</strong>; it must start with the
+  <code># record-session</code> banner), a <strong>template name</strong>, a target
+  directory, and a <strong>syntax highlighting</strong> scheme (<code>auto</code>,
+  <code>none</code>, or a named scheme such as <code>cisco-ios</code>). The capture
+  is run through fetchconfig's <code>generate_template.pl</code>; the chosen scheme
+  is written into the template header, and the result is syntax-checked and
+  installed just like an upload (same 100&nbsp;KB and no-overwrite rules).</p>
+  <div class="note"><span class="lbl">Note.</span> The generated template is a
+  <strong>draft</strong>. Open it with <strong>Edit</strong>, review every line
+  (especially any <code># TODO</code> markers), and test it against the device with
+  the <code>generic</code> model before relying on it.</div>
+  <p>If your administrator has installed them, the block also offers a
+  <strong>Session recorder</strong> download &mdash; <code>record_session.exe</code>
+  for Windows and the <code>record_session.py</code> source &mdash; for capturing the
+  <code>.hex</code> session in the first place. A SHA-256 is shown beside each
+  download. The Windows executable is unsigned, so SmartScreen or antivirus may
+  warn on first run.</p>
+  <h3>The template editor</h3>
+  <p><strong>Edit</strong> opens a split editor: the left pane is editable, the
+  right <strong>Checked version</strong> shows it highlighted.</p>
+  <ul>
+    <li><strong>Check syntax</strong> validates the template with fetchconfig (a
+        structural check) and shows any errors.</li>
+    <li><strong>Save</strong> writes only if the check passes, keeping the
+        previous version as a single <code>.tmpl.bak</code>.</li>
+    <li><strong>Discard changes</strong> reloads the file and drops unsaved
+        edits; <strong>Revert to last backup version</strong> (shown when a
+        backup exists) restores that backup.</li>
+    <li><strong>Help templates</strong> opens the template-engine manual in a new
+        tab.</li>
+  </ul>
+  <div class="note"><span class="lbl">Note.</span> The syntax check is structural
+  only &mdash; it confirms the template's grammar, not that it actually drives
+  your device. Always test a changed or uploaded template against the real
+  hardware.</div>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<!-- ============================ PART 4 ============================ -->
+<div class="help-part"><span class="n">Part 4</span><h2>Administration</h2><span class="rule"></span></div>
+
+<section class="card" id="help-tools">
+  <h2>Tools overview <span class="badge">admins only</span></h2>
+  <p>The <strong>Tools</strong> menu (the <code>admin</code> account or any user
+  with admin functions) gathers the maintenance functions, each on its own page.
+  Destructive actions always ask you to confirm and are recorded in the
+  <a href="#help-audit">audit log</a>. The rest of this part describes them.</p>
+</section>
+
+<section class="card" id="help-users">
+  <h2>Users <span class="badge">admins only</span></h2>
+  <ul>
+    <li><strong>User &rarr; Users</strong> lists username, e-mail, an Admin
+        indicator and <strong>Reset password</strong> / <strong>Delete</strong>
+        buttons. Click a username to open its edit page.</li>
+    <li><strong>Add user</strong> &mdash; create an account with a username,
+        password and optional e-mail. It starts with no special permissions; you
+        are taken to its edit page to set them.</li>
+    <li><strong>Edit user</strong> &mdash; one page sets the e-mail and
+        permissions (<em>Administrator</em>, which overrides the individual
+        rights; <em>edit device table</em>; <em>download full report</em>;
+        <em>download/copy unmasked config</em>), shows the assigned sites with a
+        button to the <a href="#help-sites">sites editor</a>, and resets the
+        password. Save writes everything at once; Cancel/Return warn about
+        unsaved changes.</li>
+    <li><strong>Reset password</strong> sets a new password for a user without
+        their old one &mdash; except for <code>admin</code>, whose password is
+        only changed the normal way (with the current password).</li>
+    <li><strong>Delete</strong> removes an account; the <code>admin</code>
+        account can never be deleted.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
-<section class="card" id="help-tools">
-  <h2>Tools <span class="badge">admins only</span></h2>
+<section class="card" id="help-sites">
+  <h2>Sites <span class="badge">admins only</span></h2>
+  <p><strong>User &rarr; Sites</strong> defines the site codes and their
+  descriptions. A device carries an optional <code>site=</code> code in the device
+  table, and each user is assigned one or more codes; a device is visible to a
+  user only when its site is one of theirs. The reserved <strong>"all sites"</strong>
+  code makes a user unrestricted (the built-in <code>admin</code> always has it).
+  Assign codes to a user from the sites editor or the user's edit page. See also
+  <em>Tools &rarr; Check site assignment</em> under
+  <a href="#help-cleanup">Repository checks</a>.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-audit">
+  <h2>Audit log <span class="badge">admins only</span></h2>
+  <p>An append-only record of changes: device-table edits (per option,
+  old&nbsp;&rarr;&nbsp;new), backup runs, deletes and cleanups, user and site
+  changes, password changes (never the password itself), logo and template
+  changes, and logins / failed logins / denied attempts. Secret values are stored
+  as <code>***</code>, and the log cannot be altered or deleted from the web UI.
+  The viewer shows 100 entries per page (newest first) with filters,
+  First/Prev/Next/Last navigation and a CSV export.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-loginfail">
+  <h2>Login failures <span class="badge">admins only</span></h2>
+  <p><strong>Tools &rarr; Login failures</strong> shows recent failed-login
+  activity and any usernames or addresses currently throttled, with how long the
+  throttle lasts. A successful login clears that key's counter. Use it to spot
+  guessing attempts or a user locked out after too many tries.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-restore">
+  <h2>Restore device table <span class="badge">admins only</span></h2>
+  <p><strong>Tools &rarr; Restore device table</strong> lists the automatic
+  backups of the device table (one is saved before every editor or bulk-edit
+  save), with a <strong>current</strong> row at the top for the live table.</p>
   <ul>
-    <li>The <strong>Tools</strong> menu item appears for admins (the
-        <code>admin</code> account or any user with admin functions).</li>
+    <li>For each backup: <strong>View</strong> its contents,
+        <strong>Restore</strong> it (the current table is backed up first, so a
+        restore is itself undoable), or <strong>Delete</strong> it. Restore and
+        Delete both confirm.</li>
+    <li>Tick two rows (any mix of current and backups) and press
+        <strong>Compare selected</strong> or <strong>Side by side selected</strong>
+        to diff them; the newer version is green, the older red, and whitespace
+        outside quoted text is ignored.</li>
+    <li>Viewing and comparing <strong>mask passwords by default</strong>; untick
+        <strong>Mask passwords</strong> to show them.</li>
+    <li><strong>Delete backups older than N&nbsp;days</strong> removes older
+        backups but always keeps the newest, so you never lose your last restore
+        point (shown only when at least two backups exist).</li>
   </ul>
-  <p><strong>Orphaned backups</strong> &mdash; backed-up configurations still
-  on disk whose device is no longer in the device table (for example, a device
-  that was decommissioned or renamed):</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-cleanup">
+  <h2>Repository checks &amp; cleanup <span class="badge">admins only</span></h2>
+  <p>These tools keep the backup repository tidy. The "check" actions only report;
+  the "delete" actions confirm first, show the result like a backup run, and
+  cannot be undone.</p>
   <ul>
-    <li><strong>Check for orphaned backups</strong> lists any orphaned backups
-        without changing anything.</li>
-    <li><strong>Delete orphaned backups</strong> permanently removes them. You
-        are asked to confirm first, and the result (what was found and what was
-        removed) is shown just like a backup run. This cannot be undone.</li>
+    <li><strong>Orphaned backup cleanup</strong> &mdash; backups on disk whose
+        device is no longer in the device table (decommissioned or renamed).
+        Check lists them; Delete removes them.</li>
+    <li><strong>Empty directory cleanup</strong> &mdash; date or per-device
+        directories left with no files in them. Check lists; Delete removes.</li>
+    <li><strong>Empty backup cleanup</strong> &mdash; scans every device for
+        zero-byte backup files (a fetch that connected but saved nothing). Check
+        lists; Delete removes.</li>
+    <li><strong>Check devices for consistent backup suffixes</strong> &mdash;
+        lists devices whose backups don't all share the same filename suffix, or
+        whose suffix doesn't match the configured one. Press
+        <strong>Start scan</strong> (a progress bar shows how far along, and you
+        can Cancel) and each affected device is listed with its details.</li>
+    <li><strong>Devices without backups</strong> &mdash; press
+        <strong>Start scan</strong> (a progress bar shows how far along, and you
+        can Cancel) to list devices that have never been backed up &mdash; a quick
+        way to find devices needing an initial <em>Backup now</em>.</li>
+    <li><strong>Check site assignment</strong> &mdash; lists devices with no
+        <code>site=</code> tag (shown with a red placeholder in the editor), so
+        you can assign them.</li>
+    <li><strong>Orphaned notes cleanup</strong> &mdash; removes notes whose device
+        is no longer in the table, unless the note's <strong>Keep</strong> flag is
+        set.</li>
   </ul>
-  <p><strong>Empty directories</strong> &mdash; date or per-device directories
-  left in the repository with no files in them. Normal backup aging and the
-  orphaned-backup cleanup usually take care of these; this tool covers the
-  occasional one left behind by manual file operations:</p>
-  <ul>
-    <li><strong>Check for empty directories</strong> lists any empty
-        directories without changing anything.</li>
-    <li><strong>Delete empty directories</strong> permanently removes them,
-        after a confirm dialog, showing the result the same way. This cannot be
-        undone.</li>
-  </ul>
-  <p><strong>Restore device table</strong> &mdash; lists the automatic backups
-  of the device table (one is saved before every editor or bulk-edit save),
-  with a <strong>current</strong> row at the top for the live table:</p>
-  <ul>
-    <li>For each backup you can <strong>View</strong> its contents,
-        <strong>Restore</strong> it (the current table is backed up first, so
-        you can undo a restore), or <strong>Delete</strong> it. Restore and
-        Delete both ask you to confirm.</li>
-    <li>To compare two configurations, tick two rows (any mix of
-        <strong>current</strong> and backups) and press either
-        <strong>Compare selected</strong> (a single-column list of just the
-        changed lines) or <strong>Side by side selected</strong> (a two-column
-        view of the full configs). The newer version is always shown in green
-        and the older in red (<strong>current</strong> counts as newest,
-        otherwise the later timestamp wins). Differences that are only spacing
-        (tabs/spaces, outside quoted text) are ignored.</li>
-    <li>Passwords are <strong>masked by default</strong> when viewing or
-        comparing; untick the <strong>Mask passwords</strong> checkbox to show
-        them in plain text.</li>
-    <li>To clean up in bulk, enter a number of days and press <strong>Delete
-        backups older than days</strong>: every backup older than that is
-        removed &mdash; except the <strong>newest</strong> one, which is
-        always kept so you never lose your last restore point. You are asked
-        to confirm first. This control only appears when there are at least
-        two backups.</li>
-  </ul>
-  <p><strong>Devices without backups</strong> &mdash; press
-  <strong>Start scan</strong> to check every device in the table for stored
-  backups. A progress bar shows how far along the scan is (and the button
-  becomes <strong>Cancel scan</strong> so you can stop early), and when it
-  finishes the devices that have <em>no</em> backups yet (never backed up)
-  are listed &mdash; a quick way to spot devices that still need an initial
-  <strong>Backup now</strong>.</p>
-  <p><strong>Empty backup cleanup</strong> &mdash; scans every device at once
-  (<code>fetchconfig.pl -Z</code>) for <em>empty</em> (zero-byte) backup files
-  &mdash; a fetch that connected but saved nothing. <strong>Check for empty
-  backups</strong> lists them without changing anything; <strong>Delete empty
-  backups</strong> (<code>-Z -D</code>) permanently removes them. A spinner is
-  shown while the scan runs.</p>
-  <p><strong>Check devices for consistent backup suffixes</strong> &mdash;
-  works the same way, listing devices whose backups don't all share the same
-  filename suffix, or whose suffix doesn't match the configured one. It lists
-  the affected Device-IDs; open a device's <strong>Check backup suffixes</strong>
-  button to see the details.</p>
-  <p><strong>View last fetchconfig schedule log</strong> &mdash; press <strong>Display
-  log</strong> to open the output of the scheduled (cron) backup run on its
-  own page, split into sections you can expand or collapse. Each section's
-  name is green if it succeeded and red if it failed; failed sections open
-  automatically so problems are easy to spot. Use <strong>Expand all</strong>
-  / <strong>Collapse all</strong> to toggle everything at once.</p>
-  <p><strong>Templates</strong> &mdash; press <strong>Show templates</strong>
-  to list the generic-model templates (<code>*.tmpl</code>) found in the
-  template directories that <code>fetchconfig.pl -t</code> reports. Each file is
-  listed once (the same template name may legitimately appear in more than one
-  directory, shown as separate rows with their directory), sorted by name. Click
-  <strong>View</strong> to open a template read-only, with syntax highlighting,
-  in the same kind of window as a configuration view.</p>
-  <p><strong>Audit log</strong> &mdash; an append-only record of changes:
-  device-table edits (per option, old &rarr; new), backup runs, deletes and
-  cleanups, user and site changes, password changes (never the password),
-  logo and template changes, and logins / failed logins / denied attempts.
-  Secret values are stored as <code>***</code>. The log cannot be altered or
-  deleted from the web UI. The viewer shows 100 entries per page (newest
-  first), with filters, First/Prev/Next/Last navigation and a CSV export.</p>
-  <p><strong>Disk space</strong> &mdash; shows the free space in the repository
-  directories and the report directory, <strong>grouped by filesystem</strong>
-  (one table per filesystem: "Filesystem 1", "Filesystem 2", &hellip;). Because
-  the directories in a table share a filesystem, the size figures are shown once
-  (black on the first directory, repeated in gray on the rest). Needs the
-  optional <code>Filesys::Df</code> Perl module; if it is missing the tool shows
-  how to install it.</p>
-  <p><strong>Show fetchconfig-web.cfg</strong> &mdash; read-only table of all
-  settings in <code>/etc/fetchconfig-web.cfg</code> (Status, Option, Value,
-  Default, Range), grouped by the file's <code># --- title ---</code> headings,
-  followed by the settings that are not in the file (gray, default applies).
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-diskspace">
+  <h2>Disk space <span class="badge">admins only</span></h2>
+  <p><strong>Tools &rarr; Disk space</strong> shows the free space in the
+  repository directories and the report directory, grouped by filesystem (one
+  table per filesystem). Directories sharing a filesystem show the size figures
+  once (black on the first, gray on the rest). It needs the optional
+  <code>Filesys::Df</code> Perl module; if that is missing the tool explains how
+  to install it.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-cfg">
+  <h2>Show fetchconfig-web.cfg <span class="badge">admins only</span></h2>
+  <p><strong>Tools &rarr; Show fetchconfig-web.cfg</strong> is a read-only table
+  of every setting in <code>/etc/fetchconfig-web.cfg</code> (Status, Option,
+  Value, Default, Range), grouped by the file's <code># --- title ---</code>
+  headings, followed by settings not in the file (gray, default applies).
   <em>invalid</em> (red) marks an unknown or obsolete key, a value outside its
   range, or an earlier duplicate. The database password is shown as
   <code>****</code>.</p>
-  <p><strong>Upload report logo</strong> &mdash; upload a logo image into the
-  report directory (the <code>report_dir</code> on the <code>email:</code> line)
-  and manage the logos already there. Accepted: <code>.png</code>/<code>.jpg</code>/<code>.gif</code>,
-  100&nbsp;KB maximum; the suggested size is 250&times;50&nbsp;pixel. The
-  uploaded file's content is checked (it must really be a PNG, JPEG or GIF), and
-  the filename is kept exactly as given (filenames are case-sensitive on
-  Unix/Linux). Existing logos are listed with a <strong>Delete</strong> button.
-  In the device-table editor, the <code>report_logo</code> option is then a
-  drop-down of the images found in that directory (the stored value is the bare
-  filename, which <code>fetchconfig.pl</code> resolves when it writes a report).</p>
-  <p><strong>Template editor</strong> &mdash; click <strong>Edit</strong> next to
-  a template to open it in a split editor: the left pane is editable, the right
-  <strong>Checked version</strong> shows it highlighted. <strong>Check
-  syntax</strong> validates it with fetchconfig (a structural check) and shows
-  any errors; <strong>Save</strong> only writes if the check passes and keeps the
-  previous version as a single <code>.tmpl.bak</code>; <strong>Discard
-  changes</strong> reloads the file and drops your unsaved edits; <strong>Revert
-  to last backup version</strong> (shown when a backup exists) restores that
-  backup; <strong>Help templates</strong> opens the template-engine manual in a
-  new tab. Leaving the editor with unsaved changes asks for confirmation, and the
-  Editor pane shows "Unsaved changes" while you have edits pending. A changed
-  template should always be tested against the real device.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-email">
+  <h2>E-mail setup &amp; report logo <span class="badge">admins only</span></h2>
+  <ul>
+    <li><strong>Verify email setup</strong> &mdash; checks the e-mail
+        configuration (SMTP server, sender, authentication) and can send a test
+        message, so you can confirm backup-summary and password-reset mail will
+        work before relying on it.</li>
+    <li><strong>Upload report logo</strong> &mdash; upload a logo image into the
+        report directory and manage the logos already there. Accepted:
+        <code>.png</code>/<code>.jpg</code>/<code>.gif</code>, 100&nbsp;KB max
+        (suggested 250&times;50&nbsp;px); the content is verified to really be an
+        image, and the filename is kept exactly as given (case-sensitive). In the
+        device-table editor the <code>report_logo</code> option is then a
+        drop-down of the images in that directory.</li>
+  </ul>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-schedlog">
+  <h2>Last schedule log <span class="badge">admins only</span></h2>
+  <p><strong>Tools &rarr; View last fetchconfig schedule log</strong> opens the
+  output of the scheduled (cron) backup run on its own page, split into sections
+  you can expand or collapse. Each section's name is green if it succeeded and red
+  if it failed; failed sections open automatically so problems stand out. Use
+  <strong>Expand all</strong> / <strong>Collapse all</strong> to toggle
+  everything.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<!-- ============================ PART 5 ============================ -->
+<div class="help-part"><span class="n">Part 5</span><h2>Reference</h2><span class="rule"></span></div>
+
+<section class="card" id="help-helpmenu">
+  <h2>Help menu &amp; About</h2>
+  <p>The <strong>Help</strong> menu has a fixed shape:</p>
+  <ul>
+    <li><strong>Help</strong> &mdash; this user guide.</li>
+    <li><strong>fetchconfig-web &mdash; additional help</strong> and
+        <strong>fetchconfig &mdash; additional help</strong> &mdash; the extra
+        HTML documents your administrator has installed in the help tree (the
+        manuals, change log, licence, and so on). Each entry's label comes from
+        the document's title, and each opens in a new browser tab. A section shows
+        a short note when no extra documents are installed. Each help directory
+        may hold at most <strong>15</strong> <code>*.html</code> documents; if it
+        holds more, the section shows a single <em>too many help documents
+        in &lt;directory&gt;</em> note instead of a menu, and your administrator
+        needs to thin the directory out.</li>
+    <li><strong>About</strong> &mdash; opens the About dialog (also reachable from
+        the program icon on the far left), showing the program version(s),
+        copyright, the installed <code>fetchconfig.pl</code> version, the run mode
+        (<strong>CGI</strong> or <strong>FastCGI</strong>) and the licence.</li>
+  </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
 <section class="card" id="help-navigation">
   <h2>Getting around long pages</h2>
-  <p>On pages that can get long &mdash; the device list, the device table and
-  its editors, a backup's configuration, the config comparisons, and the Tools
-  pages &mdash; a small pair of <strong>&#9650; Top</strong> /
-  <strong>&#9660; Bottom</strong> buttons floats in the bottom-right corner.
-  Use them to jump straight to the top or bottom without scrolling.</p>
+  <p>On pages that can get long &mdash; the device list, the device table and its
+  editors, a backup's configuration, the comparisons, and the Tools pages &mdash;
+  a small pair of <strong>&#9650; Top</strong> / <strong>&#9660; Bottom</strong>
+  buttons floats in the bottom-right corner. Use them to jump straight to either
+  end without scrolling.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-security">
+  <h2>Security &amp; privacy</h2>
+  <p>A few things worth knowing about how the application protects your data:</p>
+  <ul>
+    <li><strong>Password masking.</strong> Anything that looks like a stored
+        secret is shown as <code>?***?</code> throughout &mdash; config views,
+        diffs, the device table, reports. The underlying files are never
+        changed; masking is display-only. Seeing an unmasked config or report
+        needs an explicit per-user right, and every such view is audited.</li>
+    <li><strong>Sessions.</strong> Logins expire after a period of inactivity and
+        an absolute lifetime. Always <strong>Log out</strong> on a shared
+        machine.</li>
+    <li><strong>Change tracking.</strong> Every change is recorded in the
+        <a href="#help-audit">audit log</a>, which cannot be edited from the web
+        UI.</li>
+    <li><strong>Safe actions.</strong> Every action that changes something is
+        protected against cross-site request forgery, so a link on another site
+        can't make your browser perform it. Destructive actions always ask you to
+        confirm.</li>
+  </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
 <section class="card" id="help-browser">
   <h2>Browser requirements</h2>
-  <p>The interactive parts of this application (the device-list filter and
-  sorting, and the device-table editor) use JavaScript that needs a reasonably
-  modern browser. The minimum supported versions are:</p>
+  <p>The interactive parts (the device-list filter and sorting, and the
+  device-table editor) use JavaScript that needs a reasonably modern browser.
+  Minimum supported versions:</p>
   <ul>
     <li><strong>Mozilla Firefox</strong> 50 or newer (2016)</li>
-    <li><strong>Microsoft Edge</strong> 16 or newer (the Chromium-based Edge;
-        the older &ldquo;legacy&rdquo; Edge is not supported)</li>
+    <li><strong>Microsoft Edge</strong> 16 or newer (Chromium-based; the older
+        &ldquo;legacy&rdquo; Edge is not supported)</li>
     <li><strong>Google Chrome</strong> 51 or newer (2016)</li>
   </ul>
-  <p>Any current release of these browsers works. Other Chromium-based
-  browsers (Opera, Brave, Vivaldi&hellip;) and Safari 10+ also work. Static
-  pages &mdash; logging in, viewing devices and backups &mdash; work without
-  JavaScript, but the filter, sorting, and the device-table editor will not.</p>
+  <p>Any current release of these works, as do other Chromium-based browsers
+  (Opera, Brave, Vivaldi&hellip;) and Safari 10.1 or newer. Static pages &mdash; logging
+  in, viewing devices and backups &mdash; work without JavaScript, but the
+  filter, sorting and the device-table editor will not.</p>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
 <section class="card" id="help-support">
   <h2>Getting help</h2>
   <p>For anything not covered here &mdash; a device that won't back up, a login
-  problem, an empty or missing backup, or a feature request &mdash; contact
-  your fetchconfig-web administrator.</p>
+  problem, an empty or missing backup, or a feature request &mdash; contact your
+  fetchconfig-web administrator. Deeper reference material (the full manual, the
+  template-engine guide and the fetchconfig documentation) is in the
+  <strong>Help</strong> menu's <em>additional help</em> sections when your
+  administrator has installed it.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
 </div>

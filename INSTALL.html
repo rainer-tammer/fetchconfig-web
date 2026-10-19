@@ -225,6 +225,28 @@
     font-size:2.6rem;
     margin:0 0 14px;
     letter-spacing:-0.02em;
+    color:var(--accent);
+  }
+  .mermaid{
+    /* A mermaid block is a <pre>, so it would otherwise inherit the dark code
+       background/border/padding. Render the diagram on the page background. */
+    margin:1.5rem 0;
+    text-align:center;
+    background:transparent;
+    color:inherit;
+    border:0;
+    padding:0;
+    overflow-x:auto;
+  }
+  /* Until mermaid.js has rendered a block (it stamps data-processed on success),
+     keep the raw diagram source hidden so it is never shown as a wall of text --
+     during the CDN load, or if the runtime is blocked/unavailable. mermaid still
+     measures and renders normally while it is hidden; the element reveals itself
+     the moment it is processed. */
+  .mermaid:not([data-processed]){
+    visibility:hidden;
+    height:0;
+    overflow:hidden;
   }
   .hero p.lede{
     font-size:1.13rem;
@@ -321,6 +343,7 @@
 
   /* ---------- Tables ---------- */
   .table-wrap{overflow-x:auto;margin:18px 0 26px;border:1px solid var(--border);border-radius:var(--radius);}
+  hr{border:0;border-top:1px solid var(--border);margin:34px 0 30px;}
   table{
     border-collapse:collapse;
     width:100%;
@@ -496,14 +519,14 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v2.02</span>
+      <span class="pill">v2.06</span>
       <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
     <nav>
 <div class="nav-group"><div class="nav-group-label">Before you start</div><a href="#what-is-in-the-package">What is in the package</a><a href="#requirements">Requirements</a><a href="#perl-modules">Perl modules</a><a href="#planning-the-layout">Planning the layout</a></div>
-<div class="nav-group"><div class="nav-group-label">Fresh installation</div><a href="#step-1-install-the-perl-modules">Step 1 -- Install the Perl modules</a><a href="#step-2-create-the-user-database">Step 2 -- Create the user database</a><a href="#step-3-write-the-configuration-file">Step 3 -- Write the configuration file</a><a href="#step-4-install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</a><a href="#step-5-directories-and-permissions">Step 5 -- Directories and permissions</a><a href="#step-6-backup-now-and-sudo">Step 6 -- Backup Now and sudo</a><a href="#step-7-serve-over-https">Step 7 -- Serve over HTTPS</a><a href="#step-7a-running-under-mod-fcgid-optional">Step 7a -- Running under mod_fcgid (optional)</a><a href="#step-8-first-login">Step 8 -- First login</a></div>
-<div class="nav-group"><div class="nav-group-label">Upgrading</div><a href="#upgrading-the-script">Upgrading the script</a><a href="#upgrading-to-1-62">Upgrading to 1.62</a><a href="#upgrading-to-1-61">Upgrading to 1.61</a><a href="#upgrading-to-1-60">Upgrading to 1.60</a><a href="#upgrading-the-database-to-1-51-audit-log">Upgrading the database to 1.51 (audit log)</a><a href="#upgrading-the-database-to-1-50">Upgrading the database to 1.50</a><a href="#new-configuration-keys-in-1-50">New configuration keys in 1.50</a></div>
+<div class="nav-group"><div class="nav-group-label">Fresh installation</div><a href="#step-1----install-the-perl-modules">Step 1 -- Install the Perl modules</a><a href="#step-2----create-the-user-database">Step 2 -- Create the user database</a><a href="#step-3----write-the-configuration-file">Step 3 -- Write the configuration file</a><a href="#step-4----install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</a><a href="#step-5----directories-and-permissions">Step 5 -- Directories and permissions</a><a href="#step-6----backup-now-and-sudo">Step 6 -- Backup Now and sudo</a><a href="#step-7----serve-over-https">Step 7 -- Serve over HTTPS</a><a href="#step-7a----running-under-mod_fcgid-optional">Step 7a -- Running under mod_fcgid (optional)</a><a href="#step-8----first-login">Step 8 -- First login</a></div>
+<div class="nav-group"><div class="nav-group-label">Upgrading</div><a href="#upgrading-the-script">Upgrading the script</a><a href="#upgrading-to-162">Upgrading to 1.62</a><a href="#upgrading-to-161">Upgrading to 1.61</a><a href="#upgrading-to-160">Upgrading to 1.60</a><a href="#upgrading-the-database-to-151-audit-log">Upgrading the database to 1.51 (audit log)</a><a href="#upgrading-the-database-to-150">Upgrading the database to 1.50</a><a href="#new-configuration-keys-in-150">New configuration keys in 1.50</a></div>
 <div class="nav-group"><div class="nav-group-label">Verification and troubleshooting</div><a href="#checklist">Checklist</a><a href="#common-problems">Common problems</a></div>
 <div class="nav-group"><a href="#running-the-test-suite">Running the test suite</a></div>
     </nav>
@@ -512,14 +535,13 @@
   <div class="main-col">
 
     <div class="hero">
-      <div class="hero-eyebrow">Installation</div>
-      <h1>fetchconfig-web</h1>
+      <h1 class="hero-title">fetchconfig-web &mdash; Installation</h1>
       <p class="lede">This guide takes you from an empty web server to a running <strong>fetchconfig-web</strong> instance, and covers upgrading an existing installation. It is the operator&#x27;s checklist; the full feature reference lives in <code>README.md</code> (rendered as <code>fetchconfig-web-documentation.html</code>).</p>
       <div class="callout warn" style="margin-top:1rem">
-        <p><strong>Requires fetchconfig 9.71 or newer.</strong> The installed
+        <p><strong>Requires fetchconfig 9.72 or newer.</strong> The installed
         version is read from <code>&lt;FETCHCONFIG_PATH&gt;/fetchconfig/Constants.pm</code>;
         a warning banner is shown on every page (after login) if it is older
-        than 9.71 or cannot be determined.</p>
+        than 9.72 or cannot be determined.</p>
       </div>
       <div class="callout warn" style="margin-top:1rem">
         <p><strong>Long backups and web server timeouts.</strong> While Backup
@@ -532,8 +554,8 @@
         must also exceed BACKUP_TIMEOUT.</p>
       </div>
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">2.02</span><span class="label">version</span></div>
-        <div class="hero-stat"><span class="num">Perl CGI</span><span class="label">single file</span></div>
+        <div class="hero-stat"><span class="num">2.06</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">Perl FCGI/CGI</span><span class="label">language</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
       </div>
@@ -544,36 +566,91 @@
 <section id="contents">
 <div class="section-kicker">01</div>
 <h2>Contents</h2>
-<ul><li><a href="#part-1-before-you-start">Part 1 -- Before you start</a></li><li><a href="#what-is-in-the-package">What is in the package</a></li><li><a href="#requirements">Requirements</a></li><li><a href="#perl-modules">Perl modules</a></li><li><a href="#planning-the-layout">Planning the layout</a></li><li><a href="#part-2-fresh-installation">Part 2 -- Fresh installation</a></li><li><a href="#step-1-install-the-perl-modules">Step 1 -- Install the Perl modules</a></li><li><a href="#step-2-create-the-user-database">Step 2 -- Create the user database</a></li><li><a href="#step-3-write-the-configuration-file">Step 3 -- Write the configuration file</a></li><li><a href="#step-4-install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</a></li><li><a href="#step-5-directories-and-permissions">Step 5 -- Directories and permissions</a></li><li><a href="#step-6-backup-now-and-sudo">Step 6 -- Backup Now and sudo</a></li><li><a href="#step-7-serve-over-https">Step 7 -- Serve over HTTPS</a></li><li><a href="#step-7a-running-under-mod-fcgid-optional">Step 7a -- Running under mod_fcgid (optional)</a></li><li><a href="#step-8-first-login">Step 8 -- First login</a></li><li><a href="#part-3-upgrading">Part 3 -- Upgrading</a></li><li><a href="#upgrading-the-script">Upgrading the script</a></li><li><a href="#upgrading-to-1-62">Upgrading to 1.62</a></li><li><a href="#upgrading-to-1-61">Upgrading to 1.61</a></li><li><a href="#upgrading-to-1-60">Upgrading to 1.60</a></li><li><a href="#upgrading-the-database-to-1-51-audit-log">Upgrading the database to 1.51 (audit log)</a></li><li><a href="#upgrading-the-database-to-1-50">Upgrading the database to 1.50</a></li><li><a href="#new-configuration-keys-in-1-50">New configuration keys in 1.50</a></li><li><a href="#part-4-verification-and-troubleshooting">Part 4 -- Verification and troubleshooting</a></li><li><a href="#checklist">Checklist</a></li><li><a href="#common-problems">Common problems</a></li><li><a href="#running-the-test-suite">Running the test suite</a></li></ul>
+<ul><li><a href="#part-1----before-you-start">Part 1 -- Before you start</a></li><li><a href="#what-is-in-the-package">What is in the package</a></li><li><a href="#requirements">Requirements</a></li><li><a href="#perl-modules">Perl modules</a></li><li><a href="#planning-the-layout">Planning the layout</a></li><li><a href="#part-2----fresh-installation">Part 2 -- Fresh installation</a></li><li><a href="#step-1----install-the-perl-modules">Step 1 -- Install the Perl modules</a></li><li><a href="#step-2----create-the-user-database">Step 2 -- Create the user database</a></li><li><a href="#step-3----write-the-configuration-file">Step 3 -- Write the configuration file</a></li><li><a href="#step-4----install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</a></li><li><a href="#step-5----directories-and-permissions">Step 5 -- Directories and permissions</a></li><li><a href="#step-6----backup-now-and-sudo">Step 6 -- Backup Now and sudo</a></li><li><a href="#step-7----serve-over-https">Step 7 -- Serve over HTTPS</a></li><li><a href="#step-7a----running-under-mod_fcgid-optional">Step 7a -- Running under mod_fcgid (optional)</a></li><li><a href="#step-8----first-login">Step 8 -- First login</a></li><li><a href="#part-3----upgrading">Part 3 -- Upgrading</a></li><li><a href="#upgrading-the-script">Upgrading the script</a></li><li><a href="#upgrading-to-162">Upgrading to 1.62</a></li><li><a href="#upgrading-to-161">Upgrading to 1.61</a></li><li><a href="#upgrading-to-160">Upgrading to 1.60</a></li><li><a href="#upgrading-the-database-to-151-audit-log">Upgrading the database to 1.51 (audit log)</a></li><li><a href="#upgrading-the-database-to-150">Upgrading the database to 1.50</a></li><li><a href="#new-configuration-keys-in-150">New configuration keys in 1.50</a></li><li><a href="#part-4----verification-and-troubleshooting">Part 4 -- Verification and troubleshooting</a></li><li><a href="#checklist">Checklist</a></li><li><a href="#common-problems">Common problems</a></li><li><a href="#running-the-test-suite">Running the test suite</a></li></ul>
 </section>
-<section id="part-1-before-you-start">
+<section id="part-1----before-you-start">
 <div class="section-kicker">02</div>
 <h2>Part 1 -- Before you start</h2>
 <h3 id="what-is-in-the-package">What is in the package</h3>
-<p>The release archive <code>fetchconfig-web-1.50.tar</code> unpacks to a directory <code>fetchconfig-web-1.50/</code> containing:</p>
-<div class="table-wrap"><table><thead><tr><th>File</th><th>Purpose</th></tr></thead><tbody><tr><td><code>fetchconfig-web.cgi</code></td><td>The application: one self-contained Perl CGI script.</td></tr><tr><td><code>fetchconfig-web-dbsetup.pl</code></td><td>Creates the PostgreSQL role, database and tables; bootstraps the <code>admin</code> account; can write the config file.</td></tr><tr><td><code>fetchconfig-web-dbupdate-1.51.sql</code></td><td>Standalone idempotent SQL to add the 1.51 audit-log tables to an existing database (PostgreSQL 8.2+).</td></tr><tr><td><code>fetchconfig-web-clean-audit.pl</code></td><td>Standalone script to prune old audit-log rows (needs a privileged DB role; <code>-h</code> for help, <code>-s</code> to print the role SQL).</td></tr><tr><td><code>LICENSE-ADDITIONS.md</code>, <code>LICENSE-ADDITIONS.html</code></td><td>Additional terms under GPLv3 Section 7 (EU/German liability adaptation).</td></tr><tr><td><code>PRIVACY.md</code>, <code>PRIVACY.html</code></td><td>GDPR data-privacy notes for the operator (data controller).</td></tr><tr><td><code>fetchconfig-web-dbupdate-1.50.sql</code></td><td>Idempotent SQL that upgrades an existing database to the 1.50 schema (per-site access).</td></tr><tr><td><code>fetchconfig-web-dbupdate-1.60.sql</code></td><td>Idempotent SQL that upgrades an existing database to the 1.60 schema (<code>users.email</code>, login throttle, password-reset tokens; PostgreSQL 8.2+).</td></tr><tr><td><code>fetchconfig-web-dbupdate-1.62.sql</code></td><td>Idempotent SQL that upgrades an existing database to the 1.62 schema (<code>users.download_full_config</code>, the <code>device_notes</code> table; PostgreSQL 8.2+).</td></tr><tr><td><code>fetchconfig-web-clean-resets.pl</code></td><td>Standalone script to prune spent password-reset tokens and stale login-throttle rows (<code>-h</code> for help, <code>-s</code> to print the role SQL).</td></tr><tr><td><code>fetchconfig-web-install-template.pl</code></td><td>Root-side helper, run via <code>sudo</code>, that installs an edited template file.</td></tr><tr><td><code>imageconvert.pl</code>, <code>README.imageconvert</code></td><td>Optional helper for preparing the login backdrop image.</td></tr><tr><td><code>images/back.jpg</code></td><td>Login-page backdrop image.</td></tr><tr><td><code>favicon.ico</code></td><td>Browser tab/bookmark icon. Optional; copy to the web server&#x27;s document root (see Step 4) when the application runs on its own vhost or dedicated server.</td></tr><tr><td><code>help.html</code></td><td>The in-application Help page (served from <code>WEB_DIR</code>, linked at <code>BASE_URL</code>).</td></tr><tr><td><code>README.md</code>, <code>fetchconfig-web-documentation.html</code></td><td>Full reference documentation (Markdown and rendered HTML).</td></tr><tr><td><code>INSTALL.md</code>, <code>INSTALL.html</code></td><td>This guide (Markdown and rendered HTML).</td></tr><tr><td><code>render-doc.py</code>, <code>render-doc.md</code></td><td>Renders the Markdown documents to HTML.</td></tr><tr><td><code>CHANGES</code>, <code>LICENSE</code>, <code>Makefile.PL</code></td><td>Change log, GPL-3.0-or-later licence, and a <code>prove</code>-based test harness.</td></tr><tr><td><code>t/</code></td><td>The regression test suite.</td></tr></tbody></table></div>
+<p>The release archive <code>fetchconfig-web-2.06.tar</code> unpacks to a directory <code>fetchconfig-web-1.50/</code> containing:</p>
+<div class="table-wrap"><table><thead><tr><th>File</th><th>Purpose</th></tr></thead><tbody><tr><td><code>fetchconfig-web.cgi</code></td><td>The application: one self-contained Perl script, run under FastCGI or plain CGI.</td></tr><tr><td><code>fetchconfig-web-dbsetup.pl</code></td><td>Creates the PostgreSQL role, database and tables; bootstraps the <code>admin</code> account; can write the config file.</td></tr><tr><td><code>fetchconfig-web-dbupdate-1.51.sql</code></td><td>Standalone idempotent SQL to add the 1.51 audit-log tables to an existing database (PostgreSQL 8.2+).</td></tr><tr><td><code>fetchconfig-web-clean-audit.pl</code></td><td>Standalone script to prune old audit-log rows (needs a privileged DB role; <code>-h</code> for help, <code>-s</code> to print the role SQL).</td></tr><tr><td><code>LICENSE-ADDITIONS.md</code>, <code>LICENSE-ADDITIONS.html</code></td><td>Additional terms under GPLv3 Section 7 (EU/German liability adaptation).</td></tr><tr><td><code>PRIVACY.md</code>, <code>PRIVACY.html</code></td><td>GDPR data-privacy notes for the operator (data controller).</td></tr><tr><td><code>fetchconfig-web-dbupdate-1.50.sql</code></td><td>Idempotent SQL that upgrades an existing database to the 1.50 schema (per-site access).</td></tr><tr><td><code>fetchconfig-web-dbupdate-1.60.sql</code></td><td>Idempotent SQL that upgrades an existing database to the 1.60 schema (<code>users.email</code>, login throttle, password-reset tokens; PostgreSQL 8.2+).</td></tr><tr><td><code>fetchconfig-web-dbupdate-1.62.sql</code></td><td>Idempotent SQL that upgrades an existing database to the 1.62 schema (<code>users.download_full_config</code>, the <code>device_notes</code> table; PostgreSQL 8.2+).</td></tr><tr><td><code>fetchconfig-web-clean-resets.pl</code></td><td>Standalone script to prune spent password-reset tokens and stale login-throttle rows (<code>-h</code> for help, <code>-s</code> to print the role SQL).</td></tr><tr><td><code>fetchconfig-web-install-template.pl</code></td><td>Root-side helper, run via <code>sudo</code>, that installs, creates, reverts, deletes or renames a template file (v1.2).</td></tr><tr><td><code>imageconvert.pl</code>, <code>README.imageconvert.md</code> (+ <code>.html</code>/<code>README.imageconvert</code>)</td><td>Optional helper for embedding a small image as a base64 Perl constant; its manual (Markdown master, with generated HTML and plain-text).</td></tr><tr><td><code>images/back.jpg</code></td><td>Login-page backdrop image.</td></tr><tr><td><code>favicon.ico</code></td><td>Browser tab/bookmark icon. Optional; copy to the web server&#x27;s document root (see Step 4) when the application runs on its own vhost or dedicated server.</td></tr><tr><td><code>help.html</code></td><td>The in-application Help page (served from the help tree, <code>&lt;WEB_DIR&gt;&lt;HELP_BASE_URL&gt;</code>).</td></tr><tr><td><code>README.md</code>, <code>fetchconfig-web-documentation.html</code>, <code>README</code></td><td>Full reference documentation (Markdown master, with generated HTML and plain text).</td></tr><tr><td><code>INSTALL.md</code>, <code>INSTALL.html</code>, <code>INSTALL</code></td><td>This guide (Markdown master, with generated HTML and plain text).</td></tr><tr><td><code>DEVELOPER.md</code>, <code>DEVELOPER.html</code>, <code>DEVELOPER</code></td><td>Developer/architecture documentation (Markdown master, with generated HTML and plain text).</td></tr><tr><td><code>CHANGES.md</code>, <code>CHANGES</code>, <code>CHANGES.html</code></td><td>Change log (Markdown master; the plain-text and HTML are generated by <code>render-doc.py</code>).</td></tr><tr><td><code>render-doc.py</code>, <code>render-doc.md</code></td><td>Build tool: renders each Markdown document to styled HTML and a plain-text (ASCII) version (Python 2.7/3).</td></tr><tr><td><code>fetchconfig-web.css</code></td><td><strong>Required</strong> stylesheet. Must be installed at <code>&lt;WEB_DIR&gt;&lt;CSS_BASE_URL&gt;/fetchconfig-web.css</code> (Step 4) or every page is unstyled and a red banner is shown.</td></tr><tr><td><code>LICENSE</code>, <code>LICENSE.md</code>, <code>LICENSE.html</code></td><td>GPL-3.0-or-later licence (the plain-text master plus the generated Markdown and HTML).</td></tr><tr><td><code>Makefile.PL</code>, <code>cpanfile</code></td><td>A <code>prove</code>-based test harness, and the Perl dependency manifest used by <code>cpanm --installdeps .</code>.</td></tr><tr><td><code>t/</code></td><td>The regression test suite.</td></tr></tbody></table></div>
 <h3 id="requirements">Requirements</h3>
-<ul><li><strong>fetchconfig 9.71 or newer</strong> already installed and working. fetchconfig-web calls <code>fetchconfig.pl</code> and reads its device table, repository and template directories; it does not replace fetchconfig.</li><li><strong>Perl 5.10 or newer.</strong> Tested on Linux and AIX.</li><li><strong>PostgreSQL 9.2 or newer</strong> reachable from the web server. (The database upgrade script is written to be PostgreSQL 8.2-compatible, but 9.2+ is the supported baseline.)</li><li>A <strong>web server that runs CGI scripts</strong> -- Apache with <code>mod_cgi</code> / <code>ScriptAlias</code>, or an equivalent.</li><li><strong>Read access</strong> for the web-server user to the fetchconfig device table and repository, and <strong>execute access</strong> to <code>fetchconfig.pl</code>.</li><li>Optionally <strong>sudo</strong>, if you want the <em>Backup Now</em> button to run live backups (see Step 6).</li></ul>
+<ul><li><strong>fetchconfig 9.72 or newer</strong> already installed and working. fetchconfig-web calls <code>fetchconfig.pl</code> and reads its device table, repository and template directories; it does not replace fetchconfig.</li><li><strong>Perl 5.10 or newer.</strong> Tested on Linux and AIX.</li><li><strong>PostgreSQL 9.2 or newer</strong> reachable from the web server. (The database upgrade script is written to be PostgreSQL 8.2-compatible, but 9.2+ is the supported baseline.)</li><li>A <strong>web server that runs CGI scripts</strong> -- Apache with <code>mod_cgi</code> / <code>ScriptAlias</code>, or an equivalent. <strong>FastCGI (<code>mod_fcgid</code>) is the preferred way to run fetchconfig-web</strong> -- the process is kept alive between requests, which is markedly faster; plain CGI is the fallback and needs no extra modules (see <em>Step 7a -- Running under mod_fcgid</em>).</li><li><strong>Read access</strong> for the web-server user to the fetchconfig device table and repository, and <strong>execute access</strong> to <code>fetchconfig.pl</code>.</li><li>Optionally <strong>sudo</strong>, if you want the <em>Backup Now</em> button to run live backups (see Step 6).</li><li>Optionally <strong><code>&lt;FETCHCONFIG_PATH&gt;/tools/generate_template.pl</code></strong> (ships with fetchconfig), readable and executable by the web-server user, if you want the Templates page&#x27;s <em>Upload HEX capture</em> button to build a draft template from a <code>record-session.pl</code> capture. It is run directly (no sudo); without it, the rest of the template tools are unaffected.</li></ul>
 <div class="callout warn"><p><strong>Long backups and web server timeouts.</strong> While <em>Backup Now</em> or the <em>Empty Backup Cleanup</em> scan runs, fetchconfig-web sends a keepalive (an HTML comment) every 10 s, so the web server&#x27;s inactivity timeout (Apache <code>Timeout</code>, default 300 s) only needs to be longer than 10 s, and <code>BACKUP_TIMEOUT</code> may exceed it. <code>BACKUP_TIMEOUT</code> (default 120 s) must be higher than the longest backup run of any device in the device table (bounded by its <code>timeout</code>, <code>fetch_timeout</code> and <code>banner_timeout</code> options). A reverse proxy or load balancer in front of the web server must not buffer the response, otherwise its own timeout applies. Under <strong>mod_fcgid</strong>, <code>FcgidBusyTimeout</code> (default 300 s) caps the total request time and so must also exceed <code>BACKUP_TIMEOUT</code>; <code>FcgidIOTimeout</code> is covered by the keepalive. Closing the browser tab during a run terminates it (audited as <code>ABORTED</code>).</p></div>
 <h3 id="perl-modules">Perl modules</h3>
 <p>Most of what the two scripts need ships with Perl itself. The table lists <strong>every</strong> module used, so you can check an unfamiliar system in one pass.</p>
-<p><strong>Core modules</strong> (present on a standard Perl install on Linux and AIX): <code>CGI::Cookie</code>, <code>Digest::MD5</code>, <code>Time::HiRes</code>, <code>MIME::Base64</code>, <code>Fcntl</code>, <code>File::Path</code>, <code>File::Temp</code>, <code>File::Copy</code>, <code>IPC::Open3</code>, <code>IO::Select</code>, <code>Symbol</code>, <code>Errno</code>, <code>Text::ParseWords</code>.</p>
-<p><strong>Modules that may need installing:</strong></p>
-<div class="table-wrap"><table><thead><tr><th>Module</th><th>Minimum version</th><th>Why</th><th>Debian / Ubuntu</th><th>RHEL / Rocky</th><th>SLES</th><th>CPAN</th></tr></thead><tbody><tr><td><code>CGI</code></td><td>any</td><td>Request/response handling. Removed from Perl core in 5.22, so modern distributions no longer include it.</td><td><code>libcgi-pm-perl</code></td><td><code>perl-CGI</code></td><td><code>perl-CGI</code></td><td><code>cpan CGI</code></td></tr><tr><td><code>DBI</code></td><td>1.641</td><td>Database access layer.</td><td><code>libdbi-perl</code></td><td><code>perl-DBI</code></td><td><code>perl-DBI</code></td><td><code>cpan DBI</code></td></tr><tr><td><code>DBD::Pg</code></td><td>3.15.0</td><td>PostgreSQL driver for DBI (loaded at runtime via the <code>dbi:Pg:</code> DSN).</td><td><code>libdbd-pg-perl</code></td><td><code>perl-DBD-Pg</code></td><td><code>perl-DBD-Pg</code></td><td><code>cpan DBD::Pg</code></td></tr><tr><td><code>Algorithm::Diff</code></td><td>1.19</td><td>Side-by-side and unified config diffs.</td><td><code>libalgorithm-diff-perl</code></td><td><code>perl-Algorithm-Diff</code></td><td><code>perl-Algorithm-Diff</code></td><td><code>cpan Algorithm::Diff</code></td></tr><tr><td><code>Filesys::Df</code></td><td>0.92</td><td><strong>Optional</strong> -- only for the <em>Tools -&gt; Disk space</em> page (free-space figures). Loaded lazily; without it the app runs normally and that one tool shows an install hint.</td><td><code>libfilesys-df-perl</code></td><td><code>perl-Filesys-Df</code></td><td>(CPAN)</td><td><code>cpan Filesys::Df</code></td></tr><tr><td><code>FCGI</code></td><td>0.67 (tested 0.82)</td><td><strong>Optional</strong> -- only to run under FastCGI / mod_fcgid (see <em>Running under mod_fcgid</em>). Loaded lazily; without it the script runs as plain CGI. <code>CGI::Fast</code> is <strong>not</strong> needed.</td><td><code>libfcgi-perl</code></td><td><code>perl-FCGI</code></td><td><code>perl-FCGI</code></td><td><code>cpan FCGI</code></td></tr><tr><td><code>Crypt::Bcrypt</code></td><td>any</td><td><strong>Optional</strong> -- enables bcrypt (<code>$2b$</code>) password hashing. When present, new and changed passwords are stored as bcrypt and legacy <code>$apr1$</code> hashes are upgraded to bcrypt on the owner&#x27;s next login. Without it, passwords stay <code>$apr1$</code> (still supported).</td><td><code>libcrypt-bcrypt-perl</code></td><td>(CPAN)</td><td>(CPAN)</td><td><code>cpan Crypt::Bcrypt</code></td></tr><tr><td><code>Net::SMTP</code></td><td>3.x (for TLS)</td><td><strong>Optional</strong> -- only for the self-service password-reset email (<code>EMAIL = 1</code>). STARTTLS/SSL need <code>Net::SMTP</code> 3.x with <code>IO::Socket::SSL</code>. Without <code>EMAIL = 1</code> it is not loaded, and the &quot;Forgot password?&quot; page just tells users to contact the admin.</td><td><code>libnet-smtp-ssl-perl</code>, <code>libio-socket-ssl-perl</code></td><td><code>perl-Net-SMTP-SSL</code></td><td><code>perl-Net-SMTP-SSL</code></td><td><code>cpan Net::SMTP IO::Socket::SSL</code></td></tr></tbody></table></div>
-<p><strong><code>Digest::SHA</code> is not required.</strong> This is deliberate, and worth knowing if you audit dependencies: password hashes are pure-Perl Apache MD5 (<code>$apr1$</code>) computed with <code>Digest::MD5</code>, SHA-256/512 (<code>$5$</code>/<code>$6$</code>) hashes are verified through the system <code>crypt()</code>, and the device-table change-detection digest also uses <code>Digest::MD5</code> (as a change detector, not a security primitive). Avoiding <code>Digest::SHA</code> keeps the script running on older Perls such as the one shipped with AIX. If you later add code that needs it, add it to this table.</p>
-<p>Check what is already present in one command:</p>
+<p><strong>Core modules</strong> (present on a standard Perl install on Linux and AIX): <code>CGI::Cookie</code>, <code>Digest::MD5</code>, <code>Time::HiRes</code>, <code>MIME::Base64</code>, <code>Fcntl</code>, <code>File::Path</code>, <code>File::Temp</code>, <code>File::Copy</code>, <code>IPC::Open3</code>, <code>IO::Select</code>, <code>Symbol</code>, <code>Errno</code>, <code>Text::ParseWords</code>, <code>POSIX</code>, <code>Time::Local</code>. The helper scripts additionally use <code>File::Basename</code> and <code>Getopt::Long</code>, and the test suite uses <code>Test::More</code>, <code>FindBin</code>, <code>File::Spec</code> and <code>Cwd</code> -- all core.</p>
+<div class="callout note"><p>&quot;Core&quot; means <em>shipped with Perl</em>, not <em>already installed</em>. RHEL and SLES split core Perl into many sub-packages, so on those systems <code>POSIX</code>, <code>Time::Local</code>, <code>Digest::SHA</code> and <code>Net::SMTP</code> come from <code>perl-POSIX</code>, <code>perl-Time-Local</code>, <code>perl-Digest-SHA</code> and <code>perl-libnet</code> -- present if you installed <code>perl</code> rather than only <code>perl-interpreter</code>.</p></div>
+<p><strong>Modules that may need installing.</strong> The minimum versions below are the versions the code actually needs, chosen so that the <strong>stock packages of RHEL 9, SLES 15, Ubuntu LTS and Debian all satisfy them</strong> -- no CPAN is required on a supported distribution. See <em>Installing newer modules from CPAN</em> at the end of this section if you nevertheless need a newer build.</p>
+<div class="table-wrap"><table><thead><tr><th>Module</th><th>Minimum version</th><th>Why</th><th>Debian / Ubuntu</th><th>RHEL 9 / Rocky 9</th><th>SLES 15</th><th>CPAN</th></tr></thead><tbody><tr><td><code>CGI</code></td><td>4.31</td><td>Request/response handling. Removed from Perl core in 5.22, so modern distributions no longer include it. 4.31 is the floor for the <code>-samesite</code> cookie attribute the session cookie uses.</td><td><code>libcgi-pm-perl</code> (main)</td><td><code>perl-CGI</code> (<strong>AppStream</strong>)</td><td><code>perl-CGI</code> (<strong>Desktop Applications Module</strong>)</td><td><code>cpan CGI</code></td></tr><tr><td><code>DBI</code></td><td>1.614</td><td>Database access layer. Only the standard DBI API is used; 1.614 is what <code>DBD::Pg</code> itself requires.</td><td><code>libdbi-perl</code> (main)</td><td><code>perl-DBI</code> (AppStream)</td><td><code>perl-DBI</code> (<strong>Basesystem Module</strong>)</td><td><code>cpan DBI</code></td></tr><tr><td><code>DBD::Pg</code></td><td>3.0.0</td><td>PostgreSQL driver for DBI (loaded at runtime via the <code>dbi:Pg:</code> DSN). No <code>pg_*</code> driver attributes are used, so any 3.x works.</td><td><code>libdbd-pg-perl</code> (<strong>universe</strong>)</td><td><code>perl-DBD-Pg</code> (AppStream)</td><td><code>perl-DBD-Pg</code> (<strong>Development Tools Module</strong>)</td><td><code>cpan DBD::Pg</code></td></tr><tr><td><code>Algorithm::Diff</code></td><td>any</td><td>Side-by-side and unified config diffs.</td><td><code>libalgorithm-diff-perl</code> (main)</td><td><code>perl-Algorithm-Diff</code> (AppStream)</td><td><code>perl-Algorithm-Diff</code> (SLE base)</td><td><code>cpan Algorithm::Diff</code></td></tr><tr><td><code>Filesys::Df</code></td><td>any</td><td><strong>Optional</strong> -- only for the <em>Tools -&gt; Disk space</em> page (free-space figures). Loaded lazily; without it the app runs normally and that one tool shows an install hint.</td><td><code>libfilesys-df-perl</code> (main)</td><td><code>perl-Filesys-Df</code> (<strong>EPEL 9 only</strong>)</td><td><code>perl-Filesys-Df</code> (<strong>PackageHub</strong>)</td><td><code>cpan Filesys::Df</code></td></tr><tr><td><code>FCGI</code></td><td>0.67 (tested 0.82)</td><td><strong>Optional</strong> -- only to run under FastCGI / mod_fcgid (see <em>Running under mod_fcgid</em>). Loaded lazily; without it the script runs as plain CGI. <code>CGI::Fast</code> is <strong>not</strong> used and must not be installed in its place.</td><td><code>libfcgi-perl</code> (main)</td><td><code>perl-FCGI</code> (AppStream)</td><td><strong>not packaged</strong> -- use <code>cpan FCGI</code></td><td><code>cpan FCGI</code></td></tr><tr><td><code>Crypt::Bcrypt</code></td><td>any</td><td><strong>Optional but security-relevant</strong> -- enables bcrypt (<code>$2b$</code>) password hashing. When present, new and changed passwords are stored as bcrypt and legacy <code>$apr1$</code> hashes are upgraded to bcrypt on the owner&#x27;s next login. <strong>Without it, passwords fall back to the legacy <code>$apr1$</code> format.</strong></td><td><code>libcrypt-bcrypt-perl</code> (<strong>universe</strong>)</td><td><strong>not packaged</strong> -- use CPAN</td><td><strong>not packaged</strong> -- use CPAN</td><td><code>cpan Crypt::Bcrypt</code></td></tr><tr><td><code>IO::Socket::SSL</code></td><td>any</td><td><strong>Optional</strong> -- gives <code>Net::SMTP</code> (core) STARTTLS/SSL for the password-reset email (<code>EMAIL = 1</code>). Without <code>EMAIL = 1</code> nothing here is loaded, and the &quot;Forgot password?&quot; page just tells users to contact the admin. <strong><code>Net::SMTP::SSL</code> is not used</strong> -- do not install it in place of this.</td><td><code>libio-socket-ssl-perl</code> (main)</td><td><code>perl-IO-Socket-SSL</code> (AppStream)</td><td><code>perl-IO-Socket-SSL</code> (SLE base)</td><td><code>cpan IO::Socket::SSL</code></td></tr></tbody></table></div>
+<div class="callout note"><p><strong>SLES 15:</strong> <code>perl-CGI</code> lives in the <em>Desktop Applications Module</em> and <code>perl-DBD-Pg</code> in the <em>Development Tools Module</em>. Neither module is enabled on a default SLES install, so <code>zypper install perl-CGI perl-DBD-Pg</code> fails until you activate them, e.g. <code>SUSEConnect -p sle-module-desktop-applications/15.6/x86_64</code> and <code>SUSEConnect -p sle-module-development-tools/15.6/x86_64</code> (adjust the SP and architecture). <code>perl-Filesys-Df</code> additionally needs PackageHub.</p>
+<p><strong>RHEL 9:</strong> every Perl package above is in <strong>AppStream</strong> (BaseOS ships none, and CRB has none of these). <code>perl-Filesys-Df</code> is in <strong>EPEL 9</strong> only, so it needs <code>dnf install epel-release</code> first.</p>
+<p><strong>Ubuntu:</strong> <code>libdbd-pg-perl</code> and <code>libcrypt-bcrypt-perl</code> are in <strong>universe</strong>, not main -- relevant if your policy requires main-only packages.</p></div>
+<p><strong><code>Digest::SHA</code> is not needed by the core app.</strong> This is worth knowing if you audit dependencies: password hashes are pure-Perl Apache MD5 (<code>$apr1$</code>) computed with <code>Digest::MD5</code>, SHA-256/512 (<code>$5$</code>/<code>$6$</code>) hashes are verified through the system <code>crypt()</code>, and the device-table change-detection digest also uses <code>Digest::MD5</code> (a change detector, not a security primitive) -- so the script runs on older Perls such as the one shipped with AIX. <code>Digest::SHA</code> (core since Perl 5.9.3) is loaded <strong>lazily, only</strong> by two optional paths: the self-service password-reset feature (<code>EMAIL = 1</code>) hashes its tokens with it (required if you enable that feature), and the session-recorder download shows a SHA-256 beside each file <strong>only if</strong> the module is available (the checksum is simply omitted otherwise). Neither affects the rest of the app on a Perl without it.</p>
+<p>Check what is already present, <strong>with the versions</strong>, in one command:</p>
 <span class="file-label">shell</span>
-<pre><code>perl -MCGI -MDBI -MDBD::Pg -MAlgorithm::Diff -MDigest::MD5 -MTime::HiRes -e &#x27;print &quot;all modules found\n&quot;&#x27;</code></pre>
-<p>Any module that is missing is named in the error.</p>
+<pre><code>perl -MCGI\ 4.31 -MDBI\ 1.614 -MDBD::Pg\ 3.0.0 -MAlgorithm::Diff \
+     -MDigest::MD5 -MTime::HiRes -MPOSIX -e &#x27;print &quot;all modules found\n&quot;&#x27;</code></pre>
+<p>Any module that is missing -- or too old -- is named in the error. To see what you actually have:</p>
+<span class="file-label">shell</span>
+<pre><code>perl -MCGI -MDBI -MDBD::Pg -e \
+  &#x27;printf &quot;CGI %s\nDBI %s\nDBD::Pg %s\n&quot;, $CGI::VERSION, $DBI::VERSION, $DBD::Pg::VERSION&#x27;</code></pre>
+<h4 id="keeping-modules-patched">Keeping modules patched</h4>
+<p>Two advisories are worth knowing. Neither is expressed as a minimum version in <code>Makefile.PL</code>, deliberately: enterprise distributions backport security fixes <strong>without changing the version string</strong>, so a high floor would reject a patched vendor package while accepting an unpatched one built from CPAN.</p>
+<ul><li><strong>DBI before 1.650</strong> -- a string assigned to the <code>Profile</code> attribute is interpolated into a string <code>eval</code> (CVE-2026-14380, CVSS 8.8). This application never sets <code>Profile</code>, uses a plain <code>dbi:Pg:</code> DSN with no driver-attribute clause, and under mod_cgi/mod_fcgid a remote client cannot set <code>DBI_PROFILE</code> -- so it is not reachable here. Still, run a patched DBI: either CPAN <strong>1.650+</strong>, or a vendor package carrying the backport (RHEL 9 ships the fix in <code>perl-DBI</code> <code>1.643-9.el9_8.5</code> and later, still reporting version 1.643).</li><li><strong>DBD::Pg exactly 3.21.0</strong> -- an out-of-bounds write in <code>quote_float()</code> (CVE-2026-78183), introduced in 3.21.0 and fixed in <strong>3.21.1</strong>. Older 3.x releases, including the 3.14/3.18 shipped by these distributions, are not affected. Avoid that single release.</li></ul>
+<h4 id="installing-newer-modules-from-cpan">Installing newer modules from CPAN</h4>
+<p>Only needed if your distribution&#x27;s package is genuinely too old or you want a patched build it does not carry yet. <code>CGI</code> and <code>Algorithm::Diff</code> are pure Perl; <code>DBI</code> and <code>DBD::Pg</code> are XS and need a compiler plus the PostgreSQL client headers.</p>
+<p>Build prerequisites:</p>
+<span class="file-label">shell</span>
+<pre><code><span class="c"># RHEL 9 / Rocky 9 / Alma 9</span>
+dnf install -y gcc make perl-devel perl-ExtUtils-MakeMaker libpq-devel
+dnf install -y epel-release &amp;&amp; dnf install -y perl-App-cpanminus perl-local-lib
+
+<span class="c"># SLES 15 / openSUSE Leap 15   (cpanminus and local::lib come from PackageHub)</span>
+zypper install -y gcc make perl perl-ExtUtils-MakeMaker postgresql-server-devel
+zypper search --provides /usr/include/libpq-fe.h    # confirm which pkg owns the header
+SUSEConnect -p PackageHub/15.6/x86_64
+zypper install -y perl-App-cpanminus perl-local-lib
+
+<span class="c"># Debian / Ubuntu</span>
+apt-get install -y build-essential libpq-dev cpanminus liblocal-lib-perl</code></pre>
+<p>If <code>cpanm</code> is not packaged, bootstrap it (needs nothing but Perl):</p>
+<span class="file-label">shell</span>
+<pre><code>curl -L https://cpanmin.us -o /usr/local/bin/cpanm &amp;&amp; chmod +x /usr/local/bin/cpanm</code></pre>
+<p><strong>Option A -- private prefix (recommended).</strong> Leaves the vendor Perl untouched, so a distribution update can never fight with your modules:</p>
+<span class="file-label">shell</span>
+<pre><code>PREFIX=/opt/fetchconfig-web/perl5
+cpanm -l &quot;$PREFIX&quot; --notest CGI DBI DBD::Pg Algorithm::Diff FCGI Crypt::Bcrypt</code></pre>
+<p>Use <code>-l</code> (<code>--local-lib</code>), <strong>not</strong> <code>-L</code> (<code>--local-lib-contained</code>): <code>-l</code> reuses the vendor modules that are already good enough and installs only what is missing, while <code>-L</code> ignores everything outside the prefix and rebuilds the whole tree.</p>
+<p>Then point the application at the prefix. <strong>No code change is required</strong> -- the script does not run under taint mode, so <code>PERL5LIB</code> from the web-server config is enough:</p>
+<span class="file-label">Apache config</span>
+<pre><code><span class="c"># mod_fcgid</span>
+FcgidInitialEnv PERL5LIB /opt/fetchconfig-web/perl5/lib/perl5
+<span class="c"># mod_cgi / mod_cgid</span>
+SetEnv PERL5LIB /opt/fetchconfig-web/perl5/lib/perl5</code></pre>
+<p>Alternatively uncomment and adjust the <code>use lib</code> line near the top of <code>fetchconfig-web.cgi</code> (just above <code>use CGI;</code>). That form is the more robust one: it survives suexec and environment stripping, and it is the <strong>only</strong> one that keeps working if taint mode (<code>-T</code>) is ever enabled, since taint mode ignores <code>PERL5LIB</code>.</p>
+<p><strong>Option B -- install globally.</strong> Simpler, and fine on a host dedicated to this application, but the modules land in the system Perl&#x27;s <code>site_perl</code> and the distribution&#x27;s package manager does not know about them -- a later vendor update of the same module can shadow or conflict with what you installed, and you own the security updates for anything installed this way:</p>
+<span class="file-label">shell</span>
+<pre><code>cpanm --notest CGI DBI DBD::Pg Algorithm::Diff FCGI Crypt::Bcrypt
+<span class="c"># or, without cpanm:</span>
+cpan -i CGI DBI DBD::Pg Algorithm::Diff FCGI Crypt::Bcrypt</code></pre>
+<p>Nothing further is needed: <code>site_perl</code> is already on the default <code>@INC</code>, so the CGI picks the modules up with no configuration and no code change.</p>
+<p>If <code>pg_config</code> is not on <code>PATH</code> (for example with PGDG packages on RHEL), point the build at it before installing <code>DBD::Pg</code>:</p>
+<span class="file-label">shell</span>
+<pre><code>export PATH=/usr/pgsql-16/bin:$PATH      # or: export POSTGRES_HOME=/usr/pgsql-16</code></pre>
+<p>Verify which copy is actually being loaded:</p>
+<span class="file-label">shell</span>
+<pre><code>PERL5LIB=/opt/fetchconfig-web/perl5/lib/perl5 perl -MCGI -MDBI -MDBD::Pg -e \
+  &#x27;printf &quot;CGI %s\nDBI %s\nDBD::Pg %s\n&quot;, $CGI::VERSION, $DBI::VERSION, $DBD::Pg::VERSION&#x27;</code></pre>
 <h3 id="planning-the-layout">Planning the layout</h3>
 <p>Decide these paths before you start; they go into <code>/etc/fetchconfig-web.cfg</code> in Step 3. The defaults match a typical fetchconfig install.</p>
-<div class="table-wrap"><table><thead><tr><th>Setting</th><th>Default</th><th>What it is</th></tr></thead><tbody><tr><td><code>FETCHCONFIG_PATH</code></td><td><code>/usr/local/fetchconfig</code></td><td>Where <code>fetchconfig.pl</code> lives.</td></tr><tr><td><code>DEVICE_TABLE</code></td><td><code>/usr/local/fetchconfig/device_table</code></td><td>fetchconfig&#x27;s device table (read, and written by the editor).</td></tr><tr><td><code>BACKUP_DEVICE_TABLE</code></td><td><code>/usr/local/fetchconfig/backup</code></td><td>Where the editor keeps timestamped <code>.bak</code> copies of the device table. Must be writable by the web user.</td></tr><tr><td><code>SESSION_DIR</code></td><td><code>/var/lib/fetchconfig-web/sessions</code></td><td>Login sessions (mode 0700, files 0600). Must be writable by the web user.</td></tr><tr><td><code>BACKUP_TMP_DIR</code></td><td>same as <code>SESSION_DIR</code></td><td>Scratch space for <em>Backup Now</em> and the device-table writer lock. Must be writable by the web user.</td></tr><tr><td><code>WEB_DIR</code></td><td><code>/www/virtual/fetchconfig/htdocs</code></td><td><strong>Filesystem</strong> directory holding the static assets (css, fonts, images, help/docs); used for on-disk presence checks.</td></tr><tr><td><code>BASE_URL</code>, <code>CSS_BASE_URL</code>, <code>FONT_BASE_URL</code>, <code>IMAGE_BASE_URL</code></td><td><code>/</code>, <code>/css</code>, <code>/fonts</code>, <code>/images</code></td><td><strong>URL paths</strong> under which the web server serves <code>WEB_DIR</code> and its sub-directories.</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Setting</th><th>Default</th><th>What it is</th></tr></thead><tbody><tr><td><code>FETCHCONFIG_PATH</code></td><td><code>/usr/local/fetchconfig</code></td><td>Where <code>fetchconfig.pl</code> lives.</td></tr><tr><td><code>DEVICE_TABLE</code></td><td><code>/usr/local/fetchconfig/device_table</code></td><td>fetchconfig&#x27;s device table (read, and written by the editor).</td></tr><tr><td><code>BACKUP_DEVICE_TABLE</code></td><td><code>/usr/local/fetchconfig/backup</code></td><td>Where the editor keeps timestamped <code>.bak</code> copies of the device table. Must be writable by the web user.</td></tr><tr><td><code>SESSION_DIR</code></td><td><code>/var/lib/fetchconfig-web/sessions</code></td><td>Login sessions (mode 0700, files 0600). Must be writable by the web user.</td></tr><tr><td><code>BACKUP_TMP_DIR</code></td><td>same as <code>SESSION_DIR</code></td><td>Scratch space for <em>Backup Now</em> and the device-table writer lock. Must be writable by the web user.</td></tr><tr><td><code>WEB_DIR</code></td><td><code>/www/virtual/fetchconfig/htdocs</code></td><td><strong>Filesystem</strong> directory holding the static assets (css, fonts, images, help tree); used for on-disk presence checks.</td></tr><tr><td><code>BASE_URL</code>, <code>CSS_BASE_URL</code>, <code>FONT_BASE_URL</code>, <code>IMAGE_BASE_URL</code>, <code>HELP_BASE_URL</code></td><td><code>/</code>, <code>/css</code>, <code>/fonts</code>, <code>/images</code>, <code>/help</code></td><td><strong>URL paths</strong> under which the web server serves <code>WEB_DIR</code> and its sub-directories. <code>HELP_BASE_URL</code> is the help tree (<code>help.html</code> plus the scanned <code>fetchconfig-web/</code> and <code>fetchconfig/</code> menus).</td></tr></tbody></table></div>
 <p>You also need the identity of the <strong>web-server user</strong> (Apache&#x27;s <code>User</code> directive, or <code>ps -ef</code> while a request is running). On the reference deployment it is <code>nobody</code>; on Debian/Ubuntu it is usually <code>www-data</code>, on RHEL <code>apache</code>. It is referred to as <code>&lt;webuser&gt;</code> below.</p>
 </section>
-<section id="part-2-fresh-installation">
+<section id="part-2----fresh-installation">
 <div class="section-kicker">03</div>
 <h2>Part 2 -- Fresh installation</h2>
-<h3 id="step-1-install-the-perl-modules">Step 1 -- Install the Perl modules</h3>
+<h3 id="step-1----install-the-perl-modules">Step 1 -- Install the Perl modules</h3>
 <p>Install the four non-core modules for your platform (see the table above), then re-run the one-line check:</p>
 <span class="file-label">shell</span>
 <pre><code><span class="c"># Debian / Ubuntu</span>
@@ -590,14 +667,14 @@ cpan CGI DBI DBD::Pg Algorithm::Diff
 
 perl -MCGI -MDBI -MDBD::Pg -MAlgorithm::Diff -e &#x27;print &quot;ok\n&quot;&#x27;</code></pre>
 <p>On AIX, prefer the IBM AIX Toolbox RPMs (<code>perl-DBI</code>, <code>perl-DBD-Pg</code>, <code>perl-Algorithm-Diff</code>) where available; otherwise build from CPAN against the system Perl.</p>
-<h3 id="step-2-create-the-user-database">Step 2 -- Create the user database</h3>
+<h3 id="step-2----create-the-user-database">Step 2 -- Create the user database</h3>
 <p>fetchconfig-web keeps its own accounts in PostgreSQL. The setup script creates everything. Run it on a host that can reach the database server, as a user allowed to connect as the PostgreSQL superuser (typically run it as <code>postgres</code>, or pass connection details interactively):</p>
 <span class="file-label">shell</span>
 <pre><code>perl fetchconfig-web-dbsetup.pl</code></pre>
 <p>It walks through these steps, asking before each:</p>
-<ol><li><strong>Create the role</strong> -- the database user the CGI connects as (default <code>fetchconfig</code>) and its password.</li><li><strong>Create the database</strong> (default <code>fetchconfig</code>) owned by that role.</li><li><strong>Create the tables</strong> -- <code>users</code>, plus the 1.50 <code>sites</code> and <code>user_sites</code> tables for per-site device access, with the needed grants.</li><li><strong>Import an existing <code>htpasswd</code> file</strong> (optional) -- hashes are copied verbatim, so existing passwords keep working. Imported users start with no edit or admin rights.</li><li><strong>Bootstrap <code>admin</code></strong> -- if no <code>admin</code> account exists it is created with the password <code>fetchconfig</code>. <strong>Change this immediately after first login</strong> (Step 8).</li><li><strong>Write <code>/etc/fetchconfig-web.cfg</code></strong> (optional) -- writes a complete configuration file with the database credentials filled in. Say yes unless you prefer to write it by hand in Step 3.</li></ol>
+<ol><li><strong>Create the role</strong> -- the database user the CGI connects as (default <code>fetchconfig</code>) and its password.</li><li><strong>Create the database</strong> (default <code>fetchconfig</code>) owned by that role.</li><li><strong>Create the tables</strong> -- <code>users</code>, <code>audit_log</code>, <code>app_state</code>, <code>login_attempts</code>, <code>password_resets</code>, <code>device_notes</code>, plus the 1.50 <code>sites</code> and <code>user_sites</code> tables for per-site device access, with the needed grants.</li><li><strong>Import an existing <code>htpasswd</code> file</strong> (optional) -- hashes are copied verbatim, so existing passwords keep working. Imported users start with no edit or admin rights.</li><li><strong>Bootstrap <code>admin</code></strong> -- if no <code>admin</code> account exists it is created with the password <code>fetchconfig</code>. <strong>Change this immediately after first login</strong> (Step 8).</li><li><strong>Write <code>/etc/fetchconfig-web.cfg</code></strong> (optional) -- writes a complete configuration file with the database credentials filled in. Say yes unless you prefer to write it by hand in Step 3.</li></ol>
 <p>The database connection parameters you choose here (<code>DBhost</code>, <code>DBinst</code>, <code>DBuser</code>, <code>DBpass</code>) must match the configuration file.</p>
-<h3 id="step-3-write-the-configuration-file">Step 3 -- Write the configuration file</h3>
+<h3 id="step-3----write-the-configuration-file">Step 3 -- Write the configuration file</h3>
 <p>The CGI reads <code>/etc/fetchconfig-web.cfg</code> once per request (the path is fixed in the script). If the setup script wrote it for you, review it; otherwise create it. The format is one <code>KEY = value</code> per line, <code>#</code> comments allowed.</p>
 <p>A complete example with the defaults:</p>
 <span class="file-label">code</span>
@@ -625,6 +702,9 @@ USE_SUDO_FOR_BACKUP_NOW = 1
 SUDO_BIN                = /usr/bin/sudo
 <span class="c"># BACKUP_TIMEOUT must exceed the longest backup run of any device</span>
 BACKUP_TIMEOUT          = 120
+
+<span class="c"># Cap on how many per-device sections the run-log viewer renders (0 = no cap)</span>
+LOG_MAX_DEVICES         = 1000
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 
 <span class="c"># --- accounts ---</span>
@@ -673,17 +753,21 @@ BASE_URL                = /
 CSS_BASE_URL            = /css
 IMAGE_BASE_URL          = /images
 FONT_BASE_URL           = /fonts
+HELP_BASE_URL           = /help
+<span class="c"># Overrides the version shown in the footer and About dialog. Omit it to show</span>
+<span class="c"># the version the script ships as; the About dialog always shows that one too.</span>
+<span class="c">#APP_VERSION            = 2.06</span>
 COPYRIGHT               = 2026 (c) Your Organisation</code></pre>
 <p>Protect it: it contains the database password.</p>
 <span class="file-label">shell</span>
-<pre><code>chown root:&lt;webgroup&gt; /etc/fetchconfig-web.cfg
-chmod 640 /etc/fetchconfig-web.cfg</code></pre>
-<p>The web-server user must be able to read it (hence the group), nobody else. Every key is documented in the Configuration section of <code>README.md</code>.</p>
+<pre><code>chown &lt;webuser&gt; /etc/fetchconfig-web.cfg   # the httpd run-time user
+chmod 0600 /etc/fetchconfig-web.cfg</code></pre>
+<p>It must be readable by the web-server user and nobody else: the application checks the mode on every request and shows a persistent warning while any group or other permission bit is set, so a group-readable <code>640</code> will keep the banner up. Every key is documented in the Configuration section of <code>README.md</code>.</p>
 <p><strong>Protect the configuration file.</strong> It contains <code>DBpass</code> and <code>SMTP_PASS</code> in cleartext. It must be readable by the web-server user only (the application shows a warning on every page until it is):</p>
 <span class="file-label">shell</span>
 <pre><code>chown nobody /etc/fetchconfig-web.cfg      # the httpd run-time user (User directive)
 chmod 0600   /etc/fetchconfig-web.cfg</code></pre>
-<h3 id="step-4-install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</h3>
+<h3 id="step-4----install-the-cgi-and-static-files">Step 4 -- Install the CGI and static files</h3>
 <p>Copy the script into your CGI directory and make it executable:</p>
 <span class="file-label">shell</span>
 <pre><code>cp fetchconfig-web.cgi /www/cgi-bin/
@@ -693,24 +777,38 @@ chmod 755 /www/cgi-bin/fetchconfig-web.cgi</code></pre>
 <pre><code>WEB=/www/virtual/fetchconfig/htdocs
 mkdir -p $WEB/css $WEB/images
 cp fetchconfig-web.css $WEB/css/           # REQUIRED stylesheet
-cp images/back.jpg     $WEB/images/        # optional login backdrop
-cp help.html           $WEB/
-<span class="c"># Documentation/licence pages shown in the Help menu. Each menu entry appears</span>
-<span class="c"># only if its file is present in WEB_DIR, so copy the ones you want listed:</span>
-cp fetchconfig-web-documentation.html $WEB/   # &quot;Documentation fetchconfig-web&quot;
-cp INSTALL.html                       $WEB/   # &quot;Installation fetchconfig-web&quot;
-cp LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html $WEB/
-<span class="c"># Optional: the fetchconfig (CLI) manual, if you have it rendered as HTML:</span>
-<span class="c"># cp fetchconfig-documentation.html   $WEB/   # &quot;Documentation fetchconfig&quot;</span></code></pre>
+cp images/back.jpg     $WEB/images/        # optional login backdrop</code></pre>
+<p><strong>The help tree.</strong> The Help menu is served from the help tree, <code>&lt;WEB_DIR&gt;&lt;HELP_BASE_URL&gt;</code> (default <code>.../htdocs/help</code>). It holds <code>help.html</code> (the Help page) directly, plus two sub-directories whose <code>*.html</code> files become the two &quot;additional help&quot; menus:</p>
+<span class="file-label">shell</span>
+<pre><code>mkdir -p $WEB/help/fetchconfig-web $WEB/help/fetchconfig
+cp help.html $WEB/help/                     # the Help page
+
+<span class="c"># &quot;fetchconfig-web - additional help&quot;: copy whichever documents you want listed.</span>
+cp fetchconfig-web-documentation.html INSTALL.html CHANGES.html DEVELOPER.html \
+   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html \
+   $WEB/help/fetchconfig-web/
+
+<span class="c"># &quot;fetchconfig - additional help&quot;: the fetchconfig (CLI) manuals, if you have</span>
+<span class="c"># them rendered as HTML.</span>
+cp fetchconfig-documentation.html How-To-add-a-model.html \
+   README.generic-model.html README.record-session.html \
+   README.template_engine.html \
+   $WEB/help/fetchconfig/</code></pre>
+<p>Each menu entry&#x27;s label comes from the file&#x27;s <code>&lt;title&gt;</code>; entries are sorted by label and open in a new tab. <strong>You curate each menu by file placement</strong> -- copy in only the documents you want exposed. The two sub-directories are read-only to the application (it lists and links the files, never writes them), so they need no web-server write access. A sub-directory that is missing or holds no <code><em>.html</code> shows a muted &quot;No additional helpfiles available - see INSTALL.md&quot;; a sub-directory with more than fifteen <code></em>.html</code> files is treated as a misconfiguration and shows a single &quot;too many help documents in &amp;lt;dir&amp;gt;&quot; placeholder.</p>
 <p>The web server must serve <code>$WEB</code> at <code>BASE_URL</code> (e.g. the vhost DocumentRoot at <code>/</code>). The backdrop image is optional (the login page shows a plain background without it).</p>
+<p><strong>Session recorder download (optional).</strong> The <em>Upload HEX capture</em> block shows download buttons for the session recorder <strong>only if the files are present in <code>WEB_DIR</code></strong> -- they are not shipped with fetchconfig-web. Build the Windows executable from fetchconfig&#x27;s <code>contrib/windows</code> directory and drop both it and the Python source into <code>WEB_DIR</code> (served at <code>BASE_URL</code>):</p>
+<span class="file-label">shell</span>
+<pre><code>cp record_session.exe record_session.py $WEB/      # from fetchconfig contrib/windows</code></pre>
+<p>Each button appears only when its file exists; the whole row is hidden when neither is present. The app shows a <strong>SHA-256</strong> beside each download (computed once and cached in <code>SESSION_DIR</code>, re-hashed only when the file&#x27;s mtime/size changes -- no sidecar needed). <code>record_session.py</code> requires Python 3.12. The <code>.exe</code> is an <strong>unsigned</strong> PyInstaller build, so Windows SmartScreen or antivirus may warn on first run; the SHA-256 lets users verify it, and you can sign the executable if you have a code-signing certificate.</p>
 <p><strong>Favicon (optional).</strong> <code>favicon.ico</code> is the icon browsers show on the tab and in bookmarks. Browsers request it from the <strong>document root</strong> of the host (<code>/favicon.ico</code>), so when fetchconfig-web runs on its own <strong>vhost or a dedicated web server</strong>, copy it there:</p>
 <span class="file-label">shell</span>
 <pre><code>cp favicon.ico /www/virtual/fetchconfig/htdocs/   # the vhost&#x27;s DocumentRoot</code></pre>
-<p>If the application is instead served from a sub-path of a shared server, place <code>favicon.ico</code> at that server&#x27;s document root (or leave it out -- a missing favicon only means the browser shows its default tab icon). The Help page (<code>help.html</code>) is read from <code>WEB_DIR</code> on the filesystem and linked at <code>BASE_URL</code>. The Help menu lists each documentation/licence page only when its <code>.html</code> file exists in <code>WEB_DIR</code>, so a page you do not copy simply does not appear.</p>
+<p>If the application is instead served from a sub-path of a shared server, place <code>favicon.ico</code> at that server&#x27;s document root (or leave it out -- a missing favicon only means the browser shows its default tab icon). The Help page (<code>help.html</code>) is read from the help tree (<code>&lt;WEB_DIR&gt;&lt;HELP_BASE_URL&gt;</code>) on the filesystem and linked at <code>&lt;BASE_URL&gt;&lt;HELP_BASE_URL&gt;</code>. The two &quot;additional help&quot; menus list whatever <code>*.html</code> documents you place in the <code>fetchconfig-web/</code> and <code>fetchconfig/</code> sub-directories of the help tree, so a page you do not copy simply does not appear.</p>
 <p>Install the root-side template helper next to fetchconfig so the template editor can save files it cannot write directly (only needed if you use the template editor):</p>
 <span class="file-label">shell</span>
 <pre><code>cp fetchconfig-web-install-template.pl /usr/local/fetchconfig/
 chmod 755 /usr/local/fetchconfig/fetchconfig-web-install-template.pl</code></pre>
+<p>The helper is <strong>v1.2</strong> as of fetchconfig-web 2.05: besides <code>install</code> and <code>revert</code> it now supports <code>install-new</code> (used by template upload), <code>delete</code> (used by template delete) and <code>rename</code> (used by template rename). The single sudoers entry below (the script path) already covers every subcommand -- no sudoers change is needed, just redeploy the script.</p>
 <p>Make sure your web server executes <code>.cgi</code> files in that directory, e.g. for Apache:</p>
 <span class="file-label">code</span>
 <pre><code>ScriptAlias /cgi-bin/ &quot;/www/cgi-bin/&quot;
@@ -719,7 +817,7 @@ chmod 755 /usr/local/fetchconfig/fetchconfig-web-install-template.pl</code></pre
     AddHandler cgi-script .cgi
     Require all granted
 &lt;/Directory&gt;</code></pre>
-<h3 id="step-5-directories-and-permissions">Step 5 -- Directories and permissions</h3>
+<h3 id="step-5----directories-and-permissions">Step 5 -- Directories and permissions</h3>
 <p>The web-server user needs to <strong>write</strong> to three places and <strong>read</strong> two more. Create the writable directories by hand rather than letting the application do it -- the application can only create a directory if its parent is web-writable, which the <code>fetchconfig</code> tree should <strong>not</strong> be.</p>
 <span class="file-label">shell</span>
 <pre><code><span class="c"># sessions + scratch (lock file, Backup Now temp tables)</span>
@@ -743,23 +841,26 @@ chmod 664 /usr/local/fetchconfig/device_table</code></pre>
 <div class="callout note"><p><strong>Device-table backups are not pruned automatically.</strong> Every save, bulk edit, restore and site-code rename writes one timestamped <code>.bak</code> into <code>BACKUP_DEVICE_TABLE</code>, so that directory grows over time. Prune it periodically -- either from the web UI (<em>Tools -&gt; Restore device table</em> has a &quot;delete old backups&quot; control) or on the server with a cron job, e.g. <code>find /usr/local/fetchconfig/backup -name &#x27;*.bak&#x27; -mtime +90 -delete</code>. (These are the editor&#x27;s own table backups, separate from fetchconfig&#x27;s per-device config repository.)</p></div>
 <div class="callout note"><p><strong>The report directory must be web-writable for logo upload.</strong> <em>Tools -&gt; Upload report logo</em> writes image files into the <code>report_dir</code> configured on the <code>email:</code> line. Reports are already written there, so it is normally writable by the web-server user; if it is not, uploads/deletes fail with a clear message (no sudo is added for this).</p></div>
 <div class="callout note"><p><strong>Session files are cleaned up automatically.</strong> Files in <code>SESSION_DIR</code> are expired on access, and a login runs a throttled sweep (at most once per <code>SESSION_TTL</code>) that removes any session past its idle timeout (<code>SESSION_TTL</code>) or its absolute cap (<code>SESSION_MAX_LIFETIME</code> after login), so they do not accumulate. No cron is needed for these.</p></div>
-<h3 id="step-6-backup-now-and-sudo">Step 6 -- Backup Now and sudo</h3>
+<h3 id="step-6----backup-now-and-sudo">Step 6 -- Backup Now and sudo</h3>
 <p>The <em>Backup Now</em> button runs <code>fetchconfig.pl</code> for one device and writes the result into the repository. Because the repository is normally owned by a privileged account and not writable by the web user, the recommended setup is a <strong>narrow sudo rule</strong> that lets only the web-server user run only <code>fetchconfig.pl</code>, as root, without a password:</p>
 <span class="file-label">code</span>
 <pre><code><span class="c"># /etc/sudoers.d/fetchconfig-web   (install with visudo -f)</span>
-&lt;webuser&gt; ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig.pl</code></pre>
+&lt;webuser&gt; ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig.pl
+&lt;webuser&gt; ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig-web-install-template.pl</code></pre>
+<div class="callout note"><p><strong>Both</strong> lines are needed if you use the template tools. The first is for <em>Backup Now</em>; the second lets the template editor and the Templates page write into the template directories through the privileged helper (<code>TEMPLATE_HELPER</code>, Step 4). Granting only the first leaves every template <strong>Save / Revert / Upload / Generate from HEX / Delete / Rename</strong> failing with a sudo error. Each rule names one script path and therefore covers all of that script&#x27;s subcommands -- no sudoers change is needed when the helper gains one.</p>
+<p>Both are also gated on <code>USE_SUDO_FOR_BACKUP_NOW = 1</code>. That setting is not only about Backup Now: setting it to <code>0</code> <strong>also disables the template helper</strong>, after which template writes only work if the template directories are writable by the web user directly.</p></div>
 <p>and keep <code>USE_SUDO_FOR_BACKUP_NOW = 1</code> (the default). Backup Now then runs <code>sudo -n /usr/local/fetchconfig/fetchconfig.pl -devices=&lt;tempfile&gt;</code>; <code>-n</code> means it fails fast with sudo&#x27;s own message rather than hanging if the rule does not match. New backups are created with root ownership, consistent with cron-made ones.</p>
 <p>Two things to weigh before granting this:</p>
 <ul><li>It is passwordless root execution of that one binary for whatever runs as <code>&lt;webuser&gt;</code> -- in practice only this script, but it deserves your normal privilege-grant sign-off.</li><li><code>nobody</code> (and sometimes <code>www-data</code>) is a shared low-privilege account used by other daemons too. The rule applies to every process running as that user, not just this CGI. If that is broader than you like, run the web server under a dedicated user.</li></ul>
 <p>If you do not want sudo at all, set <code>USE_SUDO_FOR_BACKUP_NOW = 0</code>; Backup Now then runs as the web user and needs the repository to be web-writable (see &quot;Backup Now and repository write permissions&quot; in <code>README.md</code> for that option).</p>
-<h3 id="step-7-serve-over-https">Step 7 -- Serve over HTTPS</h3>
+<h3 id="step-7----serve-over-https">Step 7 -- Serve over HTTPS</h3>
 <p>Login sends a password and the session cookie is a bearer token; both should travel encrypted. Terminate TLS in the web server (Apache/nginx) in front of the CGI -- the script does not do TLS itself -- and redirect HTTP to HTTPS so the login form is never served in clear.</p>
 <p>Then set in the configuration:</p>
 <span class="file-label">code</span>
 <pre><code>HTTPS_ENABLED = 1</code></pre>
 <p>This adds the <code>Secure</code> flag to the session cookie so the browser never sends it over plain HTTP. Leave it <code>0</code> on an HTTP-only deployment -- with <code>Secure</code> set, the browser would withhold the cookie and login would appear to fail. Consider also enabling HSTS in the web server once HTTPS is stable.</p>
-<h3 id="step-7a-running-under-mod-fcgid-optional">Step 7a -- Running under mod_fcgid (optional)</h3>
-<p>By default <code>fetchconfig-web.cgi</code> runs as a plain CGI: Apache compiles the ~15,000-line script and opens fresh PostgreSQL connections on <strong>every</strong> request. Under FastCGI the process is kept alive between requests, so the script is compiled once per worker and connections are reused -- noticeably faster on a busy server, and especially on AIX where process start-up is costly.</p>
+<h3 id="step-7a----running-under-mod_fcgid-optional">Step 7a -- Running under mod_fcgid (optional)</h3>
+<p>By default <code>fetchconfig-web.cgi</code> runs as a plain CGI: Apache compiles the ~21,800-line script and opens fresh PostgreSQL connections on <strong>every</strong> request. Under FastCGI the process is kept alive between requests, so the script is compiled once per worker and connections are reused -- noticeably faster on a busy server, and especially on AIX where process start-up is costly.</p>
 <p>The same script runs both ways with no code change. At start-up it does <code>require FCGI</code>; if the module is present and Apache started it through a FastCGI process manager, it runs a persistent accept loop, otherwise it serves one request and exits as a normal CGI. So installing <code>FCGI</code> and switching the handler is all that is needed; removing the handler reverts to plain CGI.</p>
 <ol><li><strong>Install the modules</strong> (web-server Perl):</li></ol>
 <span class="file-label">shell</span>
@@ -848,12 +949,12 @@ ServerSignature Off
 <span class="c"># log, for up to 30 minutes).</span>
 SetEnvIf Request_URI &quot;action=reset_token&quot; dontlog
 CustomLog logs/access_log combined env=!dontlog</code></pre>
-<h3 id="step-8-first-login">Step 8 -- First login</h3>
+<h3 id="step-8----first-login">Step 8 -- First login</h3>
 <p>Browse to <code>https://yourhost/cgi-bin/fetchconfig-web.cgi</code> and log in as <code>admin</code> with the password <code>fetchconfig</code> (or the one you set in Step 2).</p>
 <p>Immediately:</p>
 <ol><li><strong>Change the admin password</strong> -- <em>User -&gt; Change your password</em>. Until you do, a warning banner is shown on every page.</li><li><strong>Create your sites</strong> -- <em>User -&gt; Sites</em>. Every device must carry a <code>site=</code> tag before the device table can be saved, so define the site codes first.</li><li><strong>Create users</strong> and assign their sites and rights -- <em>User -&gt; Add user</em>, then <em>Users -&gt; Sites</em>, or <em>Users -&gt; (click a user) -&gt; Edit site access</em>. A user needs the <em>Edit device</em> right to use the editor and <em>Admin functions</em> for Tools, sites and user management.</li><li><strong>Tag your devices</strong> -- <em>Setup devices -&gt; Edit device table</em>. Untagged devices are shown with a red site placeholder; <em>Tools -&gt; Check site assignment</em> lists any that remain untagged.</li></ol>
 </section>
-<section id="part-3-upgrading">
+<section id="part-3----upgrading">
 <div class="section-kicker">04</div>
 <h2>Part 3 -- Upgrading</h2>
 <h3 id="upgrading-the-script">Upgrading the script</h3>
@@ -862,50 +963,54 @@ CustomLog logs/access_log combined env=!dontlog</code></pre>
 <pre><code>cp /www/cgi-bin/fetchconfig-web.cgi /www/cgi-bin/fetchconfig-web.cgi.old
 cp fetchconfig-web.cgi /www/cgi-bin/
 chmod 755 /www/cgi-bin/fetchconfig-web.cgi
-cp help.html /www/pub/fetchconfig-web/
+cp fetchconfig-web.css /www/pub/fetchconfig-web/css/     # refresh the stylesheet
+cp help.html /www/pub/fetchconfig-web/help/
 <span class="c"># Refresh the Help-menu documentation pages as well (see Step 4):</span>
-cp fetchconfig-web-documentation.html INSTALL.html \
-   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html /www/pub/fetchconfig-web/</code></pre>
+cp fetchconfig-web-documentation.html DEVELOPER.html CHANGES.html INSTALL.html \
+   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html \
+   /www/pub/fetchconfig-web/help/fetchconfig-web/</code></pre>
+<div class="callout note"><p><strong>Upgrading from 2.02 or earlier:</strong> 2.03 moves the help files into a help tree. Add <code>HELP_BASE_URL = /help</code> to <code>/etc/fetchconfig-web.cfg</code> (it defaults to <code>/help</code> if omitted), create <code>&lt;WEB_DIR&gt;/help/fetchconfig-web/</code> and <code>&lt;WEB_DIR&gt;/help/fetchconfig/</code>, move <code>help.html</code> into <code>&lt;WEB_DIR&gt;/help/</code>, and copy the documentation pages into those two sub-directories (see Step 4). The old flat Help-menu list (fixed document names in <code>WEB_DIR</code>) is gone; the menu now lists whatever you place in the two sub-directories.</p></div>
+<div class="callout note"><p><strong>Upgrading to 2.05 (template upload/delete):</strong> redeploy <code>fetchconfig-web-install-template.pl</code> (now v1.2 -- adds <code>install-new</code>, <code>delete</code> and <code>rename</code>). No sudoers change is needed (the existing entry is the script path). Template upload/delete use the same <code>TEMPLATE_HELPER</code> as Save/Revert, or write directly when the template directory is web-writable. No config or database change is required.</p></div>
 <p>Then hard-reload the browser (Ctrl-F5) so cached JavaScript and CSS are refreshed -- several 1.50 changes are client-side, and a stale cache is the usual reason a fix &quot;does not appear&quot;.</p>
 <p><strong>Running under FastCGI?</strong> Copying the new script is not enough -- the long-lived <code>mod_fcgid</code> workers keep running the old code until recycled, and <code>touch</code> does not trigger a reload. Run <code>apachectl graceful</code> after the copy (see <em>Step 7a -- Running under mod_fcgid</em>). Plain CGI needs no such step.</p>
-<h3 id="upgrading-to-1-62">Upgrading to 1.62</h3>
+<h3 id="upgrading-to-162">Upgrading to 1.62</h3>
 <ul><li><strong>Run the database upgrade</strong> (adds <code>users.download_full_config</code> and the <code>device_notes</code> table). Idempotent, PostgreSQL 8.2-compatible:</li></ul>
 <span class="file-label">shell</span>
 <pre><code>psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate-1.62.sql</code></pre>
 <ul><li>Grant the new <strong>Full config</strong> right (User -&gt; Users) to any site-limited user who should be able to download a device config or copy it unmasked; unrestricted users always may. Without it the config view, and its Copy button, are masked and there is no Download button.</li><li>Device notes need no configuration; all users can add them (honouring site access) via the paper-note icon, Device -&gt; Notes, and Tools -&gt; Orphaned notes cleanup.</li></ul>
-<h3 id="upgrading-to-1-61">Upgrading to 1.61</h3>
+<h3 id="upgrading-to-161">Upgrading to 1.61</h3>
 <ul><li><code>chmod 0600 /etc/fetchconfig-web.cfg</code> (owned by the web-server user); the application warns on every page until the mode is correct.</li><li>If you use the email password reset (<code>EMAIL = 1</code>): add <code>SITE_URL</code> to the config file. Reset links are no longer built from the request&#x27;s <code>Host</code> header; without <code>SITE_URL</code> no reset email is sent.</li><li>Reset tokens are now stored as SHA-256; any token issued before the upgrade becomes invalid (they expire within 30 minutes anyway).</li><li>Add the access-log exclusion and <code>ServerTokens Prod</code> from Step 7.</li><li>No database change.</li></ul>
-<h3 id="upgrading-to-1-60">Upgrading to 1.60</h3>
+<h3 id="upgrading-to-160">Upgrading to 1.60</h3>
 <ul><li><strong>Remove <code>REPOSITORY</code></strong> from <code>/etc/fetchconfig-web.cfg</code>. The repository now always comes from the device table (device <code>repository=</code> or the model&#x27;s <code>default:</code> line), exactly as for <code>fetchconfig.pl</code> itself. A leftover <code>REPOSITORY</code> line is ignored and shown as <code>invalid</code> in <em>Tools -&gt; Show fetchconfig-web.cfg</em>.</li><li>If the device table sets no <code>repository=</code> at all, every page shows <code>FATAL ERROR: No repository found ...</code> -- add a <code>default:</code> line with <code>repository=</code> for each model.</li><li>Before 1.60, <em>Backup Now</em> stored backups of devices whose repository comes from a model <code>default:</code> line in <code>REPOSITORY</code> instead, if the two differed. Check <code>REPOSITORY</code> for such device directories and move them into the device&#x27;s real repository.</li><li><strong>Run the database upgrade</strong> (adds <code>users.email</code>, <code>login_attempts</code> and <code>password_resets</code>). It is idempotent and PostgreSQL 8.2-compatible:</li></ul>
 <span class="file-label">shell</span>
 <pre><code>psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate-1.60.sql</code></pre>
 <ul><li><strong>Optional modules.</strong> Install <code>Crypt::Bcrypt</code> to have passwords stored as bcrypt and legacy <code>$apr1$</code> hashes upgraded on next login. Install <code>Net::SMTP</code> (3.x, with <code>IO::Socket::SSL</code>) only if you enable the password-reset email.</li><li><strong>Optional email reset.</strong> To let users reset their own password, set <code>EMAIL = 1</code> and the <code>SMTP_<em></code> / <code>EMAIL_FROM</code> keys in <code>/etc/fetchconfig-web.cfg</code> (see the email section of the sample config), and set each user&#x27;s email address in </em>User -&gt; Users<em>. With <code>EMAIL = 0</code> the &quot;Forgot password?&quot; link simply tells users to contact an administrator, who resets the password from </em>User -&gt; Users*.</li><li><strong>Housekeeping.</strong> Prune spent reset tokens and stale throttle rows periodically (e.g. from cron) with <code>fetchconfig-web-clean-resets.pl</code> (run <code>-s</code> to print the minimal DB role it needs; <code>-h</code> for options).</li></ul>
-<h3 id="upgrading-the-database-to-1-51-audit-log">Upgrading the database to 1.51 (audit log)</h3>
+<h3 id="upgrading-the-database-to-151-audit-log">Upgrading the database to 1.51 (audit log)</h3>
 <p>Version 1.51 adds an append-only <code>audit_log</code> table (plus a small <code>app_state</code> table). Run the idempotent, PostgreSQL 8.2-compatible script once:</p>
 <span class="file-label">shell</span>
 <pre><code>psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate-1.51.sql</code></pre>
 <p>It is safe to re-run, and the same changes are also included in <code>fetchconfig-web-dbupdate-1.50.sql</code>. The web user is granted INSERT + SELECT on <code>audit_log</code> only (it can never alter or erase the log); a DBA handles any retention/pruning.</p>
-<h3 id="upgrading-the-database-to-1-50">Upgrading the database to 1.50</h3>
+<h3 id="upgrading-the-database-to-150">Upgrading the database to 1.50</h3>
 <p>Version 1.50 adds per-site device access, which needs two new tables (<code>sites</code>, <code>user_sites</code>) and one new column (<code>users.download_full_report</code>). Run the idempotent upgrade script <strong>once</strong> against the fetchconfig-web database:</p>
 <span class="file-label">shell</span>
 <pre><code>psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate-1.50.sql</code></pre>
 <p>It is safe to re-run. It:</p>
 <ul><li>creates <code>sites</code> and <code>user_sites</code> and the <code>download_full_report</code> column if missing;</li><li>seeds the reserved <code>*</code> &quot;All sites&quot; entry (id 0);</li><li>gives every existing user site 0, so <strong>everyone starts unrestricted</strong> and nothing changes for them until you narrow their sites;</li><li>grants the web database user the privileges it needs on the new tables (this matters if you run the script as <code>postgres</code> rather than as the web user).</li></ul>
 <p>Upgrading from a version <strong>before 1.15</strong> also needs the <code>admin_function</code> column; see &quot;The user database&quot; in <code>README.md</code>.</p>
-<h3 id="new-configuration-keys-in-1-50">New configuration keys in 1.50</h3>
+<h3 id="new-configuration-keys-in-150">New configuration keys in 1.50</h3>
 <p>Both are optional and default off; add them if you want the behaviour:</p>
 <div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Effect</th></tr></thead><tbody><tr><td><code>HTTPS_ENABLED</code></td><td><code>0</code></td><td><code>1</code> adds the <code>Secure</code> flag to the session cookie. Set it once you serve over HTTPS (Step 7).</td></tr><tr><td><code>SHOW_RENDER_TIME</code></td><td><code>0</code></td><td><code>1</code> shows the page load/render-time lines (device list, status, log, template list, editor render and per-card AJAX times). A diagnostic aid.</td></tr></tbody></table></div>
 </section>
-<section id="part-4-verification-and-troubleshooting">
+<section id="part-4----verification-and-troubleshooting">
 <div class="section-kicker">05</div>
 <h2>Part 4 -- Verification and troubleshooting</h2>
 <h3 id="checklist">Checklist</h3>
 <p>Work through this after a fresh install or an upgrade:</p>
-<ul><li>[ ] <code>perl -c /www/cgi-bin/fetchconfig-web.cgi</code> reports <em>syntax OK</em> (proves the Perl modules are present).</li><li>[ ] The login page loads over HTTPS and shows the backdrop image.</li><li>[ ] You can log in as <code>admin</code> and the default-password warning disappears after you change it.</li><li>[ ] <em>Devices</em> lists your devices with the correct <strong>Site</strong> column.</li><li>[ ] <em>Devices -&gt; Device backup status</em> and <em>Backup reports</em> open.</li><li>[ ] <em>Setup devices -&gt; Edit device table</em> opens, a device expands on <em>Edit</em>, and <em>Save changes</em> writes a <code>.bak</code> into <code>BACKUP_DEVICE_TABLE</code>.</li><li>[ ] <em>Tools -&gt; Check site assignment</em> reports no untagged devices (or lists the ones to fix).</li><li>[ ] <em>Backup Now</em> on one device completes and the new backup appears in the repository.</li><li>[ ] The footer shows the expected version: <em>fetchconfig-web v2.00 using fetchconfig v9.6x</em>.</li></ul>
+<ul><li>[ ] <code>perl -c /www/cgi-bin/fetchconfig-web.cgi</code> reports <em>syntax OK</em> (proves the Perl modules are present).</li><li>[ ] The login page loads over HTTPS and shows the backdrop image.</li><li>[ ] You can log in as <code>admin</code> and the default-password warning disappears after you change it.</li><li>[ ] <em>Devices</em> lists your devices with the correct <strong>Site</strong> column.</li><li>[ ] <em>Devices -&gt; Device backup status</em> and <em>Backup reports</em> open.</li><li>[ ] <em>Setup devices -&gt; Edit device table</em> opens, a device expands on <em>Edit</em>, and <em>Save changes</em> writes a <code>.bak</code> into <code>BACKUP_DEVICE_TABLE</code>.</li><li>[ ] <em>Tools -&gt; Check site assignment</em> reports no untagged devices (or lists the ones to fix).</li><li>[ ] <em>Backup Now</em> on one device completes and the new backup appears in the repository.</li><li>[ ] The footer shows the expected version: <em>fetchconfig-web v2.06 using fetchconfig v9.6x</em>.</li></ul>
 <h3 id="common-problems">Common problems</h3>
 <p><strong>&quot;Internal Server Error&quot; on first request.</strong> Almost always a missing Perl module or a non-executable script. Run <code>perl -c fetchconfig-web.cgi</code> as the web user, check <code>chmod 755</code>, and read the web server&#x27;s error log.</p>
 <p><strong>Login succeeds but immediately returns to the login page.</strong> The session cookie is not being accepted. Either <code>SESSION_DIR</code> is not writable by the web user, or <code>HTTPS_ENABLED = 1</code> is set on an HTTP-only site (the browser then discards the <code>Secure</code> cookie). Check <code>SESSION_DIR</code> permissions and the <code>HTTPS_ENABLED</code> value.</p>
-<p><strong>&quot;Configuration error&quot; on the login page.</strong> One of the URL-path keys (<code>BASE_URL</code>, <code>CSS_BASE_URL</code>, <code>FONT_BASE_URL</code>, <code>IMAGE_BASE_URL</code>) is not an absolute URL path, or a required key is missing. The message names the key.</p>
+<p><strong>&quot;Configuration error&quot; on the login page.</strong> One of the URL-path keys (<code>BASE_URL</code>, <code>CSS_BASE_URL</code>, <code>FONT_BASE_URL</code>, <code>IMAGE_BASE_URL</code>, <code>HELP_BASE_URL</code>) is not an absolute URL path, or a required key is missing. The message names the key.</p>
 <p><strong>The editor opens but Save fails with &quot;could not open ... for writing&quot;.</strong> The device table file is not writable by the web user (Step 5). Only the file needs to be writable, not its directory.</p>
 <p><strong>Save fails with &quot;The device table changed on disk since you opened the editor&quot;.</strong> Someone else saved, or a cron job rewrote the table, between your open and your save. Nothing was written. Reload the editor and redo the change -- this guard is what stops two people overwriting each other.</p>
 <p><strong>Backup Now ends with a blank or truncated page; the Apache error log shows <code>(70007)The timeout specified has expired: ap_content_length_filter: apr_bucket_read() failed</code>.</strong> The web server saw no output for its <code>Timeout</code>. Since 1.60 the keepalive (every 10 s) prevents this; on older releases raise <code>Timeout</code> above <code>BACKUP_TIMEOUT</code>. If it still occurs, a reverse proxy or load balancer in front is buffering the response (see the warning under Requirements).</p>
@@ -938,7 +1043,11 @@ prove -I t/lib t/</code></pre>
   // Scroll-spy: highlight the sidebar link matching the section in view.
   (function(){
     var links = Array.prototype.slice.call(document.querySelectorAll('.sidebar nav a'));
-    var sections = links.map(function(a){ return document.querySelector(a.getAttribute('href')); }).filter(Boolean);
+    // Resolve by id, not by CSS selector: section ids can start with a digit
+    // (version numbers in CHANGES, numbered sections in DEVELOPER), which is a
+    // valid HTML id but an invalid CSS id selector, so passing the href to
+    // querySelector would throw. getElementById has no such restriction.
+    var sections = links.map(function(a){ return document.getElementById(a.getAttribute('href').slice(1)); }).filter(Boolean);
     if (!('IntersectionObserver' in window) || !sections.length) return;
     var current = null;
     function setActive(id){

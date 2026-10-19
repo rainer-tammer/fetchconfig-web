@@ -1,85 +1,124 @@
 # render-doc.py
 
 Build tool that renders the project's Markdown documents to styled,
-self-contained HTML: `README.md` becomes `fetchconfig-web-documentation.html`
-(the manual) and `INSTALL.md` becomes `INSTALL.html` (the
-installation guide). It is a development/build helper -- it is **not** needed
-at runtime by fetchconfig-web itself.
+self-contained **HTML** and a plain-text **ASCII** version. It is a
+development/build helper -- it is **not** needed at runtime by fetchconfig-web
+itself. It absorbs the former `render-changes.py`: there is now one renderer for
+every document.
 
 ## Usage
 
 ```sh
-python3 render-doc.py [input-markdown] [output-html]
+python render-doc.py [input.md] [output.html]
 ```
 
 The **script name comes first**. A common mistake is to omit it, e.g.
-`python INSTALL.md INSTALL.html` -- that asks Python to execute the Markdown
-and fails with a `SyntaxError`. Always run `python render-doc.py <input> <output>`.
+`python INSTALL.md INSTALL.html` -- that asks Python to execute the Markdown and
+fails with a `SyntaxError`. Always run `python render-doc.py <input> <output>`.
 
-Both arguments are optional and default to:
+For a Markdown input it writes **two** files:
 
-- input:  `README.md`
-- output: `fetchconfig-web-documentation.html`
+- the HTML page (`output.html`), and
+- an **ASCII** plain-text rendering, named after the input with the
+  `.md`/`.markdown` suffix stripped (an input without one of those suffixes gets
+  `.txt` appended instead, so the source is never overwritten).
 
-Run it from the project directory after editing either document:
+The one exception is the **license** style below: a `LICENSE` input writes the
+HTML and a `.md`, and no plain-text file -- the input already *is* plain text.
+
+Output names: the HTML argument is optional and defaults from the input --
+`README.md` keeps its historical name `fetchconfig-web-documentation.html`, and
+any other `X.md` defaults to `X.html`. The ASCII name is the input without `.md`:
+
+| Input | HTML | ASCII |
+|-------|------|-------|
+| `README.md` | `fetchconfig-web-documentation.html` | `README` |
+| `INSTALL.md` | `INSTALL.html` | `INSTALL` |
+| `CHANGES.md` | `CHANGES.html` | `CHANGES` |
+| `DEVELOPER.md` | `DEVELOPER.html` | `DEVELOPER` |
+| `LICENSE-ADDITIONS.md` | `LICENSE-ADDITIONS.html` | `LICENSE-ADDITIONS` |
+| `PRIVACY.md` | `PRIVACY.html` | `PRIVACY` |
+| `README.imageconvert.md` | `README.imageconvert.html` | `README.imageconvert` |
+
+Run it from the project directory after editing a document:
 
 ```sh
-python3 render-doc.py                                      # README.md -> manual
-python3 render-doc.py INSTALL.md INSTALL.html   # install guide
+python3 render-doc.py                          # README.md -> manual + README
+python3 render-doc.py INSTALL.md               # -> INSTALL.html + INSTALL
+python3 render-doc.py CHANGES.md               # -> CHANGES.html + CHANGES
+python3 render-doc.py DEVELOPER.md             # -> DEVELOPER.html + DEVELOPER
+python3 render-doc.py README.imageconvert.md   # -> .html + README.imageconvert
 ```
 
-The page title, hero eyebrow and lede are derived from the input: the H1
-`fetchconfig-web -- <Subtitle>` supplies the eyebrow/title (a bare
-`fetchconfig-web` H1 falls back to "Documentation") and the first intro
-paragraph after the H1 is the lede. The sidebar is built from the `##`
-sections and their `###` subsections, so both documents stay in sync with
-their Markdown automatically.
+## Styles (chosen automatically)
+
+- **manual** -- the full sidebar/hero manual, used for **every** Markdown
+  document (README, INSTALL, CHANGES, DEVELOPER, LICENSE-ADDITIONS, PRIVACY,
+  and any other `.md`). The hero shows a single turquoise (`--accent`) `<h1>`
+  built from the H1 as `fetchconfig-web &mdash; <Subtitle>` (a bare
+  `fetchconfig-web` H1 falls back to "Documentation"), followed by the lede; the
+  sidebar is built from the `##` sections and their `###` subsections, each
+  section carrying a numbered kicker. A document whose H1 starts with
+  `fetchconfig-web` is treated as an *app document* and additionally gets the app
+  version/stat tiles; any other document (e.g. `README.imageconvert.md`) gets a
+  clean hero titled from its own H1 (`<Program> &mdash; <Subtitle>`). The
+  fetchconfig-specific **warning callouts** are narrower still: they are emitted
+  only for `README.md` and `INSTALL.md`, the two operational documents, so the
+  changelog, developer and legal pages do not carry runtime warnings.
+  A ```` ```mermaid ```` fenced block is rendered as a diagram (DEVELOPER.md);
+  the Mermaid runtime is loaded from a CDN **only** on pages that contain one.
+- **license** -- a verbatim `<pre>` of a `LICENSE` file; the legal text is
+  reproduced exactly and is not reflowed, under the same turquoise
+  `fetchconfig-web &mdash; <title>` heading. `render-doc.py LICENSE LICENSE.html`
+  also writes `LICENSE.md` (the text in a fenced block), and writes no plain-text
+  file. Note the selector is broad: this style is chosen for a basename starting
+  `LICENSE` with no dot **or for any input whose name does not end in `.md`,
+  `.markdown`, `.html` or `.htm`** -- so an extensionless input is always treated
+  as a license.
+
+## Markdown it understands
+
+Top-level `##` headings (sections), `###`/`####` sub-headings, GitHub-style pipe
+tables, fenced code blocks, ordered/unordered lists (with wrapped continuation
+lines), blockquote callouts, and inline code / bold / italic / links. A
+blockquote whose first line is a GitHub alert marker (`> [!CAUTION]`,
+`> [!WARNING]`) renders as a red warning callout; `[!NOTE]`, `[!TIP]`,
+`[!IMPORTANT]` or no marker render as the normal note callout.
+
+Two behaviours worth knowing when editing a document:
+
+- **Diagram / ASCII twins.** A ```` ```text ```` fence placed immediately after a
+  ```` ```mermaid ```` fence is treated as that diagram's plain-text twin: the
+  HTML shows only the rendered diagram (the text block is dropped), and the ASCII
+  rendering shows only the text block (the mermaid source is dropped). This is how
+  DEVELOPER.md carries both a diagram and a readable ASCII flow without either
+  output showing the same thing twice. Keep the two fences adjacent, and keep them
+  saying the same thing.
+- **Horizontal rules.** A line of `---`, `***` or `___` on its own is a thematic
+  break: an 80-column rule in the ASCII output and an `<hr>` in the HTML. A pipe
+  table's separator row is never mistaken for one (it always contains `|`), and
+  the rule that follows a document's lede is absorbed into the hero rather than
+  emitted twice.
+
+The ASCII renderer wraps prose to 80 columns, underlines headings, renders pipe
+tables as aligned columns (falling back to one `Header: value` record per row
+when a table is too wide to fit), keeps fenced code verbatim (indented), indents
+blockquotes, and strips inline markup and common HTML entities.
+
+The HTML version/stat values (sidebar pill, hero tile, the "requires
+fetchconfig" warning) are read from the `APP_VERSION_INTERNAL` and
+`MIN_FETCHCONFIG_VERSION` constants in `fetchconfig-web.cgi` (same directory as
+`render-doc.py`), so they cannot drift from the code; `?` is shown with a stderr
+warning if the file or a constant is missing.
 
 ## Requirements
 
-- Python 3 or Python 2.7 (standard library only -- `sys`, `re`, `io`, and
-  `html`/`cgi`; no third-party packages).
-- Runs unchanged on both Python 3 and Python 2.7.18.
-  packages).
+- Standard library only (`sys`, `re`, `io`, `os`, `textwrap`, and `html`/`cgi`);
+  no third-party packages.
+- Runs unchanged on **Python 3 and Python 2.7.18**.
 
-## What it does
-
-It converts the README's Markdown into a single, self-contained HTML page in
-the same visual style as the upstream `fetchconfig-documentation.html`:
-
-- Top-level `##` headings become numbered sections; `###`/`####` become
-  sub-headings.
-- GitHub-style pipe tables, fenced code blocks, ordered/unordered lists
-  (including wrapped continuation lines), blockquote callouts, and inline
-  code / bold / italic / links are all rendered.
-- The output has a sticky sidebar with scroll-spy navigation, a hero with
-  stat tiles, section "kickers", callouts and styled tables.
-- A blockquote whose first line is a GitHub alert marker (`> [!CAUTION]`,
-  `> [!WARNING]`) renders as a red warning callout; `[!NOTE]`, `[!TIP]` and
-  `[!IMPORTANT]`, or no marker, render as the normal note callout. The marker
-  line itself is not output. GitHub renders the same blocks as alerts.
-- The version in the sidebar pill and hero tile, and the minimum fetchconfig
-  version in the hero warning, are read from the `APP_VERSION_INTERNAL` and
-  `MIN_FETCHCONFIG_VERSION` constants in `fetchconfig-web.cgi` (same directory
-  as `render-doc.py`). If the file or a constant is missing, `?` is shown and a
-  warning is printed to stderr.
-
-The stylesheet is embedded in the script, so the generated HTML has no
-external assets other than Google Fonts, and the script needs no companion
-files.
-
-## Notes
-
-- The version shown in the sidebar pill and hero is set by the `v1.NN` /
-  `1.NN` literals in the page template inside the script; bump them on each
-  release.
-- The generator expects the README's structure (the section headings and
-  Markdown constructs listed above). If you add unusual Markdown, check the
-  generated HTML.
-- Output is 7-bit ASCII; any typography is emitted as HTML entities.
-
-## LICENSE (verbatim)
-
-`render-doc.py LICENSE LICENSE.html` renders the GPLv3 `LICENSE` file verbatim
-(preformatted) and also writes `LICENSE.md`. The legal text is reproduced
-exactly and is not reflowed.
+The embedded stylesheet means the generated HTML has no external assets other
+than Google Fonts -- and, on a document that uses a ```` ```mermaid ```` block,
+the Mermaid runtime (loaded from `cdn.jsdelivr.net` only for those pages). The
+script needs no companion files. The HTML output itself is 7-bit ASCII
+(typography is emitted as HTML entities); the generated plain-text file is UTF-8.

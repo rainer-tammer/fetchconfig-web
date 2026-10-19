@@ -41,7 +41,20 @@
 ################################################################################
 use strict;
 use warnings;
+# If you installed newer Perl modules into a private prefix instead of using the
+# distribution packages (see "Installing newer modules from CPAN" in INSTALL.md),
+# point the script at it here. Not normally needed: this script does not run
+# under taint mode, so setting PERL5LIB in the web-server config works just as
+# well (FcgidInitialEnv under mod_fcgid, SetEnv under mod_cgi). Uncomment and
+# adjust only if you prefer the path baked into the script -- that form also
+# keeps working if taint mode is ever enabled, which ignores PERL5LIB.
+# use lib '/opt/fetchconfig-web/perl5/lib/perl5';
 use CGI;
+# Bound the size of any single POST body (template upload, device-table save,
+# logo upload, ...). Generous headroom over the largest device-table save; the
+# template upload itself is further capped at 100 KB in do_upload_template. This
+# is the global guard against an oversized request being buffered in full.
+$CGI::POST_MAX = 2 * 1024 * 1024;   # 2 MB
 use CGI::Cookie;
 use Digest::MD5 ();
 use Time::HiRes ();
@@ -74,12 +87,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.02';
+use constant APP_VERSION => '2.06';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.02';
+use constant APP_VERSION_INTERNAL => '2.06';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -87,7 +100,16 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.71';
+use constant MIN_FETCHCONFIG_VERSION => '9.72';
+
+# --- Help menu "additional help" scan (see help_scan_dir / help_extract_title) ---
+# Each of the two help subdirectories (fetchconfig/, fetchconfig-web/) is
+# scanned at render time for *.html documents whose menu label comes from the
+# file's <title>. A directory with more than this many HTML files is treated as
+# misconfigured (a single "too many" placeholder is shown instead of a huge
+# menu). HELP_TITLE_BYTES caps how much of each file is read to find <title>.
+use constant HELP_MAX_FILES   => 15;
+use constant HELP_TITLE_BYTES => 1024;
 
 # --- Login throttle (see login_record_failure / login_is_throttled) ---
 use constant LOGIN_MAX_FAILURES  => 5;     # failures in the window before throttling
@@ -135,6 +157,7 @@ my ($DEVICE_TABLE,
     $FETCHCONFIG_PATH,
     $FETCHCONFIG_BIN,
     $FETCHCONFIG_BIN_FULL,
+    $GENERATE_TEMPLATE_BIN,
     $USE_SUDO_FOR_BACKUP_NOW,
     $SUDO_BIN,
     $SESSION_DIR,
@@ -165,6 +188,7 @@ my ($DEVICE_TABLE,
     $FONT_BASE_URL,
     $IMAGE_BASE_URL,
     $CSS_BASE_URL,
+    $HELP_BASE_URL,
     $TEMPLATE_HELPER,
     $BASE_URL,
     $HTTPS_ENABLED,
@@ -258,6 +282,7 @@ my @CFG_KEYS = (
     [ 'CSS_BASE_URL',           'url',       '/css',                                   'absolute URL path' ],
     [ 'FONT_BASE_URL',          'url',       '/fonts',                                 'absolute URL path' ],
     [ 'IMAGE_BASE_URL',         'url',       '/images',                                'absolute URL path' ],
+    [ 'HELP_BASE_URL',          'url',       '/help',                                  'absolute URL path' ],
     [ 'APP_VERSION',            'str',       APP_VERSION,                              'string (overrides the shown version)' ],
     [ 'COPYRIGHT',              'str',       DEFAULT_COPYRIGHT,                        'string' ],
     # email / password reset (see read_config and send_mail / do_forgot_password)
@@ -480,6 +505,10 @@ sub read_config {
     $FETCHCONFIG_PATH =~ s{/+$}{};                 # trim trailing slash(es)
     $FETCHCONFIG_BIN = $kv->{FETCHCONFIG_BIN};
     $FETCHCONFIG_BIN_FULL = "$FETCHCONFIG_PATH/$FETCHCONFIG_BIN";
+    # The HEX-capture template generator ships with fetchconfig under tools/.
+    # Derived from FETCHCONFIG_PATH (not a separate setting); used by the HEX
+    # uploader on the Templates page.
+    $GENERATE_TEMPLATE_BIN = "$FETCHCONFIG_PATH/tools/generate_template.pl";
     $SESSION_DIR     = $kv->{SESSION_DIR};
     $DBinst          = $kv->{DBinst};
     $DBuser          = $kv->{DBuser};
@@ -605,9 +634,10 @@ sub read_config {
         CSS_BASE_URL   => '/css',
         FONT_BASE_URL  => '/fonts',
         IMAGE_BASE_URL => '/images',
+        HELP_BASE_URL  => '/help',
     );
     my %url_val;
-    for my $k (qw(BASE_URL CSS_BASE_URL FONT_BASE_URL IMAGE_BASE_URL)) {
+    for my $k (qw(BASE_URL CSS_BASE_URL FONT_BASE_URL IMAGE_BASE_URL HELP_BASE_URL)) {
         my $v = (defined $kv->{$k} && $kv->{$k} ne '') ? $kv->{$k} : $url_default{$k};
         unless ($v =~ m{^/[A-Za-z0-9._~/-]*$}) {
             return "$CONFIG_FILE: $k must be an absolute URL path containing only "
@@ -625,6 +655,7 @@ sub read_config {
     $CSS_BASE_URL   = $url_val{CSS_BASE_URL};
     $FONT_BASE_URL  = $url_val{FONT_BASE_URL};
     $IMAGE_BASE_URL = $url_val{IMAGE_BASE_URL};
+    $HELP_BASE_URL  = $url_val{HELP_BASE_URL};
 
     # Full path to the privileged template-install helper
     # (fetchconfig-web-install-template.pl), run via sudo for the template
@@ -637,8 +668,11 @@ sub read_config {
 }
 
 ################################################################################
-# Embedded PNG logo (base64), shown in the title bar. Kept in-script so the
-# app stays a single deployable file with no separate image asset.
+# Embedded PNG logo (base64), shown in the title bar. Inlined for load
+# performance: it ships inside the first HTML response, so it costs no second
+# request and paints with the page. It doubles as the cid:fcwlogo inline image
+# of the report email, where linking to a web-server file is not an option.
+# (Larger assets -- back.jpg, the css, the fonts -- are served from WEB_DIR.)
 ################################################################################
 my $LOGO_BASE64 = do {
     local $/;
@@ -801,7 +835,8 @@ B64
 
 ################################################################################
 # Embedded PNG icon (base64) shown in the top-right corner of the login
-# box. Kept in-script like the title-bar logo, so no separate asset.
+# box. Inlined like the title-bar logo: small, and needed in the first paint
+# of the login page, so it is not worth a separate request.
 ################################################################################
 my $LOGIN_ICON_BASE64 = do {
     my $raw = <<'ICONB64';
@@ -1127,6 +1162,7 @@ our $_sites_cache;
 our %_user_sites_cache;
 our $_allowed_dirs_cache;
 our $_templates_t_cache;
+our $_template_used_cache;   # set of template paths referenced by a generic device
 
 # Byte-oriented output: the page is declared UTF-8 (HTTP header + <meta
 # charset>), and config content is passed through as raw UTF-8 bytes. We use
@@ -1157,12 +1193,32 @@ sub reset_request_state {
     %_user_sites_cache      = ();
     $_allowed_dirs_cache    = undef;
     $_templates_t_cache     = undef;
+    $_template_used_cache   = undef;
     _syntax_cache_reset();
     # Re-read the config file each request so an edited /etc/fetchconfig-web.cfg
     # takes effect without restarting Apache (matches plain-CGI behaviour,
     # where every request re-runs read_config()). Returns an error string on a
     # bad config, which handle_request() renders.
     return read_config();
+}
+
+################################################################################
+# _invalidate_table_caches
+#
+# Drop the per-request memos that derive from the device table, so a read later
+# in the SAME request reflects a device table we just rewrote. Called by the
+# device-table editor save (do_save_table), the bulk editor (do_bulk_save) and
+# the restore (do_restore_backup) after the table is written. (reset_request_state
+# already clears these at the start of every request, so the next request is
+# fresh regardless; this covers in-request correctness.)
+#
+# Parameters: none
+################################################################################
+sub _invalidate_table_caches {
+    $_templates_t_cache   = undef;
+    $_allowed_dirs_cache  = undef;
+    $_template_used_cache = undef;
+    _syntax_cache_reset();
 }
 
 ################################################################################
@@ -1241,6 +1297,10 @@ my %STATE_CHANGING = map { $_ => 1 } qw(
   check_template
   save_template
   revert_template
+  upload_template
+  upload_hex
+  rename_template
+  delete_template
   delete_report
   prune_reports
   add_site
@@ -1490,6 +1550,16 @@ sub main {
             do_save_template($user);
         } elsif ($action eq 'revert_template') {
             do_revert_template($user);
+        } elsif ($action eq 'upload_template') {
+            do_upload_template($user);
+        } elsif ($action eq 'upload_hex') {
+            do_upload_hex($user);
+        } elsif ($action eq 'rename_template') {
+            do_rename_template($user);
+        } elsif ($action eq 'delete_template') {
+            do_delete_template($user);
+        } elsif ($action eq 'download_template') {
+            do_download_template($user);
         } elsif ($action eq 'template_models') {
             show_template_models_json($user);
         } elsif ($action eq 'orphan_check') {
@@ -6051,7 +6121,7 @@ sub highlight_template {
     my %CLASS = (
         # directives (teal) -- only when first word on the line (see below)
         (map { $_ => 'tdir' } qw(transport banner_timeout fetch_timeout
-            fetch_delay prompt_settle max_visits strip_ansi prompt_head
+            fetch_delay max_visits strip_ansi prompt_head
             prompt_tail ssh_extra_opts capture_from skip_first interrupt ignore)),
         # state keywords (blue)
         state => 'kw',
@@ -6413,6 +6483,43 @@ sub device_status_info {
     }
     close($fh);
     return (%info) ? \%info : undef;
+}
+
+################################################################################
+# backup_run_failed
+#
+# Decide whether a Backup-Now run failed. fetchconfig.pl ALWAYS exits 0, so the
+# exit status is useless. Order of authority:
+#   1. A hard error ($err -- timeout, fork failure) is always a failure.
+#   2. Otherwise the device's per-run .status backup_state ($state) is
+#      authoritative: it is what fetchconfig itself records and what the summary
+#      email and the backup overview use. "failed" is a failure; initial /
+#      success / unchanged (or any other value) is a success -- regardless of
+#      benign "error:" lines in the log. An INITIAL backup, for example, logs
+#      "<model>: there is no latest config" (there is no prior config to diff
+#      against) while the fetch still succeeds.
+#   3. If no status is available ($state undef -- an older fetchconfig, or a
+#      crash before the status file was written), fall back to scraping the log:
+#      a backup_state=failed stats line, or any "error:" line OTHER than the
+#      known-benign "there is no latest config" one.
+#
+# Parameters:
+#   $err    hard-error string, or undef
+#   $output captured fetchconfig log (may be undef)
+#   $state  .status backup_state after the run, or undef
+################################################################################
+sub backup_run_failed {
+    my ($err, $output, $state) = @_;
+    return 1 if $err;
+    if (defined $state && $state ne '') {
+        return (lc($state) eq 'failed') ? 1 : 0;
+    }
+    # No status file: fall back to the log, ignoring the benign initial-backup
+    # "there is no latest config" line so it cannot false-positive.
+    my $scan = defined $output ? $output : '';
+    $scan =~ s/^.*\bthere is no latest config\b.*$//mg;
+    return ($scan =~ /(?:^|\n)[^\n]*\berror:/i
+            || $scan =~ /(?:^|\n)\s*backup_state\s*=\s*failed\b/i) ? 1 : 0;
 }
 
 ################################################################################
@@ -7438,17 +7545,14 @@ sub show_backup_now {
         return;
     }
 
-    # fetchconfig.pl ALWAYS exits 0, so the exit status is meaningless and is
-    # not used (nor logged). A run has failed if:
-    #   - we hit a hard error ($err -- e.g. a timeout or fork failure), or
-    #   - the output contains an "error:" line (fetchconfig's failure marker), or
-    #   - the output's stats block reports backup_state=failed.
-    # (backup_state may take other values -- e.g. success/unchanged -- but
-    # "failed" is unambiguous and is treated as a failed run.)
-    my $failed = $err ? 1
-               : (defined $output
-                  && ($output =~ /(?:^|\n)[^\n]*\berror:/i
-                      || $output =~ /(?:^|\n)\s*backup_state\s*=\s*failed\b/i)) ? 1 : 0;
+    # Decide whether the run failed (see backup_run_failed). The device's
+    # per-run .status file (backup_state) is authoritative -- the same signal
+    # fetchconfig records and the summary email and backup overview use -- so a
+    # benign "error:" line in the log (e.g. an initial backup's "there is no
+    # latest config") no longer causes a false FAILED.
+    my $st    = device_status_info($dev);
+    my $state = (defined $st) ? $st->{state} : undef;
+    my $failed = backup_run_failed($err, $output, $state);
 
     audit(action => 'backup_now', object_type => 'device', object_id => $dev,
           detail => $failed ? 'FAILED: backup run finished failed'
@@ -8141,7 +8245,8 @@ sub show_tool_diskspace {
         print qq{<p class="error">This tool needs the <code>Filesys::Df</code> Perl }
             . qq{module, which is not installed. Install it and reload: }
             . qq{<code>libfilesys-df-perl</code> (Debian/Ubuntu), }
-            . qq{<code>perl-Filesys-Df</code> (RHEL/Rocky), or }
+            . qq{<code>perl-Filesys-Df</code> (RHEL/Rocky: <strong>EPEL</strong>; }
+            . qq{SLES: <strong>PackageHub</strong>), or }
             . qq{<code>cpan Filesys::Df</code>.</p>\n};
         print qq{</div>\n};
         print page_foot();
@@ -10099,6 +10204,119 @@ sub fmt_mtime {
 }
 
 ################################################################################
+# _sha256_file / file_sha256_cached
+#
+# file_sha256_cached() returns the SHA-256 (hex) of $path, memoised in
+# <SESSION_DIR>/.recorder-sha256 so a ~15 MB binary is not re-hashed on every
+# Templates page load. The cache is keyed by (path, mtime, size): a changed mtime
+# or size invalidates the stored hash, and a missing/garbled cache just forces a
+# recompute, so it is a pure convenience and never load-bearing. _sha256_file()
+# streams the file through Digest::SHA (core Perl; same lazy require used for reset
+# tokens) and returns undef if it cannot be read or the module is unavailable.
+#
+# Parameters:
+#   $path
+################################################################################
+sub _sha256_file {
+    my ($path) = @_;
+    my $sha = eval {
+        require Digest::SHA;
+        my $d = Digest::SHA->new(256);
+        $d->addfile($path);                 # streamed; dies if unreadable
+        $d->hexdigest;
+    };
+    return (defined $sha && $sha =~ /^[0-9a-f]{64}$/) ? $sha : undef;
+}
+
+sub file_sha256_cached {
+    my ($path) = @_;
+    return undef unless -f $path && -r _;
+    my @st = stat($path);
+    my ($mtime, $size) = ($st[9], $st[7]);
+    my $cachefile = (defined $SESSION_DIR && $SESSION_DIR ne '')
+                  ? "$SESSION_DIR/.recorder-sha256" : '';
+    my %cache;
+    if ($cachefile ne '' && open(my $cf, '<', $cachefile)) {
+        while (my $ln = <$cf>) {
+            chomp $ln;
+            my ($p, $m, $s, $h) = split /\t/, $ln;
+            $cache{$p} = [$m, $s, $h] if defined $h && $h =~ /^[0-9a-f]{64}$/;
+        }
+        close($cf);
+    }
+    my $e = $cache{$path};
+    return $e->[2] if $e && defined $e->[0] && $e->[0] eq $mtime && $e->[1] eq $size;
+
+    my $sha = _sha256_file($path);
+    return undef unless defined $sha;
+    $cache{$path} = [$mtime, $size, $sha];
+    if ($cachefile ne '') {                 # best-effort write (atomic); ignore errors
+        my $tmp = "$cachefile.$$.tmp";
+        if (open(my $out, '>', $tmp)) {
+            for my $p (sort keys %cache) {
+                my $c = $cache{$p};
+                print $out join("\t", $p, $c->[0], $c->[1], $c->[2]), "\n";
+            }
+            close($out);
+            rename($tmp, $cachefile) or unlink($tmp);
+        }
+    }
+    return $sha;
+}
+
+################################################################################
+# recorder_download_html
+#
+# HTML for the "Session recorder" download row on the Upload HEX capture block.
+# The recorder is NOT shipped with fetchconfig-web; an admin drops the files from
+# fetchconfig's contrib/windows into WEB_DIR. Each download (record_session.exe,
+# record_session.py) is shown only when its file is present and readable there, and
+# the whole row is omitted when neither is -- so the block degrades gracefully.
+# Files are served statically by the web server from WEB_DIR (URL = BASE_URL +
+# name, the same mapping the CSS and the template-engine README use), not streamed
+# through the CGI. One meta line per file gives size, build date and a SHA-256
+# (cached via file_sha256_cached); an unsigned-build caveat follows for the .exe.
+#
+# Parameters: none
+################################################################################
+sub recorder_download_html {
+    return '' unless defined $WEB_DIR && $WEB_DIR ne '';
+    my @items = (
+        { file => "$WEB_DIR/record_session.exe", url => "$BASE_URL/record_session.exe",
+          label => 'Download record_session.exe (Windows)', desc => 'record_session.exe', exe => 1 },
+        { file => "$WEB_DIR/record_session.py",  url => "$BASE_URL/record_session.py",
+          label => 'record_session.py',
+          desc  => 'record_session.py runs on Python&nbsp;3 (3.12 required)', exe => 0 },
+    );
+    my (@buttons, @metalines, $have_exe);
+    for my $it (@items) {
+        next unless -f $it->{file} && -r _;
+        $have_exe = 1 if $it->{exe};
+        push @buttons, qq{<a class="btn" href="} . esc($it->{url}) . qq{" download>}
+                     . esc($it->{label}) . qq{</a>};
+        my @st = stat($it->{file});
+        my $line = '&middot; ' . $it->{desc} . ' &mdash; ' . esc(human_size($st[7]))
+                 . ' &middot; ' . esc(fmt_mtime($st[9]));
+        my $sha = file_sha256_cached($it->{file});
+        $line .= ' (SHA-256 <code>' . esc($sha) . '</code>)' if defined $sha;
+        push @metalines, $line;
+    }
+    return '' unless @buttons;
+
+    my $html = qq{<div class="recorder-dl">\n}
+             . qq{<div class="rdl-row"><span class="rdl-label">Session recorder:</span>\n}
+             . join("\n", @buttons) . qq{\n</div>\n}
+             . qq{<p class="rdl-meta muted">} . join("<br>\n", @metalines) . qq{</p>\n};
+    if ($have_exe) {
+        $html .= qq{<p class="rdl-note muted">The <code>.exe</code> is an unsigned build &mdash; }
+               . qq{Windows SmartScreen or antivirus may warn on first run. }
+               . qq{A signed build may be provided later.</p>\n};
+    }
+    $html .= qq{</div>\n};
+    return $html;
+}
+
+################################################################################
 # show_view_templates
 #
 # Template list page (?action=view_templates, admin only, read-only). Lists the
@@ -10122,8 +10340,75 @@ sub show_view_templates {
     print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">Templates</h2>\n};
 
+    # Flash from a delete (PRG redirect).
+    my $fmsg = $cgi->param('msg');
+    my $ferr = $cgi->param('err');
+    print qq{<p class="success">} . esc($fmsg) . qq{</p>\n} if defined $fmsg && $fmsg ne '';
+    print qq{<p class="error">}   . esc($ferr) . qq{</p>\n} if defined $ferr && $ferr ne '';
+
     my $t = run_templates_t();
     my $files = list_template_files();
+
+    # Upload form (disclosure button). Shown when at least one template directory
+    # is configured; the dropdown lists exactly those directories.
+    my @tdirs = @{ read_allowed_dirs()->{template} };
+    if (@tdirs) {
+        my $up_url = esc(script_url());
+        print qq{<details class="tpl-upload">\n};
+        print qq{<summary class="btn btn-green">Upload template</summary>\n};
+        print qq{<form class="tpl-upload-form" method="POST" action="$up_url" enctype="multipart/form-data">\n};
+        print qq{<input type="hidden" name="action" value="upload_template">\n};
+        print csrf_field();
+        print qq{<label class="tpl-up-field">Template file }
+            . qq{<input type="file" name="tmplfile" accept=".tmpl" required></label>\n};
+        print qq{<label class="tpl-up-field">Directory <select name="tdir">\n};
+        for my $d (@tdirs) {
+            my $p = esc($d->{path});
+            my $a = defined $d->{alias} && $d->{alias} ne '' ? esc($d->{alias}) . ' &mdash; ' : '';
+            print qq{<option value="$p">$a$p</option>\n};
+        }
+        print qq{</select></label>\n};
+        print qq{<button type="submit" class="btn">Upload</button>\n};
+        print qq{<p class="opt-hint muted">A new <code>.tmpl</code> file (its name is the }
+            . qq{generic <code>model=</code> value), text only, 100&nbsp;KB max. It is }
+            . qq{syntax-checked before install, and an existing name is never overwritten.</p>\n};
+        print qq{</form>\n</details>\n};
+
+        # HEX uploader: generate a draft template from a record-session .hex
+        # capture, then install it like a normal upload.
+        print qq{<details class="tpl-upload">\n};
+        print qq{<summary class="btn btn-green">Upload HEX capture</summary>\n};
+        print qq{<form class="tpl-upload-form" method="POST" action="$up_url" enctype="multipart/form-data">\n};
+        print qq{<input type="hidden" name="action" value="upload_hex">\n};
+        print csrf_field();
+        print qq{<label class="tpl-up-field">HEX capture }
+            . qq{<input type="file" name="hexfile" accept=".hex,.txt" required></label>\n};
+        print qq{<label class="tpl-up-field">Template name }
+            . qq{<input type="text" name="tmplname" placeholder="myswitch" required></label>\n};
+        print qq{<label class="tpl-up-field">Directory <select name="tdir">\n};
+        for my $d (@tdirs) {
+            my $p = esc($d->{path});
+            my $a = defined $d->{alias} && $d->{alias} ne '' ? esc($d->{alias}) . ' &mdash; ' : '';
+            print qq{<option value="$p">$a$p</option>\n};
+        }
+        print qq{</select></label>\n};
+        print qq{<label class="tpl-up-field">Highlighting <select name="scheme">\n};
+        for my $s (template_syntax_schemes()) {
+            my $se = esc($s);
+            my $sel = $s eq 'auto' ? ' selected' : '';
+            print qq{<option value="$se"$sel>$se</option>\n};
+        }
+        print qq{</select></label>\n};
+        print qq{<button type="submit" class="btn">Generate &amp; install</button>\n};
+        print qq{<p class="opt-hint muted">Generates a <strong>draft</strong> <code>.tmpl</code> from a }
+            . qq{<code>record-session.pl</code> capture via }
+            . qq{<code>generate_template.pl</code>, stamps the chosen }
+            . qq{<code>syntax_style</code>, then syntax-checks and installs it (name is the generic }
+            . qq{<code>model=</code> value; HEX 1&nbsp;MB max). Review the generated template before use.</p>\n};
+        print qq{</form>\n};
+        print recorder_download_html();
+        print qq{</details>\n};
+    }
 
     my $t_err = template_t_error_html($t);
     if ($t_err ne '') {
@@ -10134,23 +10419,74 @@ sub show_view_templates {
         print template_t_raw_html($t);
     } else {
         print qq{<table class="list">\n<tr><th>Template</th><th>Full Template Name</th>}
-            . qq{<th>Size</th><th>Modified</th><th></th></tr>\n};
+            . qq{<th>Size</th><th>Modified</th><th>Used</th><th></th></tr>\n};
         for my $f (@$files) {
             my $view = esc(script_url() . '?action=view_template&path='
                          . CGI::escape($f->{path}));
             my $edit = esc(script_url() . '?action=edit_template&path='
                          . CGI::escape($f->{path}));
-            my $actions = $f->{problem} eq ''
-                ? qq{<div class="row-actions">}
-                  . qq{<a class="btn" href="$view">View</a>\n}
-                  . qq{<a class="btn" href="$edit">Edit</a></div>}
-                : qq{<span class="error">Warning: } . esc($f->{problem})
-                  . qq{ -- not a plain text file; view/edit refused</span>};
+            my $dl   = esc(script_url() . '?action=download_template&path='
+                         . CGI::escape($f->{path}));
+            my $used = template_is_used($f->{path});
+            my $used_cell = $f->{problem} eq ''
+                ? ($used ? qq{Yes} : qq{No})
+                : qq{<span class="muted">&mdash;</span>};
+            my $actions;
+            if ($f->{problem} ne '') {
+                $actions = qq{<span class="error">Warning: } . esc($f->{problem})
+                         . qq{ &mdash; not a plain text file; view/edit/delete refused</span>};
+            } else {
+                # Rename (unused templates only): an inline form that opens the
+                # shared styled popup (data-prompt) to ask for the new name, then
+                # posts action=rename_template. A used template's name is the
+                # generic model= value a device resolves on, so renaming it is
+                # refused -- greyed out, like Delete.
+                my $rename;
+                if ($used) {
+                    $rename = qq{<button type="button" class="btn" disabled }
+                            . qq{title="In use by a device &mdash; cannot rename">Rename</button>};
+                } else {
+                    my $path_h = esc($f->{path});
+                    my $stem_h = esc($f->{name});
+                    $rename = qq{<form method="POST" action="} . esc(script_url()) . qq{" }
+                            . qq{class="tpl-rename-form" }
+                            . qq{data-prompt="New name for $stem_h (the generic model= value):" }
+                            . qq{data-prompt-default="$stem_h" data-prompt-field="newname" }
+                            . qq{data-prompt-confirm="Rename">}
+                            . qq{<input type="hidden" name="action" value="rename_template">}
+                            . qq{<input type="hidden" name="path" value="$path_h">}
+                            . qq{<input type="hidden" name="newname" value="">}
+                            . csrf_field()
+                            . qq{<button type="submit" class="btn">Rename</button></form>};
+                }
+                my $del;
+                if ($used) {
+                    $del = qq{<button type="button" class="btn btn-danger" disabled }
+                         . qq{title="In use by a device &mdash; cannot delete">Delete</button>};
+                } else {
+                    my $path_h = esc($f->{path});
+                    my $name_h = esc($f->{name} . '.tmpl');
+                    $del = qq{<form method="POST" action="} . esc(script_url()) . qq{" }
+                         . qq{class="tpl-del-form" data-confirm="Delete template $name_h? }
+                         . qq{This cannot be undone." data-confirm-danger="y">}
+                         . qq{<input type="hidden" name="action" value="delete_template">}
+                         . qq{<input type="hidden" name="path" value="$path_h">}
+                         . csrf_field()
+                         . qq{<button type="submit" class="btn btn-danger">Delete</button></form>};
+                }
+                $actions = qq{<div class="row-actions">}
+                         . qq{<a class="btn" href="$view">View</a>\n}
+                         . qq{<a class="btn" href="$edit">Edit</a>\n}
+                         . $rename . qq{\n}
+                         . qq{<a class="btn" href="$dl">Download</a>\n}
+                         . $del . qq{</div>};
+            }
             print qq{<tr>}
                 . qq{<td>} . esc($f->{name}) . qq{</td>}
                 . qq{<td>} . esc($f->{path}) . qq{</td>}
                 . qq{<td>} . esc(human_size($f->{size})) . qq{</td>}
                 . qq{<td>} . esc(fmt_mtime($f->{mtime})) . qq{</td>}
+                . qq{<td>$used_cell</td>}
                 . qq{<td>$actions</td>}
                 . qq{</tr>\n};
         }
@@ -10579,6 +10915,447 @@ sub do_revert_template {
     my $box = qq{<div class="config-wrap"><p class="$cls">} . esc($rmsg) . qq{</p></div>\n};
     # Reload from the (restored) file: pass no content so the editor re-reads.
     show_edit_template($user, no_header => 1, path => $path, result_html => $box);
+}
+
+################################################################################
+# do_upload_template
+#
+# POST (multipart): upload a brand-new template into a chosen template directory.
+# (action=upload_template) Steps, in order: validate the name and the target
+# directory (allow-list), read the file with a 100 KB cap, reject binary,
+# refuse if the target already exists, syntax-check the uploaded bytes, and only
+# then install via the helper's "install-new" (atomic, refuse-if-exists) or a
+# direct no-overwrite write. Renders a result page (not a redirect) so a failed
+# syntax check can show its detail. Caches refresh naturally on the next request.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_upload_template {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot(); return;
+    }
+    print page_head('Upload template', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Upload template</h2>\n};
+    my $done = sub { print qq{</div>\n}; print page_foot(); };
+
+    # Target directory must be a configured template dir (allow-list), given by
+    # its real path (the dropdown value); tolerate a "$alias" too.
+    my $dir_in = $cgi->param('tdir'); $dir_in = '' unless defined $dir_in;
+    my $dir = ($dir_in =~ /^\$/) ? resolve_dir_alias('template', $dir_in) : $dir_in;
+    my %tdirs = map { $_->{path} => 1 } @{ read_allowed_dirs()->{template} };
+    unless (defined $dir && $dir ne '' && $tdirs{$dir}) {
+        print qq{<p class="error">Choose a configured template directory.</p>\n};
+        return $done->();
+    }
+    $dir =~ s{/+$}{};
+
+    # Filename -> safe "<model>.tmpl" basename.
+    my $fn = $cgi->param('tmplfile');
+    unless (defined $fn && "$fn" ne '') {
+        print qq{<p class="error">No file was selected.</p>\n}; return $done->();
+    }
+    (my $base = "$fn") =~ s{^.*[/\\]}{};
+    unless (template_upload_name_ok($base)) {
+        print qq{<p class="error">Invalid template name. Use letters, digits and }
+            . qq{<code>._-</code> with a <code>.tmpl</code> extension, e.g. }
+            . qq{<code>myswitch.tmpl</code> (the name is the generic <code>model=</code> value).</p>\n};
+        return $done->();
+    }
+
+    # Read the upload with a hard 100 KB cap (templates are small text files).
+    my $up = $cgi->upload('tmplfile');
+    unless (defined $up) {
+        print qq{<p class="error">Upload failed (no file handle).</p>\n}; return $done->();
+    }
+    my $limit = 100 * 1024;
+    my ($data, $buf) = ('', undef);
+    binmode($up);
+    while (read($up, $buf, 8192)) {
+        $data .= $buf;
+        if (length($data) > $limit) {
+            print qq{<p class="error">The template is larger than 100&nbsp;KB.</p>\n};
+            return $done->();
+        }
+    }
+    if (length($data) == 0) {
+        print qq{<p class="error">The uploaded file is empty.</p>\n}; return $done->();
+    }
+    if ($data =~ /\0/) {
+        print qq{<p class="error">That file is not a text template (it contains binary data).</p>\n};
+        return $done->();
+    }
+
+    # Overwrite prevention (scope: this directory). The helper re-checks atomically.
+    my $target = "$dir/$base";
+    if (-e $target) {
+        print qq{<p class="error">A template named <code>} . esc($base)
+            . qq{</code> already exists in <code>} . esc($dir) . qq{</code>. }
+            . qq{Delete it first, or upload under a different name.</p>\n};
+        return $done->();
+    }
+
+    # Syntax-check the uploaded bytes BEFORE installing, so a bad template never
+    # goes live. Write to a temp .tmpl file and run --check-template on it.
+    my ($tfh, $tmp) = eval { tempfile('fcweb-up-XXXXXXXX', DIR => $BACKUP_TMP_DIR, SUFFIX => '.tmpl') };
+    unless ($tfh) {
+        print qq{<p class="error">Cannot create a temp file: } . esc("$@") . qq{</p>\n};
+        return $done->();
+    }
+    binmode($tfh); print $tfh $data; close($tfh); chmod(0600, $tmp);
+    my ($sok, $detail) = run_check_template($tmp);
+    unless (defined $sok && $sok == 1) {
+        unlink($tmp);
+        audit(action=>'upload_template', object_type=>'template', object_id=>$target,
+              detail=>'rejected: syntax check ' . (defined $sok ? 'failed' : 'could not run'));
+        print qq{<p class="error">Upload rejected: the uploaded file did not pass the }
+            . qq{template syntax check, so it was not installed.</p>\n};
+        print template_check_result_html($sok, $detail);
+        return $done->();
+    }
+
+    # Install (atomic, refuse-if-exists) via the helper or a direct write.
+    my ($ok, $msg) = install_new_template($target, $tmp);
+    unlink($tmp);
+    audit(action=>'upload_template', object_type=>'template', object_id=>$target,
+          detail=>($ok ? 'uploaded template (' . human_size(length($data)) . ')'
+                       : "upload failed: $msg"));
+    if ($ok) {
+        print qq{<p class="success">Uploaded <code>} . esc($base) . qq{</code> to <code>}
+            . esc($dir) . qq{</code> (} . esc(human_size(length($data)))
+            . qq{). It passed the syntax check.</p>\n};
+    } else {
+        print qq{<p class="error">Upload failed: } . esc($msg) . qq{</p>\n};
+    }
+    return $done->();
+}
+
+################################################################################
+# do_upload_hex
+#
+# POST (multipart): upload a record-session.pl .hex capture, generate a DRAFT
+# generic-model template from it via FETCHCONFIG_PATH/tools/generate_template.pl,
+# optionally stamp a syntax_style, syntax-check it, and install it as a brand-new
+# template. (action=upload_hex) Same guarantees as do_upload_template: the target
+# directory and template name come from allow-lists, an existing name is never
+# overwritten, the generated template is syntax-checked before install, and the
+# install goes through the privileged helper (atomic, refuse-if-exists). The
+# template NAME and the highlighting SCHEME are chosen on the form (the generator
+# cannot know them). The HEX upload cap is 1 MB (captures can carry large
+# configs); the GENERATED template still faces the 100 KB template budget.
+# Renders a result page (not a redirect) so a failed generation or syntax check
+# can show its detail.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_upload_hex {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot(); return;
+    }
+    print page_head('Generate template from HEX', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Generate template from HEX capture</h2>\n};
+    my $done = sub { print qq{</div>\n}; print page_foot(); };
+
+    # Target directory must be a configured template dir (allow-list), given by
+    # its real path (the dropdown value); tolerate a "$alias" too.
+    my $dir_in = $cgi->param('tdir'); $dir_in = '' unless defined $dir_in;
+    my $dir = ($dir_in =~ /^\$/) ? resolve_dir_alias('template', $dir_in) : $dir_in;
+    my %tdirs = map { $_->{path} => 1 } @{ read_allowed_dirs()->{template} };
+    unless (defined $dir && $dir ne '' && $tdirs{$dir}) {
+        print qq{<p class="error">Choose a configured template directory.</p>\n};
+        return $done->();
+    }
+    $dir =~ s{/+$}{};
+
+    # Template name is entered on the form (the generator cannot know it). Accept
+    # it with or without the .tmpl suffix; validate the resulting basename.
+    my $name_in = $cgi->param('tmplname'); $name_in = '' unless defined $name_in;
+    $name_in =~ s/^\s+//; $name_in =~ s/\s+$//;
+    (my $base = $name_in) =~ s{^.*[/\\]}{};
+    $base .= '.tmpl' unless $base =~ /\.tmpl$/;
+    unless (template_upload_name_ok($base)) {
+        print qq{<p class="error">Invalid template name. Use letters, digits and }
+            . qq{<code>._-</code>; the name is the generic <code>model=</code> value, e.g. }
+            . qq{<code>myswitch</code> (a <code>.tmpl</code> suffix is added if omitted).</p>\n};
+        return $done->();
+    }
+
+    # Highlighting scheme (allow-list); 'auto' leaves it to detection/GENERIC_SYNTAX.
+    my $scheme = $cgi->param('scheme');
+    $scheme = 'auto' unless defined $scheme && $scheme ne '';
+    my %ok_scheme = map { $_ => 1 } template_syntax_schemes();
+    unless ($ok_scheme{$scheme}) {
+        print qq{<p class="error">Unknown syntax highlighting scheme.</p>\n};
+        return $done->();
+    }
+
+    # Overwrite prevention (scope: this directory), checked up front -- before the
+    # capture is read or the generator runs -- so a name clash is reported at once
+    # (same warning as a normal template upload). The helper re-checks atomically
+    # at install time.
+    my $target = "$dir/$base";
+    if (-e $target) {
+        print qq{<p class="error">A template named <code>} . esc($base)
+            . qq{</code> already exists in <code>} . esc($dir) . qq{</code>. }
+            . qq{Delete it first, or choose a different name.</p>\n};
+        return $done->();
+    }
+
+    # Read the .hex upload with a hard 1 MB cap; reject empty / binary.
+    my $fn = $cgi->param('hexfile');
+    unless (defined $fn && "$fn" ne '') {
+        print qq{<p class="error">No HEX capture file was selected.</p>\n}; return $done->();
+    }
+    my $up = $cgi->upload('hexfile');
+    unless (defined $up) {
+        print qq{<p class="error">Upload failed (no file handle).</p>\n}; return $done->();
+    }
+    my $limit = 1024 * 1024;
+    my ($data, $buf) = ('', undef);
+    binmode($up);
+    while (read($up, $buf, 8192)) {
+        $data .= $buf;
+        if (length($data) > $limit) {
+            print qq{<p class="error">The HEX capture is larger than 1&nbsp;MB.</p>\n};
+            return $done->();
+        }
+    }
+    if (length($data) == 0) {
+        print qq{<p class="error">The uploaded file is empty.</p>\n}; return $done->();
+    }
+    if ($data =~ /\0/) {
+        print qq{<p class="error">That file is not a text HEX capture (it contains binary data).</p>\n};
+        return $done->();
+    }
+    unless (hex_looks_like_record_session($data)) {
+        print qq{<p class="error">That does not look like a <code>record-session.pl</code> capture. }
+            . qq{A capture starts with a <code># record-session</code> banner line.</p>\n};
+        return $done->();
+    }
+
+    # Write the HEX to a temp file and run the generator.
+    my ($hfh, $htmp) = eval { tempfile('fcweb-hex-XXXXXXXX', DIR => $BACKUP_TMP_DIR, SUFFIX => '.hex') };
+    unless ($hfh) {
+        print qq{<p class="error">Cannot create a temp file: } . esc("$@") . qq{</p>\n};
+        return $done->();
+    }
+    binmode($hfh); print $hfh $data; close($hfh); chmod(0600, $htmp);
+
+    my ($gok, $tmpl, $gdetail) = generate_template_from_hex($htmp);
+    unlink($htmp);
+    unless ($gok) {
+        audit(action=>'upload_hex', object_type=>'template', object_id=>$target,
+              detail=>'rejected: template generation failed');
+        print qq{<p class="error">Template generation failed, so nothing was installed.</p>\n};
+        if (defined $gdetail && $gdetail ne '') {
+            print qq{<div class="config-wrap"><pre class="config">} . esc($gdetail) . qq{</pre></div>\n};
+        }
+        return $done->();
+    }
+
+    # Stamp the chosen syntax_style into the generated header ('auto' leaves it to
+    # content detection / GENERIC_SYNTAX; 'none' or a scheme name pins it).
+    $tmpl = template_set_syntax_style($tmpl, $scheme);
+
+    # Syntax-check the GENERATED template BEFORE installing (it is a draft).
+    my ($tfh, $tmp) = eval { tempfile('fcweb-up-XXXXXXXX', DIR => $BACKUP_TMP_DIR, SUFFIX => '.tmpl') };
+    unless ($tfh) {
+        print qq{<p class="error">Cannot create a temp file: } . esc("$@") . qq{</p>\n};
+        return $done->();
+    }
+    binmode($tfh); print $tfh $tmpl; close($tfh); chmod(0600, $tmp);
+    if (-s $tmp > 100 * 1024) {
+        unlink($tmp);
+        print qq{<p class="error">The generated template is larger than 100&nbsp;KB.</p>\n};
+        return $done->();
+    }
+    my ($sok, $detail) = run_check_template($tmp);
+    unless (defined $sok && $sok == 1) {
+        unlink($tmp);
+        audit(action=>'upload_hex', object_type=>'template', object_id=>$target,
+              detail=>'rejected: syntax check ' . (defined $sok ? 'failed' : 'could not run'));
+        print qq{<p class="error">The generated template did not pass the syntax check, so it }
+            . qq{was not installed. The generator output is a draft &mdash; it may need manual }
+            . qq{fixes (look for <code># TODO</code> markers).</p>\n};
+        print template_check_result_html($sok, $detail);
+        return $done->();
+    }
+
+    # Install (atomic, refuse-if-exists) via the helper or a direct write.
+    my ($ok, $msg) = install_new_template($target, $tmp);
+    unlink($tmp);
+    audit(action=>'upload_hex', object_type=>'template', object_id=>$target,
+          detail=>($ok ? 'generated template from HEX (' . human_size(length($tmpl))
+                         . ", scheme=$scheme)" : "install failed: $msg"));
+    if ($ok) {
+        print qq{<p class="success">Generated and installed <code>} . esc($base) . qq{</code> in <code>}
+            . esc($dir) . qq{</code> (} . esc(human_size(length($tmpl)))
+            . qq{), highlighting <code>} . esc($scheme) . qq{</code>. It passed the syntax check.</p>\n};
+        print qq{<p class="opt-hint muted"><strong>This is a draft.</strong> Review every line of the }
+            . qq{generated template &mdash; especially any <code># TODO</code> markers &mdash; and test it }
+            . qq{against the device with the <code>generic</code> model before relying on it. }
+            . qq{<a class="btn" href="} . esc(script_url() . '?action=edit_template&path=' . CGI::escape($target))
+            . qq{">Edit template</a></p>\n};
+    } else {
+        print qq{<p class="error">Install failed: } . esc($msg) . qq{</p>\n};
+    }
+    return $done->();
+}
+
+################################################################################
+# do_delete_template
+#
+# POST: delete an UNUSED template. (action=delete_template) The path must be a
+# known template (whitelist) and must not be referenced by any device -- both
+# re-checked here at delete time (the list page is a snapshot). Deletes via the
+# helper's "delete" (also removes the .bak) or a direct unlink fallback, then
+# redirects back to the Templates list (PRG) with a flash message.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_delete_template {
+    my ($user) = @_;
+    unless (user_may_use_tools($user)) {
+        redirect_to_action('view_templates', err => 'You do not have permission to use the tools.');
+        return;
+    }
+    my $path = $cgi->param('path') // '';
+    unless (template_path_ok($path)) {
+        redirect_to_action('view_templates', err => 'Template not found, or not an allowed template path.');
+        return;
+    }
+    if (template_is_used($path)) {
+        redirect_to_action('view_templates', err => 'That template is in use by a device and cannot be deleted.');
+        return;
+    }
+    my ($ok, $msg) = delete_template_file($path);
+    (my $name = $path) =~ s{.*/}{};
+    audit(action=>'delete_template', object_type=>'template', object_id=>$path,
+          detail=>($ok ? 'deleted template' : "delete failed: $msg"));
+    if ($ok) { redirect_to_action('view_templates', msg => "Deleted $name."); }
+    else     { redirect_to_action('view_templates', err => "Delete failed: $msg"); }
+}
+
+################################################################################
+# do_rename_template
+#
+# POST: rename an UNUSED template within its own directory. (action=rename_template)
+# The source path must be a known template (whitelist) and must not be referenced
+# by any device -- both re-checked here at rename time (the list is a snapshot). A
+# used template cannot be renamed: its stem is the generic model= value a device
+# resolves on, so renaming it would orphan that device. The new name is validated
+# like an upload (safe <model>.tmpl basename, `.tmpl` added if omitted), must
+# differ from the old name, must stay in the same directory, and must not already
+# exist. Renames via the helper's "rename" (atomic, refuse-if-exists, moves the
+# .bak too) or a direct rename() fallback. Redirects (PRG) back to the list.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_rename_template {
+    my ($user) = @_;
+    unless (user_may_use_tools($user)) {
+        redirect_to_action('view_templates', err => 'You do not have permission to use the tools.');
+        return;
+    }
+    my $old = $cgi->param('path') // '';
+    unless (template_path_ok($old)) {
+        redirect_to_action('view_templates', err => 'Template not found, or not an allowed template path.');
+        return;
+    }
+    if (template_is_used($old)) {
+        redirect_to_action('view_templates', err => 'That template is in use by a device and cannot be renamed.');
+        return;
+    }
+    # New name: a safe basename (the generic model= value); add .tmpl if omitted.
+    my $name_in = $cgi->param('newname'); $name_in = '' unless defined $name_in;
+    $name_in =~ s/^\s+//; $name_in =~ s/\s+$//;
+    (my $newbase = $name_in) =~ s{^.*[/\\]}{};
+    $newbase .= '.tmpl' unless $newbase =~ /\.tmpl$/;
+    unless (template_upload_name_ok($newbase)) {
+        redirect_to_action('view_templates',
+            err => 'Invalid new template name. Use letters, digits and ._- (the name is the generic model= value).');
+        return;
+    }
+    # Same directory only; never overwrite an existing template.
+    my $dir      = $old; $dir =~ s{/[^/]*$}{};
+    my $new      = "$dir/$newbase";
+    (my $oldbase = $old) =~ s{.*/}{};
+    if ($newbase eq $oldbase) {
+        redirect_to_action('view_templates', err => 'The new name is the same as the current name.');
+        return;
+    }
+    if (-e $new) {
+        redirect_to_action('view_templates',
+            err => "A template named $newbase already exists in that directory.");
+        return;
+    }
+    my ($ok, $msg) = rename_template_file($old, $new);
+    audit(action=>'rename_template', object_type=>'template', object_id=>$old,
+          detail=>($ok ? "renamed to $newbase" : "rename failed: $msg"));
+    if ($ok) { redirect_to_action('view_templates', msg => "Renamed $oldbase to $newbase."); }
+    else     { redirect_to_action('view_templates', err => "Rename failed: $msg"); }
+}
+
+################################################################################
+# do_download_template
+#
+# GET: send a template file as a download (attachment). (action=download_template)
+# Read-only, so not a state-changing action (no CSRF). The path is validated
+# against the discovered template list (template_path_ok) -- a known, plain
+# template file only -- so this can never serve a file outside the template
+# directories. The download filename is the template's own basename.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_download_template {
+    my ($user) = @_;
+    unless (user_may_use_tools($user)) {
+        print std_header(-type => 'text/html', -charset => 'UTF-8');
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot(); return;
+    }
+    my $path = $cgi->param('path') // '';
+    unless (template_path_ok($path)) {
+        print std_header(-status => '404 Not Found', -type => 'text/plain', -charset => 'UTF-8');
+        print "Template not found, or not an allowed template path.\n";
+        return;
+    }
+    (my $name = $path) =~ s{.*/}{};
+    my $size = (stat($path))[7];
+    if (open(my $fh, '<', $path)) {
+        binmode($fh);
+        print std_header(-type => 'text/plain', -charset => 'UTF-8',
+                           -attachment => $name,
+                           (defined $size ? ('-Content_length' => $size) : ()));
+        binmode(STDOUT);
+        local $/ = \65536;
+        while (my $chunk = <$fh>) { print $chunk; }
+        close($fh);
+        audit(action=>'download_template', object_type=>'template', object_id=>$path,
+              detail=>'downloaded template');
+    } else {
+        print std_header(-status => '500 Internal Server Error', -type => 'text/plain', -charset => 'UTF-8');
+        print "Cannot read template.\n";
+    }
 }
 
 ################################################################################
@@ -13791,7 +14568,6 @@ my %MODEL_CATALOG = do {
                                  enable           => { type => 'secret', mandatory => 0 },
                                  banner_timeout   => { type => 'int',  mandatory => 0 },
                                  fetch_delay      => { type => 'int',  mandatory => 0 },
-                                 prompt_settle    => { type => 'int',  mandatory => 0 },
                                  max_visits       => { type => 'int',  mandatory => 0 },
                                  strip_ansi       => { type => 'bool', mandatory => 0 },
                                  prompt_head      => { type => 'text', mandatory => 0 },
@@ -15991,6 +16767,12 @@ sub backup_and_write_table {
         my $e = $!;
         return (0, $fail_msg->('error while finishing the write', $e));
     }
+    # The device table just changed: drop the per-request memos derived from it
+    # (template list, allow-list, used-set, syntax) so anything rendered later in
+    # THIS request (the save/restore result page, the template "Used" column)
+    # reflects the new table. Covers the device editor, the bulk editor and the
+    # restore, which all write through here.
+    _invalidate_table_caches();
     return (1, _basename($bak));
 }
 
@@ -16732,17 +17514,27 @@ sub render_record_card {
 ################################################################################
 # help_file_path
 #
-# Read help.html from WEB_DIR as-is (an HTML fragment, not a full document) and print
-# it verbatim inside this page's own chrome -- operator-authored content,
-# not user input, so it deliberately does NOT go through esc(). Falls back
-# to a built-in description if the file is missing.
-# Full on-disk path of the help page (HELP_DIR + HELP_FILE), and the directory
-# the sibling docs (LICENSE.html, PRIVACY.html, ...) live in.
+# Read help.html as-is (an HTML fragment, not a full document) and print it
+# verbatim inside this page's own chrome -- operator-authored content, not user
+# input, so it deliberately does NOT go through esc(). Falls back to a built-in
+# description if the file is missing.
+#
+# help_doc_dir() is the on-disk root of the help tree: WEB_DIR + HELP_BASE_URL
+# (e.g. /www/virtual/fetchconfig/htdocs/help). help.html lives directly in it;
+# the two scanned subdirectories fetchconfig/ and fetchconfig-web/ (the
+# "additional help" sections in the Help menu) sit beside it. The matching URL
+# base is BASE_URL + HELP_BASE_URL. Empty when WEB_DIR is unset.
 #
 # Parameters: reads @_ directly
 ################################################################################
-sub help_file_path { return (defined $WEB_DIR && $WEB_DIR ne '' ? "$WEB_DIR/" : '') . 'help.html'; }
-sub help_doc_dir   { return defined $WEB_DIR ? $WEB_DIR : ''; }
+sub help_doc_dir {
+    return '' unless defined $WEB_DIR && $WEB_DIR ne '';
+    return $WEB_DIR . (defined $HELP_BASE_URL ? $HELP_BASE_URL : '');
+}
+sub help_file_path {
+    my $d = help_doc_dir();
+    return ($d ne '' ? "$d/" : '') . 'help.html';
+}
 
 ################################################################################
 # read_help_file
@@ -16757,6 +17549,121 @@ sub read_help_file {
         return $content if defined $content && $content ne '';
     }
     return default_help_html();
+}
+
+################################################################################
+# _cp_utf8
+#
+# A Unicode code point -> its UTF-8 byte string, so a decoded numeric character
+# reference stays byte data, matching the app's raw-UTF-8 output model (STDOUT
+# is binmode, not :utf8). A no-op for ASCII (0..0x7F); 0x80 and up expand to the
+# 2-4 UTF-8 bytes the browser expects under the page's charset=UTF-8.
+#
+# Parameters:
+#   $cp  integer code point
+################################################################################
+sub _cp_utf8 {
+    my ($cp) = @_;
+    my $s = chr($cp);
+    utf8::encode($s);
+    return $s;
+}
+
+################################################################################
+# help_extract_title
+#
+# Pull a menu label out of an HTML help file: the text of its <title> element.
+# Only the first HELP_TITLE_BYTES bytes are read (the <title> lives in <head>,
+# near the top). The bytes are read RAW -- not decoded -- so multi-byte UTF-8
+# in a title survives unchanged through the caller's esc() and the raw-UTF-8
+# STDOUT, exactly as the config viewer and device data are handled. The
+# standard XML entities and numeric character references are decoded to their
+# literal text (numeric refs normalised back to UTF-8 bytes) so the caller's
+# esc() re-encodes the real text rather than double-encoding it. Returns undef
+# when the file cannot be read or has no non-empty <title>.
+#
+# Parameters:
+#   $path  full on-disk path of the HTML file
+################################################################################
+sub help_extract_title {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or return undef;
+    binmode($fh);
+    my $head = '';
+    read($fh, $head, HELP_TITLE_BYTES);
+    close($fh);
+    return undef unless defined $head && $head ne '';
+    return undef unless $head =~ m{<title\b[^>]*>(.*?)</title>}is;
+    my $t = $1;
+    $t =~ s/\s+/ /g;              # collapse whitespace/newlines to single spaces
+    $t =~ s/^\s+|\s+$//g;         # trim
+    # Decode the entities a title may legitimately carry so esc() (applied by
+    # the caller) does not double-encode them. Numeric character references may
+    # name a code point above 0xFF, so re-encode those to UTF-8 bytes -- the
+    # whole label stays a byte string (the app emits raw UTF-8 bytes, never wide
+    # characters). The named map covers the XML five plus the handful of
+    # typographic entities that realistically appear in document titles; the
+    # values are UTF-8 byte sequences. An unrecognised &name; is left as-is.
+    # (In practice the help files use raw UTF-8, not entities -- this is belt
+    # and braces so a stray entity never shows up double-encoded in the menu.)
+    $t =~ s/&#x([0-9A-Fa-f]+);/_cp_utf8(hex($1))/ge;
+    $t =~ s/&#(\d+);/_cp_utf8($1)/ge;
+    my %ent = (
+        amp => '&', lt => '<', gt => '>', quot => '"', apos => "'", nbsp => ' ',
+        ndash => "\xE2\x80\x93", mdash => "\xE2\x80\x94", hellip => "\xE2\x80\xA6",
+        lsquo => "\xE2\x80\x98", rsquo => "\xE2\x80\x99",
+        ldquo => "\xE2\x80\x9C", rdquo => "\xE2\x80\x9D",
+        copy  => "\xC2\xA9",     reg   => "\xC2\xAE",     trade  => "\xE2\x84\xA2",
+        deg   => "\xC2\xB0",     middot=> "\xC2\xB7",     times  => "\xC3\x97",
+    );
+    $t =~ s/&([A-Za-z][A-Za-z0-9]*);/exists $ent{$1} ? $ent{$1} : "&$1;"/ge;
+    $t =~ s/^\s+|\s+$//g;
+    return ($t ne '') ? $t : undef;
+}
+
+################################################################################
+# help_scan_dir
+#
+# Scan one "additional help" subdirectory (fetchconfig/ or fetchconfig-web/)
+# under the help tree for *.html documents to list in the Help menu. Returns a
+# hashref describing the section:
+#   { state => 'ok',      items => [ { label => <title>, file => <name> }, ... ] }
+#   { state => 'empty'   }   # dir absent, unreadable, or holds no *.html files
+#   { state => 'toomany' }   # more than HELP_MAX_FILES *.html files (misconfig)
+# Items are sorted by label (case-insensitive). At most HELP_MAX_FILES files are
+# opened; the scan stops as soon as a (HELP_MAX_FILES+1)th HTML entry is seen,
+# so a runaway directory is cheap to reject. The label is each file's <title>
+# (help_extract_title), falling back to the file name. The admin curates the
+# menu simply by placing the desired *.html documents in the directory.
+#
+# Parameters:
+#   $subdir  bare subdirectory name under help_doc_dir()
+################################################################################
+sub help_scan_dir {
+    my ($subdir) = @_;
+    my $root = help_doc_dir();
+    return { state => 'empty' } if $root eq '';
+    my $dir = "$root/$subdir";
+    opendir(my $dh, $dir) or return { state => 'empty' };
+    my @html;
+    while (defined(my $e = readdir($dh))) {
+        next if $e =~ /^\./;               # skip ., .. and dotfiles
+        next unless $e =~ /\.html?$/i;     # .html / .htm only
+        next unless -f "$dir/$e";          # regular files only
+        push @html, $e;
+        last if @html > HELP_MAX_FILES;    # stop at the first over-limit entry
+    }
+    closedir($dh);
+    return { state => 'toomany' } if @html > HELP_MAX_FILES;
+    return { state => 'empty'   } if !@html;
+    my @items;
+    for my $f (@html) {
+        my $label = help_extract_title("$dir/$f");
+        $label = $f unless defined $label && $label ne '';
+        push @items, { label => $label, file => $f };
+    }
+    @items = sort { lc($a->{label}) cmp lc($b->{label}) } @items;
+    return { state => 'ok', items => \@items };
 }
 
 ################################################################################
@@ -18561,41 +19468,6 @@ sub device_backup_status {
 }
 
 ################################################################################
-# run_check_empty
-#
-# Run `fetchconfig.pl -z dev_id` to check for empty backup files on disk.
-# Read-only (inspects existing files), so it uses the same non-sudo
-# run_fetchconfig() path as -l/-g. Unlike list_backups(), the output here
-# is a human-readable report shown verbatim, not parsed -- so we combine
-# stdout and stderr (fetchconfig may write its findings to either) into a
-# single transcript. Returns ($output, $status, $error).
-#
-# Parameters:
-#   $dev
-################################################################################
-sub run_check_empty {
-    my ($dev) = @_;
-    my ($out, $err, $status, $fork_err) =
-        run_fetchconfig('-devices=' . $DEVICE_TABLE, '-z', $dev);
-    return (undef, undef, $fork_err) if $fork_err;
-
-    # fetchconfig.pl writes its info/debug progress log to STDERR and the
-    # actual per-file result line(s) to STDOUT. On a terminal the two
-    # streams interleave live, so the diagnostics appear first and the
-    # summary/result line(s) come last. run_fetchconfig() captures them
-    # separately, so we reassemble in that same reading order here --
-    # stderr (the log) first, then stdout (the results) -- rather than
-    # stdout-first, which would jump the result line to the top.
-    my $combined = '';
-    $combined .= $err if defined $err && $err ne '';
-    if (defined $out && $out ne '') {
-        $combined .= "\n" if $combined ne '' && $combined !~ /\n$/;
-        $combined .= $out;
-    }
-    return (collapse_model_registration($combined), $status, undef);
-}
-
-################################################################################
 # device_suffix_status
 #
 # Check a device's backups for CONSISTENT file extensions via
@@ -18899,6 +19771,71 @@ sub template_path_ok {
 }
 
 ################################################################################
+# template_used_paths / template_is_used
+#
+# The set of template files actually referenced by a device, so the Templates
+# page can show a "Used" column and refuse to delete a template still in use.
+# Only template-backed ("generic") devices use templates, and only via their
+# model= (or template=) and template_dir= options -- the same resolution
+# device_template_path() does, but computed for every device in a single pass:
+#   - a model=/template= value that contains "/" is a path ($alias expanded);
+#   - otherwise it is "<template_dir>/<name>.tmpl", where template_dir comes
+#     from the device, else the default-section template_dir for its model.
+# Result is memoised in $_template_used_cache for the request (cleared by
+# reset_request_state each request, and by _invalidate_table_caches after an
+# in-request table rewrite).
+#
+# Parameters:
+#   template_is_used: $path  absolute template path
+################################################################################
+sub template_used_paths {
+    return $_template_used_cache if defined $_template_used_cache;
+    my %used;
+    my ($content, $err) = slurp_device_table();
+    if ($err || !defined $content) { $_template_used_cache = \%used; return $_template_used_cache; }
+    my $recs = parse_device_table($content);
+    my %default_dir;
+    for my $r (@$recs) {
+        next unless $r->{kind} eq 'default';
+        for my $p (@{ $r->{opts} }) {
+            $default_dir{ $r->{model} } = $p->[1] if $p->[0] eq 'template_dir';
+        }
+    }
+    for my $r (@$recs) {
+        next unless $r->{kind} eq 'device';
+        my $model = $r->{model};
+        my ($tmpl, $tdir);
+        for my $p (@{ $r->{opts} }) {
+            $tmpl = $p->[1] if $p->[0] eq 'template' || $p->[0] eq 'model';
+            $tdir = $p->[1] if $p->[0] eq 'template_dir';
+        }
+        next unless defined $tmpl && $tmpl ne '';
+        my $path;
+        if ($tmpl =~ m{/}) {
+            $path = resolve_dir_alias('template', $tmpl);
+        } else {
+            my $dir = defined $tdir ? $tdir
+                    : (defined $model && defined $default_dir{$model}) ? $default_dir{$model}
+                    : undef;
+            next unless defined $dir && $dir ne '';
+            $dir = resolve_dir_alias('template', $dir);
+            $dir =~ s{/+$}{};
+            my $name = $tmpl =~ /\.tmpl$/ ? $tmpl : "$tmpl.tmpl";
+            $path = "$dir/$name";
+        }
+        $used{$path} = 1 if defined $path && $path ne '';
+    }
+    $_template_used_cache = \%used;
+    return $_template_used_cache;
+}
+
+sub template_is_used {
+    my ($path) = @_;
+    return 0 unless defined $path && $path ne '';
+    return template_used_paths()->{$path} ? 1 : 0;
+}
+
+################################################################################
 # template_refusal_message
 #
 # Why a template path was refused: names the link/file problem when that is
@@ -18953,6 +19890,43 @@ sub run_check_template {
 }
 
 ################################################################################
+# helper_error_summary / helper_fail_msg
+#
+# run_command_capture() merges the helper's stdout and stderr, and on an unknown
+# subcommand the helper prints its full --help after the error line -- so the raw
+# capture is many lines. For a user-facing message we want just the first error
+# line. helper_error_summary() returns the first line containing "error:" (else
+# the first non-empty line); helper_fail_msg() wraps it as the standard
+# "Helper failed (exit N): ..." string and, when the failure is an unrecognised
+# subcommand (an out-of-date helper), appends a redeploy hint naming the version.
+#
+# Parameters:
+#   $status  (helper_fail_msg)
+#   $out     (both; the merged helper output)
+################################################################################
+sub helper_error_summary {
+    my ($out) = @_;
+    return '' unless defined $out && $out ne '';
+    my @lines = grep { /\S/ }
+                map { my $l = $_; $l =~ s/^\s+//; $l =~ s/\s+$//; $l }
+                split /\n/, $out;
+    for my $l (@lines) { return $l if $l =~ /error:/i; }
+    return defined $lines[0] ? $lines[0] : '';
+}
+
+sub helper_fail_msg {
+    my ($status, $out) = @_;
+    my $detail = helper_error_summary($out);
+    if ($detail =~ /unknown or missing command/i) {
+        $detail .= ($detail =~ /[.!]$/ ? '' : '.')
+                 . ' The template helper is out of date -- redeploy'
+                 . ' fetchconfig-web-install-template.pl (v1.2 or newer).';
+    }
+    return 'Helper failed (exit ' . (defined $status ? $status : '?') . ')'
+         . ($detail ne '' ? ": $detail" : '.');
+}
+
+################################################################################
 # save_template
 #
 # Install $content as the template at $target: write a temp file, then either
@@ -18978,7 +19952,7 @@ sub save_template {
             run_command_capture($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'install', $tmp, $target);
         if (defined $err)        { ($ok, $msg) = (0, $err); }
         elsif ($status == 0)     { ($ok, $msg) = (1, "Saved. Previous version kept as $target.bak."); }
-        else                     { ($ok, $msg) = (0, "Helper failed (exit $status): " . ($out // '')); }
+        else                     { ($ok, $msg) = (0, helper_fail_msg($status, $out)); }
     } else {
         # Direct write (no helper): back up to <target>.bak, then atomic rename.
         if (-e $target) {
@@ -19014,11 +19988,245 @@ sub revert_template {
             run_command_capture($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'revert', $target);
         return (0, $err) if defined $err;
         return ($status == 0) ? (1, "Reverted to the last saved version.")
-                              : (0, "Helper failed (exit $status): " . ($out // ''));
+                              : (0, helper_fail_msg($status, $out));
     }
     return _atomic_copy_file($bak, $target)
         ? (1, "Reverted to the last saved version.")
         : (0, "cannot restore $target: $!");
+}
+
+################################################################################
+# template_syntax_schemes
+#
+# The curated list of highlighting scheme names the HEX uploader offers and
+# validates against (dropdown + server-side check). Kept in step with the
+# GENERIC_SYNTAX enum in @CFG_KEYS and the %SYNTAX_HIGHLIGHTERS registry:
+# 'auto' = detect from content, 'none' = no highlighting, otherwise a scheme.
+#
+# Parameters: none
+################################################################################
+sub template_syntax_schemes {
+    return qw(auto none cisco-ios procurve comware zyxel aruba-cx nexus mediant json xml generic);
+}
+
+################################################################################
+# template_set_syntax_style
+#
+# Return $text with its declared syntax_style set to $scheme. Any existing
+# "# syntax_style: ..." comment line is removed first (dedupe). For 'auto' (or an
+# empty/undef scheme) no line is added -- detection / GENERIC_SYNTAX decide. For
+# 'none' or a concrete scheme, a "# syntax_style: <scheme>" line is inserted at
+# the END of the leading comment-header block (right after the generator's header
+# banner), or at the top if the template has no leading comment block.
+#
+# Parameters:
+#   $text
+#   $scheme
+################################################################################
+sub template_set_syntax_style {
+    my ($text, $scheme) = @_;
+    $text = '' unless defined $text;
+    my @lines = split /\n/, $text, -1;
+    @lines = grep { $_ !~ /^\s*#\s*syntax_style\s*:/i } @lines;   # drop any existing
+    if (!defined $scheme || $scheme eq '' || $scheme eq 'auto') {
+        return join("\n", @lines);
+    }
+    my $i = 0;
+    $i++ while $i < @lines && $lines[$i] =~ /^\s*#/;              # end of header block
+    splice(@lines, $i, 0, "# syntax_style: $scheme");
+    return join("\n", @lines);
+}
+
+################################################################################
+# hex_looks_like_record_session
+#
+# True if $data looks like a record-session.pl capture: every capture begins with
+# a "# record-session host=... transport=... <timestamp>" banner, so that magic
+# first line is used to reject an unrelated file (a template, a config dump, …)
+# early, before it is handed to the generator.
+#
+# Parameters:
+#   $data
+################################################################################
+sub hex_looks_like_record_session {
+    my ($data) = @_;
+    return 0 unless defined $data;
+    return ($data =~ /\A\s*#\s*record-session\b/) ? 1 : 0;
+}
+
+################################################################################
+# generate_template_from_hex
+#
+# Run FETCHCONFIG_PATH/tools/generate_template.pl on a record-session .hex
+# capture and return (ok, template_text, detail). The generator is told to write
+# to a temp file (-o), so the template text is read back from that file and is
+# never mixed with the generator's diagnostics (run_command_capture merges
+# stdout+stderr, which is captured only as the error/detail string). Returns
+# (0, undef, detail) if the generator is missing, cannot run, or exits non-zero.
+#
+# Parameters:
+#   $hexfile
+################################################################################
+sub generate_template_from_hex {
+    my ($hexfile) = @_;
+    unless (defined $GENERATE_TEMPLATE_BIN && $GENERATE_TEMPLATE_BIN ne ''
+            && -f $GENERATE_TEMPLATE_BIN) {
+        return (0, undef, 'Template generator not found at '
+            . (defined $GENERATE_TEMPLATE_BIN && $GENERATE_TEMPLATE_BIN ne ''
+               ? $GENERATE_TEMPLATE_BIN : '(unset)')
+            . ' -- check FETCHCONFIG_PATH and that tools/generate_template.pl is installed and executable.');
+    }
+    my ($ofh, $otmp) = eval { tempfile('fcweb-gen-XXXXXXXX', DIR => $BACKUP_TMP_DIR, SUFFIX => '.tmpl') };
+    return (0, undef, "Cannot create a temp file: $@") unless $ofh;
+    close($ofh); chmod(0600, $otmp);
+
+    my ($out, $status, $err) =
+        run_command_capture($GENERATE_TEMPLATE_BIN, '-f', $hexfile, '-o', $otmp);
+    if (defined $err) { unlink($otmp); return (0, undef, $err); }
+    if (!defined $status || $status != 0) {
+        my $d = defined $out ? $out : '';
+        unlink($otmp);
+        return (0, undef, 'Generator exit ' . (defined $status ? $status : '?')
+                        . ($d ne '' ? ":\n$d" : ''));
+    }
+    my $text = eval {
+        open(my $rfh, '<', $otmp) or die "$!";
+        binmode($rfh); local $/; my $c = <$rfh>; close($rfh); $c
+    };
+    unlink($otmp);
+    unless (defined $text && $text ne '') {
+        return (0, undef, 'The generator produced no output.'
+                        . (defined $out && $out ne '' ? "\n$out" : ''));
+    }
+    return (1, $text, $out);
+}
+
+################################################################################
+# template_upload_name_ok
+#
+# True if $name is a safe template basename for upload: letters/digits/._-, a
+# ".tmpl" extension, no path separators, no "..", no leading dot. The stem is
+# the generic model= value fetchconfig will match on.
+#
+# Parameters:
+#   $name
+################################################################################
+sub template_upload_name_ok {
+    my ($name) = @_;
+    return 0 unless defined $name && $name ne '';
+    return 0 if $name =~ m{[/\\]};          # no path separators
+    return 0 if $name =~ /\.\./;            # no ".."
+    return 0 if $name =~ /^\./;             # no leading dot (hidden / .bak-ish)
+    return 0 unless $name =~ /^[A-Za-z0-9._-]+\.tmpl$/;
+    return 1;
+}
+
+################################################################################
+# install_new_template
+#
+# Install $src as a BRAND-NEW template at $target, refusing to overwrite an
+# existing file. Via the sudo helper's "install-new" (atomic, refuse-if-exists)
+# or, with no helper, a direct no-overwrite create. Returns (ok, msg).
+#
+# Parameters:
+#   $target
+#   $src
+################################################################################
+sub install_new_template {
+    my ($target, $src) = @_;
+    if ($TEMPLATE_HELPER ne '' && $USE_SUDO_FOR_BACKUP_NOW) {
+        my ($out, $status, $err) =
+            run_command_capture($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'install-new', $src, $target);
+        return (0, $err) if defined $err;
+        return ($status == 0) ? (1, 'Uploaded.')
+                              : (0, helper_fail_msg($status, $out));
+    }
+    return _atomic_create_new_file($src, $target);
+}
+
+################################################################################
+# delete_template_file
+#
+# Delete the template at $target (and its <target>.bak if present) via the sudo
+# helper's "delete", or a direct unlink fallback. Returns (ok, msg).
+#
+# Parameters:
+#   $target
+################################################################################
+sub delete_template_file {
+    my ($target) = @_;
+    if ($TEMPLATE_HELPER ne '' && $USE_SUDO_FOR_BACKUP_NOW) {
+        my ($out, $status, $err) =
+            run_command_capture($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'delete', $target);
+        return (0, $err) if defined $err;
+        return ($status == 0) ? (1, 'Deleted.')
+                              : (0, helper_fail_msg($status, $out));
+    }
+    unless (unlink($target)) {
+        return (0, "cannot delete $target: $! (set TEMPLATE_HELPER, or make the template directory writable)");
+    }
+    my $bak = "$target.bak";
+    unlink($bak) if -e $bak && !-l $bak;
+    return (1, 'Deleted.');
+}
+
+################################################################################
+# rename_template_file
+#
+# Rename template $old to $new (same directory; the caller validates the name,
+# the no-overwrite and the "unused" conditions). Via the sudo helper's "rename"
+# (atomic, refuse-if-exists, moves the .bak), or a direct rename() fallback that
+# also moves <old>.bak -> <new>.bak when the directory is web-writable. Returns
+# (ok, msg).
+#
+# Parameters:
+#   $old
+#   $new
+################################################################################
+sub rename_template_file {
+    my ($old, $new) = @_;
+    if ($TEMPLATE_HELPER ne '' && $USE_SUDO_FOR_BACKUP_NOW) {
+        my ($out, $status, $err) =
+            run_command_capture($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'rename', $old, $new);
+        return (0, $err) if defined $err;
+        return ($status == 0) ? (1, 'Renamed.')
+                              : (0, helper_fail_msg($status, $out));
+    }
+    return (0, "target already exists: $new") if -e $new;   # never overwrite
+    unless (rename($old, $new)) {
+        return (0, "cannot rename $old: $! (set TEMPLATE_HELPER, or make the template directory writable)");
+    }
+    my ($obak, $nbak) = ("$old.bak", "$new.bak");
+    rename($obak, $nbak) if -e $obak && !-l $obak;          # best-effort: move the backup
+    return (1, 'Renamed.');
+}
+
+################################################################################
+# _atomic_create_new_file
+#
+# Atomic create-if-absent: write a temp file in $dst's directory, then link() it
+# into place. link() is atomic and fails if $dst exists, so this never
+# overwrites. Returns (ok, msg). Used as the no-helper upload fallback.
+#
+# Parameters:
+#   $src
+#   $dst
+################################################################################
+sub _atomic_create_new_file {
+    my ($src, $dst) = @_;
+    my $dir = $dst; $dir =~ s{/[^/]*$}{}; $dir = '.' if $dir eq '';
+    my ($fh, $tmp) = eval { tempfile('.fcweb-tnew-XXXXXX', DIR => $dir) };
+    return (0, "cannot create temp file: $@") unless $fh;
+    close($fh);
+    unless (File::Copy::copy($src, $tmp)) { my $e = $!; unlink($tmp); return (0, "copy failed: $e"); }
+    chmod(0644, $tmp);
+    unless (link($tmp, $dst)) {
+        my $e = $!; unlink($tmp);
+        return (0, 'a template with that name already exists') if -e $dst;
+        return (0, "cannot create $dst: $e (set TEMPLATE_HELPER, or make the template directory writable)");
+    }
+    unlink($tmp);
+    return (1, 'Uploaded.');
 }
 
 ################################################################################
@@ -19821,27 +21029,55 @@ sub page_head {
         push @user_items, $su->('Sites', '?action=sites') if $is_admin;
         my $user_menu = $group->('User', @user_items);
 
-        # Help dropdown: the Help page (help.html or the internal fallback),
-        # then the static documents served from HELP_BASE_URL. Each static doc
-        # is listed only if its file exists in the help directory (HELP_DIR),
-        # so e.g. the manually-placed fetchconfig manual appears only when
-        # present. The link itself uses the URL base, the check uses the dir.
-        my $hdir = help_doc_dir();
-        my $doc_item = sub {
-            my ($label, $file) = @_;
-            return () unless $hdir ne '' && -r "$hdir/$file";
-            # Static documents open in a NEW tab (the Help page itself does not).
-            my $href = esc("$BASE_URL/$file");
-            return qq{<a role="menuitem" href="$href" target="_blank" rel="noopener">}
-                 . esc($label) . qq{</a>};
+        # Help dropdown. Fixed structure:
+        #     Help                               (the help.html page)
+        #     --------------------------------   divider
+        #     fetchconfig-web - additional help  (section header)
+        #       <documents scanned from help/fetchconfig-web/>
+        #     fetchconfig - additional help      (section header)
+        #       <documents scanned from help/fetchconfig/>
+        #     --------------------------------   divider
+        #     About                              (same dialog as the title icon)
+        #
+        # The two "additional help" sections are built by scanning their
+        # subdirectories under the help tree (help_scan_dir): the admin curates
+        # each menu simply by copying whichever *.html documents they want
+        # exposed into the directory. Labels come from each file's <title>.
+        # Scanned documents open in a NEW tab; the Help page itself does not.
+        my $sep      = sub { qq{<div class="menu-sep" role="separator"></div>}; };
+        my $sechead  = sub { qq{<div class="menu-sec-head">} . esc($_[0]) . qq{</div>}; };
+        my $menunote = sub { qq{<div class="menu-note">}     . esc($_[0]) . qq{</div>}; };
+
+        # One "additional help" section: header + scanned links, or a single
+        # muted placeholder when the directory is empty/missing or overfull.
+        my $help_section = sub {
+            my ($label, $subdir) = @_;
+            my @out  = ($sechead->($label));
+            my $scan = help_scan_dir($subdir);
+            if ($scan->{state} eq 'ok') {
+                for my $it (@{ $scan->{items} }) {
+                    my $href = esc("$BASE_URL$HELP_BASE_URL/$subdir/$it->{file}");
+                    push @out, qq{<a role="menuitem" class="menu-doc" href="$href" target="_blank" rel="noopener">}
+                             . esc($it->{label}) . qq{</a>};
+                }
+            }
+            elsif ($scan->{state} eq 'toomany') {
+                push @out, $menunote->("too many help documents in $subdir");
+            }
+            else {   # empty / missing directory
+                push @out, $menunote->('No additional helpfiles available - see INSTALL.md');
+            }
+            return @out;
         };
-        my @help_items = ($su->('Help', '?action=help'));   # always present
-        push @help_items, $doc_item->('Documentation fetchconfig-web', 'fetchconfig-web-documentation.html');
-        push @help_items, $doc_item->('Installation fetchconfig-web',  'INSTALL.html');
-        push @help_items, $doc_item->('Documentation fetchconfig',     'fetchconfig-documentation.html');
-        push @help_items, $doc_item->('GNU GPL v3',                    'LICENSE.html');
-        push @help_items, $doc_item->('Additional terms fetchconfig-web', 'LICENSE-ADDITIONS.html');
-        push @help_items, $doc_item->('Privacy policy fetchconfig-web',   'PRIVACY.html');
+
+        my @help_items = ($su->('Help', '?action=help'));   # the Help page
+        push @help_items, $sep->();
+        push @help_items, $help_section->('fetchconfig-web - additional help', 'fetchconfig-web');
+        push @help_items, $help_section->('fetchconfig - additional help',     'fetchconfig');
+        push @help_items, $sep->();
+        # About: opens the same dialog as the title-bar program icon (wired via
+        # the shared .fc-about-open hook in about_modal_html's script).
+        push @help_items, qq{<a role="menuitem" href="#" class="fc-about-open">About</a>};
         my $help_menu = $group->('Help', @help_items);
 
         # Log out is a state-changing action, so it's a POST form with a
@@ -20187,9 +21423,17 @@ sub about_modal_html {
   if (okBtn) okBtn.addEventListener('click', close);
   if (xBtn)  xBtn.addEventListener('click', close);
   ov.addEventListener('click', function (e) { if (e.target === ov) close(); });
-  // Wire the title-bar program icon to open the dialog.
+  // Wire every opener to the dialog: the title-bar program icon
+  // (#fc-about-trigger) and any element carrying the shared .fc-about-open
+  // hook (e.g. the Help-menu "About" item). Both open the same dialog.
+  var openers = [];
   var trigger = document.getElementById('fc-about-trigger');
-  if (trigger) trigger.addEventListener('click', function (e) { e.preventDefault(); open(); });
+  if (trigger) openers.push(trigger);
+  var extra = document.querySelectorAll('.fc-about-open');
+  for (var i = 0; i < extra.length; i++) openers.push(extra[i]);
+  for (var j = 0; j < openers.length; j++) {
+    openers[j].addEventListener('click', function (e) { e.preventDefault(); open(); });
+  }
 })();
 </script>
 HTML
@@ -20300,6 +21544,9 @@ sub confirm_modal_html {
       </span>
       <p id="fc-confirm-msg" class="fc-modal-msg"></p>
     </div>
+    <div class="fc-modal-input-row" id="fc-confirm-input-row" style="display:none;">
+      <input type="text" id="fc-confirm-input" class="fc-modal-input" autocomplete="off" spellcheck="false">
+    </div>
     <div class="fc-modal-actions">
       <button type="button" id="fc-confirm-cancel" class="btn fc-btn-cancel">Cancel</button>
       <button type="button" id="fc-confirm-ok" class="btn">Confirm</button>
@@ -20313,12 +21560,17 @@ sub confirm_modal_html {
   var msgEl  = document.getElementById('fc-confirm-msg');
   var okBtn  = document.getElementById('fc-confirm-ok');
   var cxlBtn = document.getElementById('fc-confirm-cancel');
+  var inputRow = document.getElementById('fc-confirm-input-row');
+  var inputEl  = document.getElementById('fc-confirm-input');
   var current = null;   // pending onConfirm callback
+  var promptMode = false;
   var lastFocus = null;
 
   function close() {
     ov.style.display = 'none';
     current = null;
+    promptMode = false;
+    if (inputRow) inputRow.style.display = 'none';
     document.removeEventListener('keydown', onKey, true);
     if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
   }
@@ -20329,8 +21581,9 @@ sub confirm_modal_html {
   }
   function doOk() {
     var cb = current;
+    var val = promptMode && inputEl ? inputEl.value : undefined;
     close();
-    if (typeof cb === 'function') cb();
+    if (typeof cb === 'function') cb(val);
   }
 
   cxlBtn.addEventListener('click', close);
@@ -20348,11 +21601,32 @@ sub confirm_modal_html {
     // alertOnly: a single-button acknowledgement (no Cancel), used in place of
     // window.alert() so notices use the styled dialog too.
     cxlBtn.style.display = opts.alertOnly ? 'none' : '';
+    promptMode = false;
+    if (inputRow) inputRow.style.display = 'none';
     current = onConfirm;
     ov.style.display = 'flex';
     document.addEventListener('keydown', onKey, true);
     // Focus Cancel for destructive actions (safer default), else the OK button.
     ((opts.danger && !opts.alertOnly) ? cxlBtn : okBtn).focus();
+  };
+
+  // Styled text prompt (replaces window.prompt). The entered value is passed to
+  // onConfirm; Cancel/Escape pass nothing (callback not invoked with a value).
+  window.fcPrompt = function (message, defaultValue, onConfirm, opts) {
+    opts = opts || {};
+    lastFocus = document.activeElement;
+    msgEl.textContent = message;
+    okBtn.textContent = opts.confirmLabel || 'OK';
+    okBtn.classList.remove('btn-danger');
+    ov.classList.remove('fc-danger');
+    cxlBtn.style.display = '';
+    current = onConfirm;
+    promptMode = true;
+    if (inputEl)  inputEl.value = (defaultValue == null ? '' : String(defaultValue));
+    if (inputRow) inputRow.style.display = '';
+    ov.style.display = 'flex';
+    document.addEventListener('keydown', onKey, true);
+    if (inputEl) { try { inputEl.focus(); inputEl.select(); } catch (e) {} }
   };
 
   // Styled replacement for window.alert(): one OK button, no action.
@@ -20366,6 +21640,25 @@ sub confirm_modal_html {
   document.addEventListener('submit', function (e) {
     var form = e.target;
     if (!form || !form.getAttribute) return;
+    // data-prompt: ask for a value, write it into the named hidden field, submit.
+    var pmsg = form.getAttribute('data-prompt');
+    if (pmsg) {
+      e.preventDefault();
+      var field = form.getAttribute('data-prompt-field');
+      var def   = form.getAttribute('data-prompt-default') || '';
+      var label = form.getAttribute('data-prompt-confirm') || 'OK';
+      window.fcPrompt(pmsg, def, function (val) {
+        if (val == null) return;
+        val = String(val).replace(/^\s+|\s+$/g, '');
+        if (val === '' || val === def) return;   // empty or unchanged -> no-op
+        if (field) {
+          var inp = form.querySelector('[name="' + field + '"]');
+          if (inp) inp.value = val;
+        }
+        form.submit();
+      }, { confirmLabel: label });
+      return;
+    }
     var msg = form.getAttribute('data-confirm');
     if (!msg) return;
     e.preventDefault();

@@ -605,18 +605,22 @@ TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-templat
 
 # --- web paths ---
 # WEB_DIR is the FILESYSTEM directory that holds the static web assets
-# (fetchconfig-web.css, fonts, images, help.html and the documentation pages).
-# It is used only for on-disk presence checks. BASE_URL is the URL base under
-# which that same directory is served by the web server; the browser merges it
-# with the site's host name. CSS_BASE_URL / FONT_BASE_URL / IMAGE_BASE_URL are
+# (fetchconfig-web.css, fonts, images and the help tree). It is used only for
+# on-disk presence checks. BASE_URL is the URL base under which that same
+# directory is served by the web server; the browser merges it with the site's
+# host name. CSS_BASE_URL / FONT_BASE_URL / IMAGE_BASE_URL / HELP_BASE_URL are
 # the (URL and on-disk) sub-paths under those roots. The stylesheet must exist
 # at WEB_DIR + CSS_BASE_URL + /fetchconfig-web.css or every page is unstyled and
 # a red "directories not configured" banner is shown.
+# HELP_BASE_URL is the help tree: help.html lives directly in it, and the two
+# "additional help" menus are scanned from its fetchconfig-web/ and fetchconfig/
+# subdirectories (copy whichever *.html documents you want exposed into those).
 WEB_DIR                 = /www/virtual/fetchconfig/htdocs
 BASE_URL                = /
 CSS_BASE_URL            = /css
 FONT_BASE_URL           = /fonts
 IMAGE_BASE_URL          = /images
+HELP_BASE_URL           = /help
 
 # --- sessions ---
 SESSION_DIR             = /www/fetchconfig-web/sessions
@@ -675,7 +679,7 @@ HTTPS_ENABLED           = 0
 SHOW_RENDER_TIME        = 0
 # APP_VERSION overrides the version shown in the footer; normally leave it
 # commented out so the application reports its own version.
-#APP_VERSION            = 2.00
+#APP_VERSION            = 2.06
 COPYRIGHT               = 2026 (c) Rainer Tammer
 
 # --- PostgreSQL user database ---

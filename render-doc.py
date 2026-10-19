@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
-# render-doc.py -- render fetchconfig-web-documentation.html from README.md
+# render-doc.py -- render a Markdown document to HTML and plain text (ASCII).
 #
-# Generates a single, self-contained HTML manual (embedded CSS, no external
-# assets except Google Fonts) from the project README, in the same visual
-# style as the upstream fetchconfig-documentation.html.
+# One build tool for every project document (it absorbs the former
+# render-changes.py). From an <input>.md it writes:
+#   * a self-contained HTML page (embedded CSS, only Google Fonts external), and
+#   * an ASCII plain-text rendering (ALWAYS, named after the input with the .md
+#     suffix stripped: CHANGES.md -> CHANGES, INSTALL.md -> INSTALL, etc.).
 #
-#   Usage:  python3 render-doc.py [README.md] [fetchconfig-web-documentation.html]
+# Two HTML styles are chosen automatically from the input:
+#   * manual   -- the full sidebar/hero manual, used for EVERY Markdown document
+#     (README.md, INSTALL.md, CHANGES.md, DEVELOPER.md, LICENSE-ADDITIONS.md,
+#     PRIVACY.md, and any other doc). A document whose H1 starts "fetchconfig-web"
+#     additionally gets the app version/stat tiles and the fetchconfig-specific
+#     warning callouts; any other doc gets a clean hero. ```mermaid fences are
+#     rendered as diagrams (Mermaid is loaded from a CDN only when a doc uses it).
+#   * license  -- a verbatim <pre> of a LICENSE file (byte-exact legal text).
 #
-# Both arguments are optional; they default to README.md in the current
-# directory and fetchconfig-web-documentation.html as the output. The script
-# needs only the standard library (Python 3).
+#   Usage:  python render-doc.py [input.md] [output.html]
+#     e.g.  python render-doc.py                         # README -> manual
+#           python render-doc.py INSTALL.md             # -> INSTALL.html + INSTALL
+#           python render-doc.py CHANGES.md             # -> CHANGES.html + CHANGES
+#           python render-doc.py README.imageconvert.md # -> .html + README.imageconvert
+#
+# The output HTML name defaults from the input (README.md keeps the historical
+# fetchconfig-web-documentation.html); the ASCII name is the input without .md.
+# Standard library only, and runs unchanged on Python 3 and Python 2.7.18.
 #
 # It parses the README's Markdown (## sections, ###/#### headings, GitHub
 # pipe tables, fenced code blocks, ordered/unordered lists with wrapped
@@ -25,7 +40,7 @@
 # Copyright (C) 2026  Rainer Tammer
 # Licensed under the GNU GPL v3 or later (see the LICENSE file).
 
-import sys, re, io, os
+import sys, re, io, os, textwrap
 
 # --- Python 2.7 / 3 compatibility -----------------------------------------
 # html.escape (Py3) vs cgi.escape (Py2); io.open gives an encoding= kwarg on
@@ -77,7 +92,24 @@ def _usage(msg):
     sys.exit(2)
 
 README_IN = sys.argv[1] if len(sys.argv) > 1 else 'README.md'
-HTML_OUT  = sys.argv[2] if len(sys.argv) > 2 else 'fetchconfig-web-documentation.html'
+# Output HTML name: explicit 2nd arg wins; else derive from the input. README.md
+# keeps its historical name (fetchconfig-web-documentation.html); any other
+# X.md defaults to X.html (so `render-doc.py CHANGES.md` / `INSTALL.md` work
+# without a second argument).
+if len(sys.argv) > 2:
+    HTML_OUT = sys.argv[2]
+elif os.path.basename(README_IN).lower() == 'readme.md':
+    HTML_OUT = 'fetchconfig-web-documentation.html'
+else:
+    HTML_OUT = re.sub(r'\.(md|markdown)$', '', README_IN, flags=re.I) + '.html'
+
+# Plain-text (ASCII) output name: the input with its .md/.markdown suffix
+# stripped (CHANGES.md -> CHANGES, INSTALL.md -> INSTALL, README.md -> README,
+# README.imageconvert.md -> README.imageconvert). A .txt is appended if the
+# input had no Markdown suffix, so we never overwrite the source.
+TXT_OUT = re.sub(r'\.(md|markdown)$', '', README_IN, flags=re.I)
+if TXT_OUT == README_IN:
+    TXT_OUT = README_IN + '.txt'
 
 if README_IN.lower().endswith('.html') and HTML_OUT.lower().endswith(('.md', '.markdown')):
     _usage("arguments look reversed (input should be Markdown, output HTML)")
@@ -303,6 +335,28 @@ STYLE = r"""<style>
     font-size:2.6rem;
     margin:0 0 14px;
     letter-spacing:-0.02em;
+    color:var(--accent);
+  }
+  .mermaid{
+    /* A mermaid block is a <pre>, so it would otherwise inherit the dark code
+       background/border/padding. Render the diagram on the page background. */
+    margin:1.5rem 0;
+    text-align:center;
+    background:transparent;
+    color:inherit;
+    border:0;
+    padding:0;
+    overflow-x:auto;
+  }
+  /* Until mermaid.js has rendered a block (it stamps data-processed on success),
+     keep the raw diagram source hidden so it is never shown as a wall of text --
+     during the CDN load, or if the runtime is blocked/unavailable. mermaid still
+     measures and renders normally while it is hidden; the element reveals itself
+     the moment it is processed. */
+  .mermaid:not([data-processed]){
+    visibility:hidden;
+    height:0;
+    overflow:hidden;
   }
   .hero p.lede{
     font-size:1.13rem;
@@ -399,6 +453,7 @@ STYLE = r"""<style>
 
   /* ---------- Tables ---------- */
   .table-wrap{overflow-x:auto;margin:18px 0 26px;border:1px solid var(--border);border-radius:var(--radius);}
+  hr{border:0;border-top:1px solid var(--border);margin:34px 0 30px;}
   table{
     border-collapse:collapse;
     width:100%;
@@ -595,7 +650,7 @@ if _looks_like_license(README_IN):
 <style>
   .license-wrap{{max-width:900px;margin:0 auto;padding:40px 22px 64px;}}
   .license-wrap .hero-eyebrow{{text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;color:var(--accent);font-weight:600;}}
-  .license-wrap h1{{font-size:2rem;margin:.2em 0 1rem;}}
+  .license-wrap h1{{font-size:2rem;margin:.2em 0 1rem;color:var(--accent);}}
   pre.license-text{{white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
     font-family:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;font-size:.82rem;
     line-height:1.5;background:var(--card,#fff);border:1px solid var(--border,#e2e5ea);
@@ -604,8 +659,7 @@ if _looks_like_license(README_IN):
 </head>
 <body>
 <div class="license-wrap">
-  <div class="hero-eyebrow">License</div>
-  <h1>{title}</h1>
+  <h1 class="hero-title">fetchconfig-web &mdash; {title}</h1>
   <pre class="license-text">{body}</pre>
 </div>
 </body>
@@ -615,6 +669,180 @@ if _looks_like_license(README_IN):
         _f.write(_lic_page)
     sys.stderr.write("wrote %s and %s (verbatim GPLv3)\n" % (HTML_OUT, _md_out))
     sys.exit(0)
+
+# --- plain-text (ASCII) renderer -------------------------------------------
+# Turn Markdown into clean, wrapped plain text. Used for EVERY document (the
+# "always generate an ASCII version" rule): headings get underlines, pipe
+# tables become aligned columns, fenced code is indented verbatim, lists wrap
+# with a hanging indent, blockquotes/callouts are indented, and inline markup
+# and a few HTML entities are stripped/decoded. Written for Python 2.7 and 3.
+_ASCII_ENTITIES = (
+    ('&mdash;', '--'), ('&ndash;', '-'), ('&hellip;', '...'),
+    ('&rarr;', '->'), ('&larr;', '<-'), ('&harr;', '<->'),
+    ('&times;', 'x'), ('&nbsp;', ' '), ('&copy;', '(c)'), ('&reg;', '(R)'),
+    ('&lt;', '<'), ('&gt;', '>'), ('&quot;', '"'),
+    ('&#39;', "'"), ('&apos;', "'"), ('&amp;', '&'),   # &amp; last
+)
+
+def _ascii_inline(s):
+    s = re.sub(r'`([^`]*)`', r'\1', s)                      # inline code
+    s = re.sub(r'!\[([^\]]*)\]\([^)]*\)', r'\1', s)         # image -> alt
+    def _lk(m):
+        t, u = m.group(1), m.group(2)
+        return t if u.startswith('#') else '%s (%s)' % (t, u)
+    s = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _lk, s)          # link -> text (url)
+    s = s.replace('***', '')
+    s = re.sub(r'\*\*([^*]+)\*\*', r'\1', s)                # bold
+    s = re.sub(r'(?<!\*)\*(?!\*)([^*]+)\*(?!\*)', r'\1', s) # italic
+    for a, b in _ASCII_ENTITIES:
+        s = s.replace(a, b)
+    return s
+
+def _is_block_start(s):
+    return bool(re.match(r'^(```|#{1,6}\s|\s*[-*]\s|\s*\d+\.\s|>\s)', s)
+                or re.match(r'^\s*([-*_])(\s*\1){2,}\s*$', s))
+
+def md_to_text(md, width=80):
+    src = md.split('\n')
+    out = []
+    i, n = 0, len(src)
+
+    def wrap(text, first='', rest=None):
+        rest = first if rest is None else rest
+        text = _ascii_inline(text).strip()
+        if text == '':
+            return ['']
+        return textwrap.wrap(text, width=width, initial_indent=first,
+                             subsequent_indent=rest) or [first.rstrip()]
+
+    while i < n:
+        ln = src[i]
+        # fenced code -> indented verbatim
+        m = re.match(r'^(\s*)```(.*)$', ln)
+        if m:
+            indent = m.group(1); _lang = m.group(2).strip().lower(); i += 1
+            # A mermaid fence is diagram markup, unreadable as plain text, so it
+            # is dropped from the ASCII rendering -- the ASCII-art ```text block
+            # that accompanies each diagram is its plain-text form and is kept.
+            if _lang == 'mermaid':
+                while i < n and not re.match(r'^\s*```', src[i]):
+                    i += 1
+                i += 1  # closing fence
+                continue
+            out.append('')
+            while i < n and not re.match(r'^\s*```', src[i]):
+                cl = src[i]
+                cl = cl[len(indent):] if cl.startswith(indent) else cl.lstrip()
+                out.append(('    ' + cl).rstrip()); i += 1
+            i += 1  # closing fence
+            out.append('')
+            continue
+        # pipe table -> aligned columns
+        if '|' in ln and i+1 < n and re.match(r'^\s*\|?[\s:|-]+\|[\s:|-]+', src[i+1]) and '-' in src[i+1]:
+            header = [_ascii_inline(c.strip()) for c in ln.strip().strip('|').split('|')]
+            i += 2
+            rows = []
+            while i < n and '|' in src[i] and src[i].strip():
+                rows.append([_ascii_inline(c.strip()) for c in src[i].strip().strip('|').split('|')])
+                i += 1
+            ncol = len(header)
+            rows = [(r + [''] * ncol)[:ncol] for r in rows]
+            w = [len(header[c]) for c in range(ncol)]
+            for r in rows:
+                for c in range(ncol):
+                    if len(r[c]) > w[c]:
+                        w[c] = len(r[c])
+            out.append('')
+            if sum(w) + 2 * (ncol - 1) <= width:
+                # Fits: aligned columns with a rule under the header.
+                def _row(cells):
+                    return '  '.join(cells[c].ljust(w[c]) for c in range(ncol)).rstrip()
+                out.append(_row(header))
+                out.append('  '.join('-' * w[c] for c in range(ncol)))
+                for r in rows:
+                    out.append(_row(r))
+            else:
+                # Too wide for the page: one "Header: value" record per row,
+                # each value wrapped, so nothing overflows.
+                for r in rows:
+                    for c in range(ncol):
+                        if r[c] == '':
+                            continue
+                        lab = (header[c] + ': ') if header[c] else ''
+                        out += (textwrap.wrap(r[c], width=width,
+                                              initial_indent='  ' + lab,
+                                              subsequent_indent='  ' + ' ' * len(lab))
+                                or ['  ' + lab.rstrip()])
+                    out.append('')
+            out.append('')
+            continue
+        # heading
+        m = re.match(r'^(#{1,6})\s+(.*)$', ln)
+        if m:
+            lvl = len(m.group(1)); t = _ascii_inline(m.group(2).strip())
+            rule = {1: '=', 2: '=', 3: '-'}.get(lvl, '.')
+            out += ['', t, rule * max(1, len(t)), '']
+            i += 1
+            continue
+        # horizontal rule
+        if re.match(r'^\s*([-*_])(\s*\1){2,}\s*$', ln):
+            out += ['', '-' * width, '']; i += 1
+            continue
+        # blockquote / callout -> indented block
+        if re.match(r'^>\s?', ln):
+            inner = []
+            while i < n and re.match(r'^>\s?', src[i]):
+                inner.append(re.sub(r'^>\s?', '', src[i])); i += 1
+            label = None
+            am = re.match(r'^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$', inner[0]) if inner else None
+            if am:
+                label = am.group(1); inner = inner[1:]
+            out.append('')
+            if label:
+                out.append('    [' + label + ']')
+            for sl in md_to_text('\n'.join(inner), width=max(20, width - 4)).rstrip('\n').split('\n'):
+                out.append(('    ' + sl).rstrip())
+            out.append('')
+            continue
+        # unordered list (absorb continuation lines)
+        if re.match(r'^(\s*)[-*]\s+', ln):
+            while i < n:
+                mm = re.match(r'^(\s*)[-*]\s+(.*)$', src[i])
+                if not mm:
+                    break
+                depth = len(mm.group(1)) // 2
+                cur = mm.group(2); i += 1
+                while i < n and re.match(r'^\s+\S', src[i]) and not re.match(r'^\s*[-*]\s|^\s*\d+\.\s', src[i]):
+                    cur += ' ' + src[i].strip(); i += 1
+                pad = '  ' * depth
+                out += wrap(cur, pad + '- ', pad + '  ')
+            continue
+        # ordered list (absorb continuation lines)
+        if re.match(r'^\s*\d+\.\s+', ln):
+            num = 1
+            while i < n:
+                mm = re.match(r'^\s*\d+\.\s+(.*)$', src[i])
+                if not mm:
+                    break
+                cur = mm.group(1); i += 1
+                while i < n and re.match(r'^\s+\S', src[i]) and not re.match(r'^\s*[-*]\s|^\s*\d+\.\s', src[i]):
+                    cur += ' ' + src[i].strip(); i += 1
+                prefix = '%d. ' % num; num += 1
+                out += wrap(cur, prefix, ' ' * len(prefix))
+            continue
+        # blank
+        if ln.strip() == '':
+            out.append(''); i += 1
+            continue
+        # paragraph
+        para = [ln]; i += 1
+        while i < n and src[i].strip() and not _is_block_start(src[i]) \
+                and not ('|' in src[i] and i+1 < n and '-' in src[i+1]):
+            para.append(src[i]); i += 1
+        out += wrap(' '.join(para))
+
+    text = re.sub(r'\n{3,}', '\n\n', '\n'.join(out))
+    return text.strip('\n') + '\n'
 
 # ---- split README into top-level (##) sections; keep the H1 intro separately
 lines = readme.split('\n')
@@ -642,7 +870,16 @@ else:
     intro = cur_body
 
 def slug(t):
-    s = re.sub(r'[^a-z0-9]+','-', t.lower()).strip('-')
+    # GitHub-compatible heading anchors (github-slugger): lowercase, then DROP any
+    # character that is not a word char / hyphen / space -- punctuation such as
+    # "." is removed, not turned into a hyphen, so "How fetchconfig.pl is invoked"
+    # becomes "how-fetchconfigpl-is-invoked" -- and finally spaces -> hyphens.
+    # This matches the #anchors authors write against the GitHub-rendered README
+    # (the canonical source), so intra- and cross-document links resolve in the
+    # generated HTML too. Backticks/asterisks from inline code or emphasis in a
+    # heading are punctuation and are likewise dropped, leaving the inner text.
+    s = re.sub(r'[^\w\- ]+', '', t.lower(), flags=re.UNICODE)
+    s = s.replace(' ', '-')
     return s
 
 # ---- inline markdown: code, bold, italic, links -> HTML (with escaping)
@@ -684,6 +921,10 @@ def inline(text):
     return out
 
 # ---- block renderer for a body (list of lines) -> HTML string
+# Set to True by render_body() when a ```mermaid fence is rendered, so the page
+# template below pulls in the Mermaid runtime only for documents that use it.
+_uses_mermaid = [False]
+
 def render_body(body):
     out = []
     i = 0
@@ -705,6 +946,31 @@ def render_body(body):
                 cl = cl[len(indent):] if cl.startswith(indent) else cl.lstrip()
                 code.append(cl); i += 1
             i += 1  # skip closing ```
+            # Mermaid fences render as diagrams (DEVELOPER.md). Mermaid reads the
+            # element's textContent as diagram source, so the source must be
+            # HTML-escaped exactly once: a literal "<br/>" in a node label has to
+            # arrive as the characters &lt;br/&gt; (which the browser decodes back
+            # to "<br/>" in textContent) -- an unescaped <br/> would be parsed as
+            # a real element and the line break would be lost. The page is flagged
+            # so the Mermaid runtime is pulled in.
+            if lang == 'mermaid':
+                _uses_mermaid[0] = True
+                out.append('<pre class="mermaid">%s</pre>'
+                           % html.escape('\n'.join(code)))
+                # A ```text block immediately following a diagram is its ASCII-art
+                # twin, written for the plain-text rendering only. Drop it from the
+                # HTML so the page shows the diagram, not the diagram AND its text
+                # form (the ASCII output drops the diagram and keeps this block).
+                j = i
+                while j < n and body[j].strip() == '':
+                    j += 1
+                tw = re.match(r'^\s*```(.*)$', body[j]) if j < n else None
+                if tw and tw.group(1).strip().lower() == 'text':
+                    j += 1
+                    while j < n and not re.match(r'^\s*```', body[j]):
+                        j += 1
+                    i = j + 1  # consume the twin incl. its closing fence
+                continue
             label = {'':'code','sql':'sql','sh':'shell','bash':'shell','perl':'perl','text':'text','apache':'Apache config','conf':'Apache config'}.get(lang, lang or 'code')
             out.append('<span class="file-label">%s</span>' % html.escape(label))
             esc = html.escape('\n'.join(code))
@@ -731,6 +997,13 @@ def render_body(body):
                 tds = ''.join('<td>%s</td>' % inline(c) for c in r)
                 trs += '<tr>%s</tr>' % tds
             out.append('<div class="table-wrap"><table><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>' % (th, trs))
+            continue
+        # thematic break (--- / *** / ___ on a line of its own). Must come
+        # after the pipe-table branch above: a table's separator row always
+        # contains '|' and so cannot match this.
+        if re.match(r'^\s*(-{3,}|\*{3,}|_{3,})\s*$', ln):
+            out.append('<hr>')
+            i += 1
             continue
         # heading ### / #### -- give it an id (slug of its text) so the sidebar
         # nav links resolve to it.
@@ -849,11 +1122,24 @@ for _ln in intro:
             continue
         if _ln.startswith('#'): break
         _lede_lines.append(_ln.strip())
-_m = re.match(r'^fetchconfig-web\s*(?:--|-|\u2014)\s*(.+)$', _h1)
-eyebrow = _m.group(1).strip() if _m else 'Documentation'
-page_title = 'fetchconfig-web &mdash; ' + html.escape(eyebrow)
+# An app document (README/INSTALL) has an H1 that starts "fetchconfig-web"; its
+# hero shows the "fetchconfig-web" brand title plus the app-specific warning
+# callouts and stat tiles. Any other document (e.g. a utility's README) is a
+# generic doc: its hero title comes from the H1 itself and the app-specific
+# warnings/stats are omitted.
+is_app_doc = _h1.lower().startswith('fetchconfig-web')
+if is_app_doc:
+    hero_title_plain = 'fetchconfig-web'
+    _sm = re.match(r'^fetchconfig-web\s*(?:--|-|\u2014)\s*(.+)$', _h1)
+    eyebrow = _sm.group(1).strip() if _sm else 'Documentation'
+else:
+    _sm = re.match(r'^(.*?)\s*(?:--|\u2014)\s*(.+)$', _h1)
+    hero_title_plain = (_sm.group(1).strip() if _sm else (_h1.strip() or 'Documentation'))
+    eyebrow = _sm.group(2).strip() if _sm else 'Documentation'
+hero_title = html.escape(hero_title_plain)
+page_title = html.escape(hero_title_plain) + ' &mdash; ' + html.escape(eyebrow)
 lede = inline(' '.join(_lede_lines)) if _lede_lines else \
-    "A single-file Perl CGI front-end for fetchconfig: a browser UI for browsing device backups, viewing and comparing configurations, checking run status, and editing the device table &mdash; backed by a PostgreSQL user database."
+    "A Perl FCGI/CGI front-end for fetchconfig: a browser UI for browsing device backups, viewing and comparing configurations, checking run status, and editing the device table &mdash; backed by a PostgreSQL user database."
 
 # Version strings for the sidebar pill, hero tile and hero warning, read from
 # fetchconfig-web.cgi next to this script. Falls back to '?' with a warning on
@@ -875,11 +1161,66 @@ def cgi_constant(name):
 app_version = html.escape(cgi_constant('APP_VERSION_INTERNAL'))
 min_fc_version = html.escape(cgi_constant('MIN_FETCHCONFIG_VERSION'))
 
+# App-specific hero extras (warning callouts + stat tiles) are shown only for the
+# app documents (README/INSTALL); a generic doc gets a clean hero without them.
+if is_app_doc:
+    hero_warnings = (
+        u'<div class="callout warn" style="margin-top:1rem">\n'
+        u'        <p><strong>Requires fetchconfig %(mfc)s or newer.</strong> The installed\n'
+        u'        version is read from <code>&lt;FETCHCONFIG_PATH&gt;/fetchconfig/Constants.pm</code>;\n'
+        u'        a warning banner is shown on every page (after login) if it is older\n'
+        u'        than %(mfc)s or cannot be determined.</p>\n'
+        u'      </div>\n'
+        u'      <div class="callout warn" style="margin-top:1rem">\n'
+        u'        <p><strong>Long backups and web server timeouts.</strong> While Backup\n'
+        u'        Now or the Empty Backup Cleanup scan runs, a keepalive is sent every\n'
+        u'        10 s, so the web server\'s inactivity timeout (Apache <code>Timeout</code>)\n'
+        u'        only needs to be longer than 10 s and <code>BACKUP_TIMEOUT</code> may exceed\n'
+        u'        it. <code>BACKUP_TIMEOUT</code> must be higher than the longest backup\n'
+        u'        run of any device in the device table. A reverse proxy or load balancer\n'
+        u'        in front must not buffer the response; under mod_fcgid, FcgidBusyTimeout\n'
+        u'        must also exceed BACKUP_TIMEOUT.</p>\n'
+        u'      </div>'
+    ) % {'mfc': min_fc_version}
+    hero_stats = (
+        u'<div class="hero-stats">\n'
+        u'        <div class="hero-stat"><span class="num">%(v)s</span><span class="label">version</span></div>\n'
+        u'        <div class="hero-stat"><span class="num">Perl FCGI/CGI</span><span class="label">language</span></div>\n'
+        u'        <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>\n'
+        u'        <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>\n'
+        u'      </div>'
+    ) % {'v': app_version}
+else:
+    hero_warnings = u''
+    hero_stats = u''
+
+# The operational warning callouts (the fetchconfig version requirement and the
+# backup / web-server timeout caveats) are runtime/deployment concerns, so they
+# appear only on the operational documents -- the main manual (README) and the
+# installation guide (INSTALL). Every other app doc (changelog, developer,
+# license, privacy) keeps the combined title and the stat tiles but drops these
+# callouts.
+if os.path.basename(README_IN).lower() not in ('readme.md', 'install.md'):
+    hero_warnings = u''
+
 # Precompute the dynamic pieces so the template below uses only simple named
 # placeholders -- str.format() (used for Python 2.7 compatibility) cannot call
 # functions or run expressions inside the template.
 nav = nav_html()
 sections = chr(10).join(sec_html)
+
+# Pull in the Mermaid runtime only when a document actually used a ```mermaid
+# fence (DEVELOPER.md). This is the only external asset beyond Google Fonts, and
+# only for those documents; everything else stays fully self-contained.
+if _uses_mermaid[0]:
+    mermaid_script = (
+        u'<script type="module">\n'
+        u'  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";\n'
+        u'  mermaid.initialize({ startOnLoad: true, theme: "neutral" });\n'
+        u'</script>'
+    )
+else:
+    mermaid_script = u''
 
 page = (u"""<!DOCTYPE html>
 <html lang="en">
@@ -924,31 +1265,10 @@ page = (u"""<!DOCTYPE html>
   <div class="main-col">
 
     <div class="hero">
-      <div class="hero-eyebrow">{eyebrow}</div>
-      <h1>fetchconfig-web</h1>
+      <h1 class="hero-title">{page_title}</h1>
       <p class="lede">{lede}</p>
-      <div class="callout warn" style="margin-top:1rem">
-        <p><strong>Requires fetchconfig {min_fc_version} or newer.</strong> The installed
-        version is read from <code>&lt;FETCHCONFIG_PATH&gt;/fetchconfig/Constants.pm</code>;
-        a warning banner is shown on every page (after login) if it is older
-        than {min_fc_version} or cannot be determined.</p>
-      </div>
-      <div class="callout warn" style="margin-top:1rem">
-        <p><strong>Long backups and web server timeouts.</strong> While Backup
-        Now or the Empty Backup Cleanup scan runs, a keepalive is sent every
-        10 s, so the web server's inactivity timeout (Apache <code>Timeout</code>)
-        only needs to be longer than 10 s and <code>BACKUP_TIMEOUT</code> may exceed
-        it. <code>BACKUP_TIMEOUT</code> must be higher than the longest backup
-        run of any device in the device table. A reverse proxy or load balancer
-        in front must not buffer the response; under mod_fcgid, FcgidBusyTimeout
-        must also exceed BACKUP_TIMEOUT.</p>
-      </div>
-      <div class="hero-stats">
-        <div class="hero-stat"><span class="num">{app_version}</span><span class="label">version</span></div>
-        <div class="hero-stat"><span class="num">Perl CGI</span><span class="label">single file</span></div>
-        <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
-        <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
-      </div>
+      {hero_warnings}
+      {hero_stats}
     </div>
 
     <div class="content">
@@ -968,7 +1288,11 @@ page = (u"""<!DOCTYPE html>
   // Scroll-spy: highlight the sidebar link matching the section in view.
   (function(){{
     var links = Array.prototype.slice.call(document.querySelectorAll('.sidebar nav a'));
-    var sections = links.map(function(a){{ return document.querySelector(a.getAttribute('href')); }}).filter(Boolean);
+    // Resolve by id, not by CSS selector: section ids can start with a digit
+    // (version numbers in CHANGES, numbered sections in DEVELOPER), which is a
+    // valid HTML id but an invalid CSS id selector, so passing the href to
+    // querySelector would throw. getElementById has no such restriction.
+    var sections = links.map(function(a){{ return document.getElementById(a.getAttribute('href').slice(1)); }}).filter(Boolean);
     if (!('IntersectionObserver' in window) || !sections.length) return;
     var current = null;
     function setActive(id){{
@@ -989,11 +1313,15 @@ page = (u"""<!DOCTYPE html>
     links.forEach(function(a){{ a.addEventListener('click', function(){{ if (toggle) toggle.checked = false; }}); }});
   }})();
 </script>
-
+{mermaid_script}
 </body>
 </html>
 """).format(style=style, lede=lede, nav=nav, sections=sections,
             page_title=page_title, eyebrow=html.escape(eyebrow),
-            app_version=app_version, min_fc_version=min_fc_version)
+            hero_title=hero_title, hero_warnings=hero_warnings, hero_stats=hero_stats,
+            app_version=app_version, min_fc_version=min_fc_version,
+            mermaid_script=mermaid_script)
 _open_utf8(HTML_OUT, 'w').write(to_text(page))
-print("wrote %s: %d bytes, %d sections" % (HTML_OUT, len(page), len(sec_html)))
+# Always also emit the plain-text (ASCII) rendering of the same Markdown.
+_open_utf8(TXT_OUT, 'w').write(to_text(md_to_text(readme)))
+print("wrote %s (%d bytes, %d sections) and %s" % (HTML_OUT, len(page), len(sec_html), TXT_OUT))

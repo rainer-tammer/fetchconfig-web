@@ -225,6 +225,28 @@
     font-size:2.6rem;
     margin:0 0 14px;
     letter-spacing:-0.02em;
+    color:var(--accent);
+  }
+  .mermaid{
+    /* A mermaid block is a <pre>, so it would otherwise inherit the dark code
+       background/border/padding. Render the diagram on the page background. */
+    margin:1.5rem 0;
+    text-align:center;
+    background:transparent;
+    color:inherit;
+    border:0;
+    padding:0;
+    overflow-x:auto;
+  }
+  /* Until mermaid.js has rendered a block (it stamps data-processed on success),
+     keep the raw diagram source hidden so it is never shown as a wall of text --
+     during the CDN load, or if the runtime is blocked/unavailable. mermaid still
+     measures and renders normally while it is hidden; the element reveals itself
+     the moment it is processed. */
+  .mermaid:not([data-processed]){
+    visibility:hidden;
+    height:0;
+    overflow:hidden;
   }
   .hero p.lede{
     font-size:1.13rem;
@@ -321,6 +343,7 @@
 
   /* ---------- Tables ---------- */
   .table-wrap{overflow-x:auto;margin:18px 0 26px;border:1px solid var(--border);border-radius:var(--radius);}
+  hr{border:0;border-top:1px solid var(--border);margin:34px 0 30px;}
   table{
     border-collapse:collapse;
     width:100%;
@@ -496,13 +519,13 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v2.00</span>
+      <span class="pill">v2.06</span>
       <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
     <nav>
 <div class="nav-group"><a href="#1-acknowledgement-of-the-licence-notice-not-a-condition">1. Acknowledgement of the licence (notice, not a condition)</a></div>
-<div class="nav-group"><a href="#2-limitation-of-liability-and-warranty-eu-local-law-adaptation">2. Limitation of liability and warranty (EU / local-law adaptation)</a></div>
+<div class="nav-group"><a href="#2-limitation-of-liability-and-warranty-eu--local-law-adaptation">2. Limitation of liability and warranty (EU / local-law adaptation)</a></div>
 <div class="nav-group"><a href="#3-severability">3. Severability</a></div>
 <div class="nav-group"><a href="#4-governing-law">4. Governing law</a></div>
     </nav>
@@ -511,28 +534,12 @@
   <div class="main-col">
 
     <div class="hero">
-      <div class="hero-eyebrow">Additional Terms</div>
-      <h1>fetchconfig-web</h1>
+      <h1 class="hero-title">fetchconfig-web &mdash; Additional Terms</h1>
       <p class="lede"><strong>Additional terms and conditions pursuant to Section 7 of the GNU General Public License, Version 3 (GPLv3).</strong></p>
-      <div class="callout warn" style="margin-top:1rem">
-        <p><strong>Requires fetchconfig 9.69 or newer.</strong> The installed
-        version is read from <code>&lt;FETCHCONFIG_PATH&gt;/fetchconfig/Constants.pm</code>;
-        a warning banner is shown on every page (after login) if it is older
-        than 9.69 or cannot be determined.</p>
-      </div>
-      <div class="callout warn" style="margin-top:1rem">
-        <p><strong>Long backups and web server timeouts.</strong> While Backup
-        Now or the Empty Backup Cleanup scan runs, a keepalive is sent every
-        10 s, so the web server's inactivity timeout (Apache <code>Timeout</code>)
-        only needs to be longer than 10 s and <code>BACKUP_TIMEOUT</code> may exceed
-        it. <code>BACKUP_TIMEOUT</code> must be higher than the longest backup
-        run of any device in the device table. A reverse proxy or load balancer
-        in front must not buffer the response; under mod_fcgid, FcgidBusyTimeout
-        must also exceed BACKUP_TIMEOUT.</p>
-      </div>
+      
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">2.00</span><span class="label">version</span></div>
-        <div class="hero-stat"><span class="num">Perl CGI</span><span class="label">single file</span></div>
+        <div class="hero-stat"><span class="num">2.06</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">Perl FCGI/CGI</span><span class="label">language</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
       </div>
@@ -546,7 +553,7 @@
 <p>The GNU General Public License does not require you to accept it in order to receive or run a copy of the software (see Section 9 of the GPLv3). Running the software therefore does not, by itself, create any obligation on you.</p>
 <p>By modifying or propagating the software, however, you do accept the GPLv3 and these additional terms, because the GPLv3 grants the rights to modify and propagate only on that basis. This paragraph is a notice of that existing legal position; it adds no new condition to your mere use of the software.</p>
 </section>
-<section id="2-limitation-of-liability-and-warranty-eu-local-law-adaptation">
+<section id="2-limitation-of-liability-and-warranty-eu--local-law-adaptation">
 <div class="section-kicker">02</div>
 <h2>2. Limitation of liability and warranty (EU / local-law adaptation)</h2>
 <p>This clause is an additional term of the kind expressly permitted by Section 7(a) of the GPLv3 (terms that disclaim warranty or limit liability differently from Sections 15 and 16).</p>
@@ -582,7 +589,11 @@
   // Scroll-spy: highlight the sidebar link matching the section in view.
   (function(){
     var links = Array.prototype.slice.call(document.querySelectorAll('.sidebar nav a'));
-    var sections = links.map(function(a){ return document.querySelector(a.getAttribute('href')); }).filter(Boolean);
+    // Resolve by id, not by CSS selector: section ids can start with a digit
+    // (version numbers in CHANGES, numbered sections in DEVELOPER), which is a
+    // valid HTML id but an invalid CSS id selector, so passing the href to
+    // querySelector would throw. getElementById has no such restriction.
+    var sections = links.map(function(a){ return document.getElementById(a.getAttribute('href').slice(1)); }).filter(Boolean);
     if (!('IntersectionObserver' in window) || !sections.length) return;
     var current = null;
     function setActive(id){

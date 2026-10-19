@@ -41,6 +41,18 @@ $backdrop_css
   .menu-dropdown a { display: block; padding: 0.45em 1.1em; color: #1a5fb4;
     text-decoration: none; font-size: 0.93em; white-space: nowrap; }
   .menu-dropdown a:hover { background: #e8faf1; text-decoration: none; }
+  /* Help menu: horizontal divider between the Help page, the scanned
+     "additional help" sections and About. */
+  .menu-dropdown .menu-sep { height: 1px; margin: 0.3em 0; background: #e3e8ee; }
+  /* Section header for a scanned "additional help" group (not clickable). */
+  .menu-dropdown .menu-sec-head { padding: 0.5em 1.1em 0.2em; font-size: 0.78em;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+    color: #6b7580; cursor: default; white-space: nowrap; }
+  /* Muted placeholder shown when a section is empty/missing or overfull. */
+  .menu-dropdown .menu-note { padding: 0.3em 1.1em 0.45em 1.7em; font-size: 0.86em;
+    color: #8a9199; font-style: italic; cursor: default; white-space: nowrap; }
+  /* Scanned document links sit indented under their section header. */
+  .menu-dropdown a.menu-doc { padding-left: 1.7em; }
   .user-info { margin-left: auto; color: #555; font-size: 0.9em; white-space: nowrap; }
   .user-info a { color: #1a5fb4; text-decoration: none; }
   .user-info a:hover { text-decoration: underline; }
@@ -223,7 +235,29 @@ $backdrop_css
          font-family: inherit; line-height: 1.2; vertical-align: middle;
          text-align: center; }
   .btn:hover { background: #164a8f; }
+  /* A disabled button (e.g. Delete on a template that is still in use) is greyed
+     and non-interactive, and its hover keeps the greyed look. */
+  .btn:disabled, .btn[disabled] { background: #c3cad2; color: #eef1f4;
+         cursor: not-allowed; }
+  .btn:disabled:hover, .btn[disabled]:hover { background: #c3cad2; }
   .action-row { display: flex; align-items: center; gap: 0.6em; margin: 0.8em 0; }
+  /* Templates page: the "Upload template" disclosure and its form. */
+  details.tpl-upload { margin: 0 0 1em; }
+  details.tpl-upload > summary { display: inline-block; list-style: none; }
+  details.tpl-upload > summary::-webkit-details-marker { display: none; }
+  .tpl-upload-form { margin: 0.8em 0 0; padding: 0.9em 1.1em; background: #fff;
+         border: 1px solid #cdeede; border-radius: 6px;
+         display: flex; flex-wrap: wrap; gap: 0.8em 1.2em; align-items: flex-end; }
+  .tpl-up-field { display: flex; flex-direction: column; gap: 0.25em; font-size: 0.9em; }
+  .tpl-upload-form .opt-hint { flex-basis: 100%; margin: 0; }
+  form.tpl-del-form { display: inline; margin: 0; }
+  /* Session-recorder download row on the Upload HEX capture block. */
+  .recorder-dl { margin: 0.8em 0 0; padding: 0.9em 1.1em; background: #fff;
+         border: 1px solid #cdeede; border-radius: 6px; }
+  .recorder-dl .rdl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6em; }
+  .recorder-dl .rdl-label { font-weight: 600; margin-right: 0.3em; }
+  .recorder-dl .rdl-meta { margin: 0.6em 0 0; font-size: 0.85em; }
+  .recorder-dl .rdl-note { margin: 0.5em 0 0; font-size: 0.85em; }
   /* Backup Now spinner overlay */
   #backup-overlay, .backup-overlay { position: fixed; inset: 0; z-index: 200;
                     background: rgba(20,30,40,0.6);
@@ -264,6 +298,11 @@ $backdrop_css
   .fc-modal.fc-danger .fc-icon-danger { display: inline-block; }
   .fc-modal.fc-danger .fc-icon-normal { display: none; }
   .fc-modal-actions { display: flex; justify-content: flex-end; gap: 0.7em; }
+  .fc-modal-input-row { margin: 0 0 1.3em; }
+  .fc-modal-input { width: 100%; box-sizing: border-box; padding: 0.5em 0.6em;
+         font-size: 1em; border: 1px solid #b9c2cc; border-radius: 6px; }
+  .fc-modal-input:focus { outline: none; border-color: #2d8fef;
+         box-shadow: 0 0 0 2px rgba(45,143,239,0.25); }
   .fc-btn-cancel { background: #e7e9ec; color: #333; }
   .fc-btn-cancel:hover { background: #d7dade; }
   .backup-overlay-box { background: #fff; border-radius: 10px; padding: 2em;

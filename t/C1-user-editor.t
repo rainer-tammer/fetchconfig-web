@@ -213,10 +213,12 @@ no warnings 'once', 'redefine';
     like($h2, qr/<div class="fatal-error">.*not configured correctly/s,
          'missing stylesheet raises the red config-error banner');
 }
-# The old help-path keys are gone from the registry; the new ones are present.
+# The obsolete help-path keys (HELP_DIR/HELP_FILE) stay gone; HELP_BASE_URL was
+# reintroduced in 2.03 (the help tree root) and the web-path keys are present.
 {
     my $src = do { open(my $fh,'<',cgi_path()) or die $!; local $/; <$fh> };
-    unlike($src, qr/\[ 'HELP_(DIR|FILE|BASE_URL)'/, 'old help keys removed from registry');
+    unlike($src, qr/\[ 'HELP_(DIR|FILE)'/, 'obsolete HELP_DIR/HELP_FILE stay removed from registry');
+    like($src,   qr/\[ 'HELP_BASE_URL',/, 'HELP_BASE_URL registered (help tree root)');
     like($src,   qr/\[ 'WEB_DIR',/,      'WEB_DIR registered');
     like($src,   qr/\[ 'BASE_URL',/,     'BASE_URL registered');
     like($src,   qr/\[ 'CSS_BASE_URL',/, 'CSS_BASE_URL registered');

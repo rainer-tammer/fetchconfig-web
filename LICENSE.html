@@ -225,6 +225,28 @@
     font-size:2.6rem;
     margin:0 0 14px;
     letter-spacing:-0.02em;
+    color:var(--accent);
+  }
+  .mermaid{
+    /* A mermaid block is a <pre>, so it would otherwise inherit the dark code
+       background/border/padding. Render the diagram on the page background. */
+    margin:1.5rem 0;
+    text-align:center;
+    background:transparent;
+    color:inherit;
+    border:0;
+    padding:0;
+    overflow-x:auto;
+  }
+  /* Until mermaid.js has rendered a block (it stamps data-processed on success),
+     keep the raw diagram source hidden so it is never shown as a wall of text --
+     during the CDN load, or if the runtime is blocked/unavailable. mermaid still
+     measures and renders normally while it is hidden; the element reveals itself
+     the moment it is processed. */
+  .mermaid:not([data-processed]){
+    visibility:hidden;
+    height:0;
+    overflow:hidden;
   }
   .hero p.lede{
     font-size:1.13rem;
@@ -321,6 +343,7 @@
 
   /* ---------- Tables ---------- */
   .table-wrap{overflow-x:auto;margin:18px 0 26px;border:1px solid var(--border);border-radius:var(--radius);}
+  hr{border:0;border-top:1px solid var(--border);margin:34px 0 30px;}
   table{
     border-collapse:collapse;
     width:100%;
@@ -478,7 +501,7 @@
 <style>
   .license-wrap{max-width:900px;margin:0 auto;padding:40px 22px 64px;}
   .license-wrap .hero-eyebrow{text-transform:uppercase;letter-spacing:.08em;font-size:.8rem;color:var(--accent);font-weight:600;}
-  .license-wrap h1{font-size:2rem;margin:.2em 0 1rem;}
+  .license-wrap h1{font-size:2rem;margin:.2em 0 1rem;color:var(--accent);}
   pre.license-text{white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;
     font-family:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;font-size:.82rem;
     line-height:1.5;background:var(--card,#fff);border:1px solid var(--border,#e2e5ea);
@@ -487,8 +510,7 @@
 </head>
 <body>
 <div class="license-wrap">
-  <div class="hero-eyebrow">License</div>
-  <h1>GNU General Public License, Version 3</h1>
+  <h1 class="hero-title">fetchconfig-web &mdash; GNU General Public License, Version 3</h1>
   <pre class="license-text">                    GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 

@@ -21,10 +21,10 @@ use ExtUtils::MakeMaker;
 # We want "perl Makefile.PL" to check up front and report clearly (and fail)
 # if a required module is missing or too old, like a well-behaved distribution.
 my %REQUIRE = (
-    'DBI'             => '1.641',
-    'DBD::Pg'         => '3.15.0',
+    'DBI'             => '1.614',
+    'DBD::Pg'         => '3.0.0',
     'Algorithm::Diff' => '0',
-    'CGI'             => '4.53',
+    'CGI'             => '4.31',
     'Test::More'      => '0',
 );
 
@@ -81,7 +81,7 @@ HINT
 
 WriteMakefile(
     NAME          => 'fetchconfig_web',
-    VERSION       => '2.00',
+    VERSION       => '2.06',
     AUTHOR        => 'Rainer Tammer',
     ABSTRACT      => 'Web front-end for the fetchconfig network device configuration backup tool',
     LICENSE       => 'gpl_3',
@@ -90,10 +90,10 @@ WriteMakefile(
     # enforces these at "perl Makefile.PL" time with clear errors; these
     # entries keep MYMETA / cpan clients informed too.
     PREREQ_PM => {
-        'DBI'             => '1.641',
-        'DBD::Pg'         => '3.15.0',
+        'DBI'             => '1.614',
+        'DBD::Pg'         => '3.0.0',
         'Algorithm::Diff' => 0,
-        'CGI'             => '4.53',
+        'CGI'             => '4.31',
     },
     # The test suite only needs core Test::More.
     TEST_REQUIRES => {

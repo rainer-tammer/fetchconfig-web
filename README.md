@@ -1,13 +1,15 @@
 # fetchconfig-web
 
-A single-file Perl CGI front-end for `fetchconfig`, with a "fetchconfig-web"
-title bar and logo shown on every page, and a Devices / Status / User / Help
+A Perl CGI front-end for `fetchconfig`: all program logic in one script,
+`fetchconfig-web.cgi`, with the stylesheet, fonts, images and help tree
+deployed alongside it and served statically. It shows a "fetchconfig-web"
+title bar and logo on every page, and a Devices / Status / User / Help
 menu (plus a Setup item for accounts with the edit or admin right) in the
 title bar's nav row:
 
-> **Requires fetchconfig 9.71 or newer.** fetchconfig-web reads the installed
+> **Requires fetchconfig 9.72 or newer.** fetchconfig-web reads the installed
 > version from `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and shows a
-> warning banner (on every page, after login) if it is older than 9.71 or
+> warning banner (on every page, after login) if it is older than 9.72 or
 > cannot be determined. The minimum is set by the `MIN_FETCHCONFIG_VERSION`
 > constant in `fetchconfig-web.cgi`.
 
@@ -44,8 +46,11 @@ title bar's nav row:
 4. Click a Device-ID -> list its backups, each row showing its index, the
    backup's date (ISO `YYYY-MM-DD`) and time, size, and full path. The
    date and time are extracted from the backup file's own name. The list also
-   offers per-device actions: Backup now, Check for empty backups, Check
-   backup suffixes, and Download latest configuration.
+   offers per-device actions: Backup now, Compare selected, Side by side
+   selected, and Download (the backup picked in the DL column; that column and
+   button appear only for a user holding the download/copy-unmasked right).
+   The empty-backup and suffix checks are not per-device buttons -- they are
+   repository-wide scans under Tools.
 5. Click a backup -> view its content in a monospaced `<pre>` block, with a
    copy-to-clipboard button and syntax highlighting for the recognised model
    families (see "Config syntax highlighting").
@@ -63,7 +68,9 @@ title bar's nav row:
 10. **Tools** menu (admins) -> orphaned-backup cleanup, empty-directory and
     empty-backup cleanup, device-table backup restore/delete, the "devices
     without backups" and "consistent backup suffixes" scans, the audit log,
-    disk space, and the fetchconfig log viewer.
+    login failures, disk space, the fetchconfig log viewer, templates, the
+    report-logo upload, orphaned-notes cleanup, the site-assignment check, and
+    the e-mail setup check.
 11. **Help** menu -> a description of the application, editable without
     touching the script (see "Help page" below).
 
@@ -95,7 +102,7 @@ PostgreSQL database; no `htpasswd` binary or password file is used.
 - [Setup devices and the device-table editor](#setup-devices-and-the-device-table-editor)
 - [Tools](#tools-admins-only)
 - [User management](#user-management-via-the-web-ui)
-- [The Help page](#help-page)
+- [The Help page](#help-menu)
 - [User-interface conveniences](#user-interface-conveniences)
 
 **Part 4 -- Reference**
@@ -124,14 +131,17 @@ backup host.
 
 ### How it works
 
-fetchconfig-web is a **single stateless Perl CGI script**
+fetchconfig-web is a **single stateless Perl script**
 (`fetchconfig-web.cgi`). It holds no long-running state of its own: every
 operation either shells out to `fetchconfig.pl` (to list templates, list or
 fetch backups, run a backup, check directories) or reads the repository and
 device table directly on disk. User accounts and login sessions are stored in a
-small **PostgreSQL** database. Because it is a plain CGI, it runs under any
-standard web server (Apache `mod_cgi` and comparable setups) with no
-application server or daemon to manage.
+small **PostgreSQL** database. The same script runs either way: under
+**FastCGI** (`mod_fcgid` with the optional `FCGI` module, markedly faster and
+the recommended deployment) it serves requests from a persistent accept loop,
+and without `FCGI` it falls back to **plain CGI** under any standard web server
+(Apache `mod_cgi` and comparable setups). Neither mode needs an application
+server or daemon to manage.
 
 The same script also runs under **FastCGI / mod_fcgid** with no code change
 and no extra configuration file: at start-up it loads the `FCGI` module if
@@ -152,10 +162,12 @@ each of these in turn.
 
 ### Files
 
-- `fetchconfig-web.cgi` -- the entire application (one file, easy to deploy).
-  Its images (the title-bar logo and the login-box icon) are embedded as
-  base64 inside the script itself, so there are no separate image files to
-  deploy.
+- `fetchconfig-web.cgi` -- the entire application logic in one file (Perl, HTML
+  generation and client-side JavaScript alike). Two small images, the title-bar
+  logo and the login-box icon, are embedded in it as base64 so they arrive with
+  the first response and cost no extra request; the larger static assets
+  (stylesheet, fonts, `back.jpg`, favicon, help tree) are deployed separately
+  under `WEB_DIR` and served by the web server.
 - `help.html` -- optional HTML *fragment* (no `<html>`/`<body>` tags) shown
   on the Help page; see "Help page" below. The app works fine without it
   (a built-in description is shown instead), so this file is only needed
@@ -197,7 +209,7 @@ each of these in turn.
 For an experienced operator, the shortest path to a running instance:
 
 1. **Install the prerequisites** -- Perl with DBI/DBD::Pg, CGI and
-   Algorithm::Diff; PostgreSQL; and fetchconfig 9.71+ (see
+   Algorithm::Diff; PostgreSQL; and fetchconfig 9.72+ (see
    [Requirements](#requirements)).
 2. **Create the user database** -- run `perl fetchconfig-web-dbsetup.pl`
    (see [The user database](#the-user-database)).
@@ -246,14 +258,22 @@ deploying:
 
 | Module            | Minimum version | Used by                          | Purpose                                              | Install (Debian/Ubuntu)   | Install (RHEL)          | Install (SLES)          | Install (CPAN)          |
 |-------------------|-----------------|----------------------------------|------------------------------------------------------|---------------------------|-------------------------|-------------------------|-------------------------|
-| `DBI`             | **1.641**       | `fetchconfig-web.cgi`, setup script | Database access layer for the PostgreSQL user store | `libdbi-perl`             | `perl-DBI`              | `perl-DBI`              | `cpan DBI`              |
-| `DBD::Pg`         | **3.15.0**      | `fetchconfig-web.cgi`, setup script | PostgreSQL driver for `DBI` (used via the `dbi:Pg:` DSN -- no explicit `use`, but required at runtime) | `libdbd-pg-perl` | `perl-DBD-Pg` | `perl-DBD-Pg` | `cpan DBD::Pg` |
+| `DBI`             | **1.614**       | `fetchconfig-web.cgi`, setup script | Database access layer for the PostgreSQL user store | `libdbi-perl`             | `perl-DBI`              | `perl-DBI`              | `cpan DBI`              |
+| `DBD::Pg`         | **3.0.0**       | `fetchconfig-web.cgi`, setup script | PostgreSQL driver for `DBI` (used via the `dbi:Pg:` DSN -- no explicit `use`, but required at runtime) | `libdbd-pg-perl` | `perl-DBD-Pg` | `perl-DBD-Pg` | `cpan DBD::Pg` |
 | `Algorithm::Diff` | any (1.201 ok)  | `fetchconfig-web.cgi`            | Side-by-side and Tools config diffs (`sdiff`); 1.201 is known-good | `libalgorithm-diff-perl` | `perl-Algorithm-Diff` | `perl-Algorithm-Diff` | `cpan Algorithm::Diff` |
-| `CGI` (`CGI.pm`)  | **4.53**        | `fetchconfig-web.cgi`            | CGI request/response handling. Core until Perl 5.22, then removed -- treat as non-core on modern Perl | `libcgi-pm-perl` | `perl-CGI` | `perl-CGI` | `cpan CGI` |
-| `Filesys::Df`     | 0.92 (optional) | `fetchconfig-web.cgi`            | **Optional** -- only the *Tools -> Disk space* page (free-space figures). Loaded lazily; without it the app runs and that tool shows an install hint | `libfilesys-df-perl` | `perl-Filesys-Df` | (CPAN) | `cpan Filesys::Df` |
+| `CGI` (`CGI.pm`)  | **4.31**        | `fetchconfig-web.cgi`            | CGI request/response handling. Core until Perl 5.22, then removed -- treat as non-core on modern Perl | `libcgi-pm-perl` | `perl-CGI` | `perl-CGI` | `cpan CGI` |
+| `Filesys::Df`     | any (optional)  | `fetchconfig-web.cgi`            | **Optional** -- only the *Tools -> Disk space* page (free-space figures). Loaded lazily; without it the app runs and that tool shows an install hint | `libfilesys-df-perl` | `perl-Filesys-Df` (EPEL) | `perl-Filesys-Df` (PackageHub) | `cpan Filesys::Df` |
+| `Crypt::Bcrypt`   | any (optional)  | `fetchconfig-web.cgi`            | **Optional but security-relevant** -- enables bcrypt (`$2b$`) password hashing at cost 12. Without it new passwords fall back to the legacy `$apr1$` format | `libcrypt-bcrypt-perl` | (CPAN) | (CPAN) | `cpan Crypt::Bcrypt` |
+| `IO::Socket::SSL` | any (optional)  | `fetchconfig-web.cgi`            | **Optional** -- STARTTLS/SSL for the password-reset mail (`EMAIL = 1`); `Net::SMTP` itself is core. `Net::SMTP::SSL` is **not** used | `libio-socket-ssl-perl` | `perl-IO-Socket-SSL` | `perl-IO-Socket-SSL` | `cpan IO::Socket::SSL` |
+| `FCGI`            | 0.67 (optional) | `fetchconfig-web.cgi`            | **Optional** -- the persistent FastCGI accept loop (mod_fcgid). Without it the script runs as plain CGI. `CGI::Fast` is **not** used | `libfcgi-perl` | `perl-FCGI` | (CPAN -- not packaged) | `cpan FCGI` |
 
-`perl Makefile.PL` checks these versions and refuses to continue (with a clear
-message) if a module is missing or older than the minimum above.
+`perl Makefile.PL` checks `DBI`, `DBD::Pg`, `Algorithm::Diff` and `CGI` and
+refuses to continue (with a clear message) if one is missing or older than the
+minimum above. The optional modules are not checked -- they are loaded lazily at
+run time and each degrades gracefully, as described in the table. The minimums
+are deliberately set to what the code actually uses, so the stock packages of
+RHEL 9, SLES 15, Ubuntu LTS and Debian all satisfy them; see INSTALL.md for
+per-distribution package names and for installing newer builds from CPAN.
 
 One-line install of all four:
 
@@ -271,54 +291,25 @@ zypper install perl-DBI perl-DBD-Pg perl-Algorithm-Diff perl-CGI
 The standalone `fetchconfig-web-dbsetup.pl` needs only `DBI` + `DBD::Pg`
 (plus core `Digest::MD5`).
 
-#### CGI 4.53 patch for `start_html()` (AIX, and possibly Linux)
+#### A note on the CGI 4.53 `start_html()` warning
 
-On AIX with CGI 4.53, `CGI::Util::_rearrange_params` warns
-
-```
-Odd number of elements in hash assignment at .../CGI/Util.pm line 119
-```
-
-when `start_html()` is called with a BODY-format parameter (as fetchconfig-web
-does). The warning is harmless but noisy in the web-server error log. Suppress
-it by wrapping the parameter handling in `no warnings;` -- apply this small
-patch to the installed `CGI/Util.pm`:
-
-```diff
---- Util.pm.orig        2021-07-26 16:33:34.716539697 +0200
-+++ Util.pm     2021-07-26 16:33:19.941302316 +0200
-@@ -95,6 +95,13 @@ sub rearrange_header {
- }
-
- sub _rearrange_params {
-+    # needed because of start_html() BODY format parameter
-+    # Odd number of elements in hash assignment at
-+    # /usr/opt/perl5/lib/site_perl/5.28.1/CGI/Util.pm line 119 (#1)
-+    # (W misc) You specified an odd number of elements to initialize a hash,
-+    # which is odd, because hashes come in key/value pairs.
-+    no warnings;
-+    # needed because of start_html() BODY format parameter
-     my($order,@param) = @_;
-     return [] unless @param;
-```
-
-Find the file with `perl -MCGI::Util -e 'print $INC{"CGI/Util.pm"}, "\n"'`,
-back it up, and apply the patch (e.g. with the AIX `patch` or the freeware
-`diff`/`patch` tools). This was first seen on AIX, but the warning comes from
-CGI 4.53 itself, not from AIX -- so **the same patch may be needed on Linux**
-(or any platform) running CGI 4.53 if `start_html()`'s BODY-format parameter
-triggers the same "odd number of elements" message in the web-server error
-log. The file location differs by platform (use the `perl -MCGI::Util` command
-above to find it), but the change is identical. If your CGI is a newer version
-that has already fixed this, the patch is not needed.
+Older releases of this guide carried a patch for a `CGI::Util` warning (*"Odd
+number of elements in hash assignment"*) triggered by `start_html()` under CGI
+4.53. **That patch is no longer relevant here:** fetchconfig-web does not call
+`start_html()` at all -- it emits its own `<head>` from `page_head()` -- so the
+warning cannot arise from this application. If you applied the patch to a shared
+`CGI/Util.pm` for an earlier version, it is harmless to leave in place, and
+equally safe to revert when that file is next updated by your package manager.
 
 ### Configuration
 
 All site-specific settings live in an external config file,
 **`/etc/fetchconfig-web.cfg`** (`key = value`), so credentials and paths are not
-baked into the script. Only two things stay hardcoded in
-`fetchconfig-web.cgi`: `$APP_TITLE`, `$COOKIE_NAME` -- and the path to the
-config file itself, `$CONFIG_FILE = '/etc/fetchconfig-web.cfg'`.
+baked into the script. Only a few things stay in the script
+itself: `$APP_TITLE`, `$COOKIE_NAME`, the true shipped version
+`APP_VERSION_INTERNAL`, the built-in defaults for `APP_VERSION` and the
+copyright (both overridable by the config keys of the same name) -- and the
+path to the config file, `$CONFIG_FILE = '/etc/fetchconfig-web.cfg'`.
 
 `fetchconfig-web-dbsetup.pl` offers to write this file for you at the end of
 its run (mode 0600, with the database values filled in and the rest at
@@ -335,6 +326,7 @@ BASE_URL                = /
 CSS_BASE_URL            = /css
 FONT_BASE_URL           = /fonts
 IMAGE_BASE_URL          = /images
+HELP_BASE_URL           = /help
 FETCHCONFIG_PATH        = /usr/local/fetchconfig
 FETCHCONFIG_BIN         = fetchconfig.pl
 BACKUP_DEVICE_TABLE     = /usr/local/fetchconfig/backup
@@ -371,7 +363,7 @@ HTTPS_ENABLED           = 0
 SHOW_RENDER_TIME        = 0
 GENERIC_SYNTAX          = auto
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
-APP_VERSION             = 2.00
+APP_VERSION             = 2.06
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 
@@ -712,11 +704,14 @@ help/documentation pages -- from one web-served directory. `WEB_DIR` is the
 merges it with the site's host name). `CSS_BASE_URL` (default `/css`),
 `FONT_BASE_URL` (default `/fonts`) and `IMAGE_BASE_URL` (default `/images`) are
 the sub-paths -- both the URL sub-path and the on-disk sub-directory under
-`WEB_DIR`. `BASE_URL`, `CSS_BASE_URL`, `FONT_BASE_URL` and `IMAGE_BASE_URL` are
-validated at startup: they must be absolute URL paths made only of letters,
-digits and `. _ ~ - /` -- no scheme, quotes, spaces or parentheses -- because
-they are emitted into links; an invalid value is reported as a configuration
-error on the login page.
+`WEB_DIR`. `HELP_BASE_URL` (default `/help`) is the sub-path of the help tree:
+`help.html` lives directly in it, and the two "additional help" menus are
+scanned from its `fetchconfig-web/` and `fetchconfig/` sub-directories (see
+*Help menu* below). `BASE_URL`, `CSS_BASE_URL`, `FONT_BASE_URL`,
+`IMAGE_BASE_URL` and `HELP_BASE_URL` are validated at startup: they must be
+absolute URL paths made only of letters, digits and `. _ ~ - /` -- no scheme,
+quotes, spaces or parentheses -- because they are emitted into links; an
+invalid value is reported as a configuration error on the login page.
 
 The stylesheet is **required**: it must exist at
 `<WEB_DIR><CSS_BASE_URL>/fetchconfig-web.css`. If it is missing, every page is
@@ -977,8 +972,8 @@ The title bar uses drop-down menus: **Devices** (Devices, Device backup status,
 Backup reports, Device notes), **Setup devices** (Device table, Edit device
 table, Bulk edit devices -- shown only to users who may edit the table; a
 site-limited user sees only Edit device table), **Tools** (admin only, each tool
-on its own page), **User** (Change your password for everyone; Users, Add user
-and Sites for admins), and **Help**. The post-login page is the device list.
+on its own page), **User** (Change your password and Change your
+email for everyone; Users, Add user and Sites for admins), and **Help**. The post-login page is the device list.
 
 ### Device notes
 
@@ -1245,7 +1240,7 @@ option that names the template (e.g. `model=cisco-ios` loads
 `templates/cisco-ios.tmpl`). Mandatory options are `user`, `pass`,
 `repository`, `keep` and `model`; optional ones include `transport`
 (`ssh`/`telnet`), `enable`, `changes_only`, `timeout`, `fetch_timeout`,
-`banner_timeout`, `fetch_delay`, `prompt_settle`, `max_visits`, `strip_ansi`,
+`banner_timeout`, `fetch_delay`, `max_visits`, `strip_ansi`,
 `prompt_head`, `prompt_tail`, `ssh_extra_opts`, `template_dir`, `debug`,
 `show_cmd`, `on_fetch_run`, `on_fetch_cat`, `timezone` and
 `filename_append_suffix` (most of the timing/prompt options may also be set in
@@ -1464,6 +1459,13 @@ any **admin** (the built-in `admin` account or a user with `admin_function`)
 the admin requirement server-side (not just menu hiding), since they're
 reachable directly by URL.
 
+The full set of entries is: *Orphaned configuration cleanup*, *Empty directory
+cleanup*, *Empty backup cleanup*, *Restore device table*, *Devices without
+backups*, *Consistent backup suffixes*, *Check site assignment*, *Audit log*,
+*Login failures*, *Orphaned notes cleanup*, *Disk space*, *View last fetchconfig
+schedule log*, *Templates*, *Upload report logo*, and *Verify email setup*. The
+sections below describe each in turn.
+
 #### Orphaned Configuration Cleanup
 
 Orphaned backups are backed-up configurations on disk whose device is no
@@ -1592,8 +1594,9 @@ small read-only JSON endpoint (`?action=check_backups_one&dev=<id>`,
 admin-only) per device. Each call runs `fetchconfig.pl -l <dev>` and returns
 just a status word -- `has` (at least one backup), `none` ("no backed up
 config files found"), or `error`. The device IDs to scan are emitted into
-the page from `read_device_ids()`, and the endpoint validates `dev` against
-`^[\w.\-]+$`.
+the page from `read_device_ids()`, and the endpoint validates `dev` with
+`valid_id()` (`^[\w.][\w.\-]*$` -- no leading dash, so an id can never be taken
+for a command-line option).
 
 #### Empty backup cleanup
 
@@ -1610,8 +1613,8 @@ Empty directory cleanup tool, it has two actions that scan every device at once:
 none -- that is not an error, so the count is taken from the summary line
 (`... found N zero-byte backup(s)`), not the exit status. A spinner is shown
 while the scan runs, and (like Backup Now) the run is bounded by
-`BACKUP_TIMEOUT`. The older per-device `-z` check remains available from a
-device's own backup page.
+`BACKUP_TIMEOUT`. There is no per-device `-z` button: the empty-backup check is
+only this repository-wide scan.
 
 #### Check devices for consistent backup suffixes
 
@@ -1629,13 +1632,12 @@ is checked with `fetchconfig.pl -s <dev>` via the
 
 The endpoint maps exit 0 to `consistent` and both exit 1 and exit 2 to a
 single `issue` status (any other failure to `error`), so the Tools box lists
-every Device-ID with a suffix problem under one list, with a note to check the
-specific device page for details. That per-device detail is the **Check
-backup suffixes** button on a device's backup list
-(`?action=checksuffix&dev=<id>`), which shows the full `fetchconfig.pl -s`
-output -- including the per-file suffix breakdown -- in a copyable block and
-spells out which of the three cases applies, the same way the empty-backup
-check does.
+every Device-ID with a suffix problem under one list. The per-device detail is
+fetched by the scanner itself: each row is checked through the JSON endpoint
+`?action=check_suffix_one&dev=<id>`, which runs `fetchconfig.pl -s` for that
+device and reports which of the three cases applies, the same way the
+empty-backup scan does. There is no per-device suffix button on a device's
+backup list.
 
 #### View last fetchconfig schedule log
 
@@ -1822,12 +1824,14 @@ and grant the web-server user permission to run just that helper, e.g. via
 www ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 ```
 
-(replace `www` with your web-server user). The helper is invoked as
-`install <tmpfile> <target.tmpl>` (back up, then write) or
-`revert <target.tmpl>`, and independently enforces that the target is an
+(replace `www` with your web-server user). The helper (v1.2) is invoked as
+`install <tmpfile> <target.tmpl>` (back up, then write), `install-new <tmpfile>
+<target.tmpl>` (create only if absent -- used by Upload), `revert <target.tmpl>`,
+or `delete <target.tmpl>`, and independently enforces that the target is an
 **absolute** path, contains **no `..`**, and ends in **`.tmpl`** -- so even a
-compromised caller cannot make it touch anything else. Saving through the helper
-requires `USE_SUDO_FOR_BACKUP_NOW = 1`.
+compromised caller cannot make it touch anything else. The single sudoers entry
+(the script path) covers every subcommand. Writing through the helper requires
+`USE_SUDO_FOR_BACKUP_NOW = 1`.
 
 If `TEMPLATE_HELPER` is empty (or sudo is disabled), the editor writes the file
 **directly**, which only works if the template directory is writable by the
@@ -1851,6 +1855,68 @@ web-served directory (and the Help-menu documents) is served; put
 `README.template_engine.html` in `WEB_DIR`. If the file is not installed the
 button simply leads to a 404. A trailing slash (and the bare `/`) is normalised
 away so links resolve to `/<file>` rather than a broken `//<file>`.
+
+#### Uploading, renaming and deleting templates
+
+The Templates page also lets an admin add, rename and remove templates (2.05).
+
+- **Upload template** (the button above the list) takes a `.tmpl` file and a
+  target directory chosen from the configured template directories (the
+  `directory: template` allow-list). The upload is **text only and capped at
+  100 KB**; the name must be a safe `<model>.tmpl` (letters, digits, `._-`) --
+  the stem is the generic `model=` value. The file is **syntax-checked
+  (`--check-template`) before it is installed**, so a template that fails the
+  check is never placed live, and an **existing name is never overwritten**
+  (the write is atomic: the helper's `install-new`, or a `link()`-based create
+  when writing directly). The target directory must be one of the configured
+  template directories -- an arbitrary path is refused.
+- **Upload HEX capture** (the second button above the list) generates a template
+  from a `record-session.pl` `.hex` capture. It asks for the capture file (text
+  only, **capped at 1 MB** -- captures can carry large configs), a **template
+  name**, a target directory, and a **syntax-highlighting scheme** (`auto`,
+  `none`, or a scheme such as `cisco-ios`). The file must be a real capture --
+  it has to begin with the `# record-session` banner line, so an unrelated file
+  is rejected up front. The capture is handed to
+  `<FETCHCONFIG_PATH>/tools/generate_template.pl` (run with `-f <hex> -o <out>`,
+  so the template text is read from the output file and never mixed with the
+  generator's diagnostics), which emits a **draft** generic-model template. The
+  chosen scheme is stamped into the header as `# syntax_style: <scheme>` (`auto`
+  adds no line and leaves the scheme to content detection / `GENERIC_SYNTAX`;
+  any previous declaration is replaced). From there it is treated exactly like an
+  upload: the **generated** template faces the 100 KB budget, is syntax-checked
+  before install, an existing name is never overwritten, and the install is the
+  same atomic privileged step. **The output is a draft** -- review it (look for
+  `# TODO` markers) and test it against the device with the `generic` model.
+  The block also offers a **session-recorder download** (`record_session.exe`
+  for Windows and the `record_session.py` source) when those files are present in
+  `WEB_DIR`; they are served statically and each is shown only when installed (see
+  INSTALL). Each download lists its size, date and a **SHA-256**, which the app
+  computes and caches in `SESSION_DIR` (keyed by file mtime+size, so it is
+  re-hashed only when the file changes).
+- **Rename** (per row, between Edit and Download) renames an **unused** template
+  within its own directory. The button opens the shared styled popup to ask for
+  the new name (prefilled with the current stem); the new name must be a safe
+  `<model>.tmpl` (the generic `model=` value), must differ from the current one,
+  and **never overwrites** an existing template. A **used** template cannot be
+  renamed -- its stem is the `model=` value a device resolves on -- so the button
+  is greyed out and the "unused" status is re-checked server-side at rename time.
+  The move is atomic (the helper's `rename`, or a direct `rename()` when the dir
+  is web-writable) and carries the `.bak` across.
+- **Download** (per row, after Rename) sends the template file as a download
+  (`?action=download_template`); read-only, so no CSRF. The `path` is validated
+  against the discovered template list, so only a known template file is served.
+- **Delete** (per row) removes an **unused** template and its `.bak`. A
+  **Used** column shows `Yes`/`No`; a template that is the resolved template of
+  any generic device (`model=` + `template_dir=`, honouring default-section
+  inheritance and `$alias` expansion) is *in use*, its Delete button is greyed
+  out, and the delete is re-checked server-side at the moment of deletion. The
+  "used" set is computed from the device table once per request and refreshed
+  whenever the device-table editor, the bulk editor or a restore rewrites the
+  table.
+
+These actions are admin-only, CSRF-protected, audited, and -- like Save/Revert --
+use the privileged helper when `TEMPLATE_HELPER` is set, or write directly when
+the template directory is web-writable.
 
 ### Per-site device access
 
@@ -1974,39 +2040,72 @@ flag is set at login (recorded as a 4th line in the session file, never in
 the cookie) and cleared automatically when the password is changed away
 from the default.
 
-### Help page
+### Help menu
 
-The **Help** menu item shows a short description of the application. It
-reads `help.html` from `WEB_DIR` as an HTML *fragment* -- no
-`<html>`/`<head>`/`<body>` tags, just the content -- and drops it straight into
-the page's own title bar/nav/footer chrome. A ready-to-use `help.html` is
-included; deploy it, with the stylesheet and the sibling Help-menu documents,
-into `WEB_DIR`:
+The **Help** menu has a fixed shape:
 
-```sh
-mkdir -p /www/virtual/fetchconfig/htdocs/css
-cp fetchconfig-web.css /www/virtual/fetchconfig/htdocs/css/
-cp help.html \
-   fetchconfig-web-documentation.html INSTALL.html \
-   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html \
-   /www/virtual/fetchconfig/htdocs/
+```
+Help                                 <- help.html
+----------------------------------
+fetchconfig-web - additional help    <- section header (scanned)
+  <documents from help/fetchconfig-web/>
+fetchconfig - additional help        <- section header (scanned)
+  <documents from help/fetchconfig/>
+----------------------------------
+About                                <- same dialog as the title-bar icon
 ```
 
-**`WEB_DIR`** is the filesystem directory that holds `help.html` and the sibling
-Help-menu documents (`fetchconfig-web-documentation.html`, `INSTALL.html`,
-`LICENSE.html`, `LICENSE-ADDITIONS.html`, `PRIVACY.html`); each Help-menu entry
-appears only when its file is present there. `help.html` has a fixed name.
-`WEB_DIR` is read directly from disk with Perl's `open()`; it is distinct from
-the HTTP-visible location, which is `BASE_URL` + the filename. The browser loads
-the help page at `<BASE_URL>help.html`, merged with the site's host name.
+**The Help page.** The top **Help** entry reads `help.html` from the help tree
+(`<WEB_DIR><HELP_BASE_URL>/help.html`) as an HTML *fragment* -- no
+`<html>`/`<head>`/`<body>` tags, just the content -- and drops it straight into
+the page's own title bar/nav/footer chrome. A ready-to-use `help.html` is
+included. If the file is missing (e.g. before you've deployed it), Help still
+works: `fetchconfig-web.cgi` falls back to a built-in description covering the
+same features, and names the expected filesystem path so it's obvious where to
+put it. Since this content is operator-authored, not user input, it is included
+verbatim (not run through `esc()`) -- treat it the same as any other file you
+place on the server, i.e. don't let untrusted parties write to it.
 
-If the file is missing (e.g. before you've deployed it), Help still works:
-`fetchconfig-web.cgi` falls back to a built-in description covering the
-same features, and names the expected filesystem path so it's obvious
-where to put it. Since this content is operator-authored, not user input,
-it is included verbatim (not run through `esc()`) -- treat it the same as
-any other file you place on the server, i.e. don't let untrusted parties
-write to it.
+**The two "additional help" sections.** Each is built by scanning a
+sub-directory of the help tree -- `help/fetchconfig-web/` and `help/fetchconfig/`
+-- at render time for `*.html` documents. You curate each menu simply by copying
+whichever documents you want exposed into the directory; nothing in the config
+lists them individually. Each document's menu label is taken from its
+`<title>` element (the first 1 KB of the file is read to find it; a file with no
+`<title>` falls back to its file name). Entries are sorted by label and open in
+a new browser tab. A section with no `*.html` files (or a missing directory)
+shows a muted *"No additional helpfiles available - see INSTALL.md"*; a
+directory with more than fifteen `*.html` files is treated as a misconfiguration and
+shows a single *"too many help documents in &lt;dir&gt;"* placeholder instead of
+a huge menu.
+
+Deploy the help tree alongside the stylesheet, e.g.:
+
+```sh
+mkdir -p /www/virtual/fetchconfig/htdocs/css \
+         /www/virtual/fetchconfig/htdocs/help/fetchconfig-web \
+         /www/virtual/fetchconfig/htdocs/help/fetchconfig
+cp fetchconfig-web.css /www/virtual/fetchconfig/htdocs/css/
+cp help.html           /www/virtual/fetchconfig/htdocs/help/
+# copy whichever documents you want in each menu:
+cp fetchconfig-web-documentation.html INSTALL.html CHANGES.html \
+   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html \
+   /www/virtual/fetchconfig/htdocs/help/fetchconfig-web/
+cp fetchconfig-documentation.html How-To-add-a-model.html \
+   README.generic-model.html README.record-session.html \
+   README.template_engine.html \
+   /www/virtual/fetchconfig/htdocs/help/fetchconfig/
+```
+
+The directories are read-only to the application -- it only lists and links the
+files, never writes them -- so they need no special web-server write access.
+`WEB_DIR` is read directly from disk with Perl's `open()`/`readdir()`; it is
+distinct from the HTTP-visible location, which is `<BASE_URL><HELP_BASE_URL>/...`,
+merged by the browser with the site's host name.
+
+**About.** The bottom **About** entry opens the same dialog as the program icon
+in the title bar (internal and configured version, copyright, the detected
+`fetchconfig.pl` version, and the run mode).
 
 ### User-interface conveniences
 
@@ -2048,12 +2147,12 @@ validated Device-ID, and `N`/`M` validated backup indices.
 | `list_backups` | `-devices=T -l DEV` | `index<TAB>size<TAB>path` per backup | `0` = listed; `1` with `no backed up config files found` = treated as "no backups yet" (empty list, not an error); other non-zero = error |
 | `get_backup_content` | `-devices=T -g DEV -n N` | raw config bytes of backup `N` (served through unchanged) | `0` = ok; non-zero = error |
 | `compare_backups` | `-devices=T -g DEV -n N -m M` | unified diff of backup `N` against older backup `M` (`M > N`) | `0` = identical; `1` = differs; `>1` = error (the underlying diff's code) |
-| `device_empty_status`, `run_check_empty` | `-devices=T -z DEV` | `index<TAB>0<TAB>path` for each zero-byte backup | `0` = clean (all non-empty, or none exist); `1` = at least one zero-byte backup found (an expected result, not an error); other = error |
-| `device_suffix_status`, `run_check_suffix` | `-devices=T -s DEV` | per-file suffix breakdown when inconsistent | `0` = suffixes consistent and match the configured `filename_append_suffix`; `1` = suffixes inconsistent between backups; `2` = consistent but do not match the configured suffix; other = error |
-| `run_orphan_check` | `-devices=T -o` | listing of orphaned repository entries | passed through to the transcript |
-| `run_orphan_delete` | `[sudo -n] BIN -devices=T -o -D` | listing; stderr logs `rm`/`rmdir` per removed item | passed through to the transcript |
-| `run_empty_check` | `-devices=T -e` | `device`/`day`/`month`<TAB>path per empty directory | `0` = none found; `1` = empty directories found (an expected result, not an error); other = error |
-| `run_empty_delete` | `[sudo -n] BIN -devices=T -e -D` | each listed directory with `deleted` appended, plus a `removed N of M` summary | `0` = success; non-zero = at least one removal failed |
+| `device_backup_status` | `-devices=T -z DEV` | `index<TAB>0<TAB>path` for each zero-byte backup | `0` = clean (all non-empty, or none exist); `1` = at least one zero-byte backup found (an expected result, not an error); other = error |
+| `device_suffix_status` | `-devices=T -s DEV` | per-file suffix breakdown when inconsistent | `0` = suffixes consistent and match the configured `filename_append_suffix`; `1` = suffixes inconsistent between backups; `2` = consistent but do not match the configured suffix; other = error |
+| `run_scan_check('-o')` | `-devices=T -o` | listing of orphaned repository entries | passed through to the transcript |
+| `run_scan_delete('-o')` | `[sudo -n] BIN -devices=T -o -D` | listing; stderr logs `rm`/`rmdir` per removed item | passed through to the transcript |
+| `run_scan_check('-e')` | `-devices=T -e` | `device`/`day`/`month`<TAB>path per empty directory | `0` = none found; `1` = empty directories found (an expected result, not an error); other = error |
+| `run_scan_delete('-e')` | `[sudo -n] BIN -devices=T -e -D` | each listed directory with `deleted` appended, plus a `removed N of M` summary | `0` = success; non-zero = at least one removal failed |
 | `run_backup_now` | `[sudo -n] BIN -devices=<tmp>` | full run transcript (stdout+stderr merged) | reported to the user as-is; result state is read from the device's `.status` file |
 
 Notes on specific paths:
@@ -2080,17 +2179,25 @@ Notes on specific paths:
 
 ### Supported hash formats
 
-New passwords are always written as `$apr1$` (Apache MD5). Imported hashes
-are read back by `verify_password()`, which accepts:
+New passwords are written as **bcrypt** (`$2b$`) when the optional
+`Crypt::Bcrypt` module is installed -- `password_hash()` prefers it, at
+`BCRYPT_COST` (12). Without that module the app falls back to `$apr1$`
+(Apache MD5), which is why `Crypt::Bcrypt` is worth installing even though it is
+nominally optional (see the module table under *Requirements*).
+
+Existing `$apr1$` hashes are **upgraded transparently**: when a user with a
+legacy hash logs in successfully, the password is re-hashed to bcrypt and stored,
+so an installation migrates itself as users sign in. Imported hashes are read back
+by `verify_password()`, which accepts:
 
 | Format               | Example prefix | Supported |
 |-----------------------|-----------------|-----------|
-| `{SHA}` (SHA1)         | `{SHA}...`       | **No** -- unsalted, trivially brute-forced; removed in 1.12. Reset such users' passwords via the User page. |
-| Apache MD5 (apr1)     | `$apr1$...`      | Yes (pure-Perl, verified against `openssl passwd -apr1`) -- what the app now writes |
+| bcrypt                | `$2b$` (also `$2a$`/`$2y$`) | Yes -- **what the app writes** when `Crypt::Bcrypt` is present, at cost 12 |
+| Apache MD5 (apr1)     | `$apr1$...`      | Yes (pure-Perl, verified against `openssl passwd -apr1`) -- the fallback when `Crypt::Bcrypt` is absent, and upgraded to bcrypt on next login |
 | glibc MD5 crypt       | `$1$...`         | Yes (pure-Perl, same algorithm as apr1) |
 | glibc SHA-256/512     | `$5$...` / `$6$...` | Only if the *web server's* system `crypt()` supports it (true on most Linux; not guaranteed on AIX) |
 | Traditional DES crypt | 2-char salt      | Yes, via system `crypt()` |
-| bcrypt                | `$2a$`/`$2b$`/`$2y$` | **Not supported** -- add `Crypt::Eksblowfish::Bcrypt` and extend `verify_password()` if you need it |
+| `{SHA}` (SHA1)         | `{SHA}...`       | **No** -- unsalted, trivially brute-forced; removed in 1.12. Reset such users' passwords via the User page. |
 
 ## Security model
 
@@ -2103,9 +2210,11 @@ below are grouped by concern.
 
 - Passwords are verified with a constant-time `secure_compare()` in
   `verify_password()` (not Perl's `eq`), so response timing does not leak how
-  many leading hash characters matched. Supported hash formats are the salted
-  `$apr1$`, `$1$`, `$5$`/`$6$`, and traditional DES `crypt`; the unsalted
-  `{SHA}` format is rejected.
+  many leading hash characters matched. New hashes are **bcrypt** (`$2b$`, cost
+  12) when `Crypt::Bcrypt` is installed, falling back to `$apr1$` otherwise;
+  legacy `$apr1$` hashes are re-hashed to bcrypt on the owner's next successful
+  login. Also accepted on read: `$1$`, `$5$`/`$6$` and traditional DES `crypt`.
+  The unsalted `{SHA}` format is rejected.
 - Sessions are opaque 192-bit tokens from `/dev/urandom`, stored server-side
   in `$SESSION_DIR` (files mode 0600 in a 0700 directory). The session id is
   validated against `^[0-9a-f]{48}$` before use as a filename, so a crafted
@@ -2141,12 +2250,22 @@ below are grouped by concern.
   change/reset) but still carries a session cookie lands on the login page with
   a clear **"Your session has ended. Please log in again."** notice, rather than
   a blank form.
-- A failed login sleeps **2 seconds** before responding, applied identically
-  to an unknown user and a wrong password, to slow online brute forcing. The
-  form returns a single generic "Invalid username or password" message for
-  both cases to avoid username enumeration. No lockout is implemented; front
-  it with `fail2ban` on the web server's access log if exposed beyond a
-  trusted network.
+- Failed logins are **throttled in the database**, not by sleeping. Failures are
+  counted per source IP **and** per account (`login_attempts`): once
+  `LOGIN_MAX_FAILURES` (5) failures occur inside `LOGIN_WINDOW_SECS` (15 min),
+  that key is locked out for `LOGIN_COOLDOWN_SECS` (15 min). Counting both keys
+  means a distributed guess against one account and a single host guessing many
+  accounts are both caught. A successful login clears the account's counter.
+  Admins can review and reset counters under *Tools -> Login failures*.
+- The response carries only a small random jitter (50--100 ms), deliberately
+  **not** a multi-second sleep: a fixed long delay ties up a web-server worker
+  per guess and is itself a denial-of-service lever. The form returns a single
+  generic "Invalid username or password" message for an unknown user and a wrong
+  password alike, to avoid username enumeration.
+- The throttle is application-level and keyed on the IP the web server reports.
+  If the app is exposed beyond a trusted network, `fail2ban` on the access log is
+  still a reasonable extra layer, and a reverse proxy must pass the real client
+  address or every request will share one throttle key.
 
 ### Authorization
 
