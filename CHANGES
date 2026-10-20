@@ -3,117 +3,237 @@ fetchconfig-web -- Change Log
 
 Release history for fetchconfig-web, newest version first.
 
-2.06
+2.08
 ====
 
-Requires fetchconfig 9.72. Template management: upload and delete templates from
-the Templates page.
+Requires fetchconfig 9.72. Adds a viewer for device debug logs.
 
-- Requires fetchconfig 9.72 or newer (was 9.71). MIN_FETCHCONFIG_VERSION is now
-  9.72; an older installation still runs but raises the persistent version-
-  warning banner after login.
-- prompt_settle removed from the generic model. fetchconfig 9.72 dropped the
-  option entirely -- it was a no-op -- so it is gone from the generic model's
-  option catalog and from the template-editor syntax highlighting. An existing
-  prompt_settle= on a device line is not discarded: like any option outside a
-  model's catalog it is preserved on save and shown as an "(unrecognized)" free-
-  text chip, so you can delete it at your leisure. Note this does not affect
-  prompt_settle_ms, a different and still-current option on aruba-cx-ssh, nexus-
-  ssh and mediant-sbc.
-- The standalone tools fetchconfig-web-clean-resets.pl and fetchconfig-web-
-  clean-audit.pl reported version 2.00 in their banner; they now carry the
-  current version, as does the sample config written by fetchconfig-web-
-  dbsetup.pl.
-- Upload a new template. The Templates page has an "Upload template" button:
-  pick a .tmpl file and a configured template directory. The upload is text only
-  and capped at 100 KB, its name must be a safe <model>.tmpl (the generic model=
-  value), it is syntax-checked before it is installed (a file that fails the
-  check is never placed), and an existing name is never overwritten (enforced
-  atomically). The copy is done by the privileged helper, or directly when the
-  template directory is web-writable.
-- Download a template. Each row has a Download button (after Edit) that sends
-  the template file as a download.
-- Generate a template from a HEX capture. The Templates page has an "Upload HEX
-  capture" button: pick a record-session.pl .hex file, a template name, a target
-  directory and a syntax-highlighting scheme. The capture (text only, 1 MB max)
-  is handed to <FETCHCONFIG_PATH>/tools/generate_template.pl, which produces a
-  draft generic-model template; the chosen scheme is stamped into its header as
-  # syntax_style: <scheme> (auto leaves it to detection), and the result is then
-  syntax-checked and installed exactly like a template upload (100 KB template
-  budget, no-overwrite, privileged atomic install). The generated template is a
-  draft -- review it and test against the device.
-- Session recorder download. The Upload HEX capture block offers downloads for
-  the session recorder -- record_session.exe (Windows) and the record_session.py
-  source -- served statically from WEB_DIR. The recorder is not shipped with
-  fetchconfig-web; each button appears only when its file is present (build the
-  exe from fetchconfig's contrib/windows), and the whole row is hidden when
-  neither is. Each download shows its size, date and a SHA-256 (computed and
-  cached in SESSION_DIR, re-hashed only when the file changes); the exe is
-  unsigned, so a SmartScreen/AV note is displayed.
-- Rename an unused template. Each row has a Rename action (between Edit and
-  Download) that opens a styled popup for the new name (prefilled with the
-  current stem) and renames the template within its directory, carrying the .bak
-  across. The new name must be a safe <model>.tmpl, must differ from the current
-  one, and never overwrites an existing template. A template in use by a device
-  cannot be renamed (greyed out, re-checked server-side).
-- Delete an unused template. Each row now has View / Edit / Rename / Download /
-  Delete actions and a Used column (Yes/No). A template that is referenced by a
-  device cannot be deleted -- its Delete button is greyed out, and the delete is
-  re-checked server-side. Delete removes the template and its .bak.
-- "Used" is computed from the device table: a template is used when it is the
-  resolved template of some generic device (model= + template_dir=, with
-  default-section inheritance and $alias expansion). The result is cached per
-  request and refreshed after the device-table editor, the bulk editor or a
-  restore rewrites the table.
-- The privileged helper fetchconfig-web-install-template.pl is now v1.2, adding
-  install-new (create-if-absent, atomic), delete, and rename (atomic, refuse-if-
-  exists, moves the .bak) subcommands. The existing sudoers entry (the script
-  path) already covers them -- just redeploy the script.
-- Template helper errors shown in the UI are now condensed to the single error
-  line (an out-of-date helper no longer dumps its full --help), with a hint to
-  redeploy the helper when it does not recognise a subcommand.
-- The Help page now lists up to 15 additional help files per menu
-  (HELP_MAX_FILES, previously 10).
-- Dependency minimums corrected. Makefile.PL and cpanfile previously required
-  CGI 4.53, DBD::Pg 3.15.0 and DBI 1.641, none of which the code needs -- and
-  perl Makefile.PL failed on stock RHEL 9 (CGI 4.51, DBD::Pg 3.14.2) and SLES 15
-  (CGI 4.46) as a result. The floors are now the versions actually used: CGI
-  4.31 (the -samesite cookie floor), DBD::Pg 3.0.0 (no pg_* driver attributes
-  are used) and DBI 1.614 (what DBD::Pg itself requires), so the stock packages
-  of RHEL 9, SLES 15, Ubuntu LTS and Debian all satisfy them. cpanfile now also
-  declares the optional Crypt::Bcrypt, IO::Socket::SSL and FCGI. Security
-  guidance that cannot be a version floor (distributions backport without
-  bumping versions) moved into INSTALL.md.
-- Documentation audited against the source. Corrected throughout: the missing
-  sudoers rule for the template helper (without it every template write failed),
-  the per-distribution package names for RHEL 9 / SLES 15 / Ubuntu (incl. the
-  SLES modules that are not enabled by default, EPEL-only Filesys::Df, the non-
-  existent SLES perl-FCGI, and Net::SMTP::SSL, which the app does not use),
-  README's password-storage section (the app writes bcrypt, not $apr1$) and
-  login-hardening section (a database-backed per-IP/per-account throttle, not a
-  2-second sleep), a documented ?action=checksuffix that never existed, three
-  device-page buttons that do not exist, stale function names, the request-
-  lifecycle order in DEVELOPER.md, and assorted stale version/size values.
-- run_check_empty() removed -- dead code with no callers since the empty-backup
-  check became a repository-wide scan.
-- README's CGI 4.53 patch for start_html() section removed: the application
-  never calls start_html() (it emits its own <head>), so the patch could not
-  apply. A short note replaces it for anyone who applied it to an earlier
-  release.
-- INSTALL.md gains an Installing newer modules from CPAN section (private prefix
-  via cpanm -l, or a global install), including the per-distribution build
-  prerequisites and how to point the CGI at a private prefix.
-- Documentation corrected on image embedding: the application is not a single
-  self-contained file. The title-bar logo and login icon are inlined as base64
-  for load performance (they arrive with the first response and cost no extra
-  request; the logo doubles as the report email's cid: image), while the
-  stylesheet, fonts, favicon.ico, the help tree and the login backdrop back.jpg
-  are deployed under WEB_DIR and served statically.
-- Document headers now read Perl FCGI/CGI / language instead of Perl CGI /
-  single file, and the surrounding prose no longer describes the application as
-  plain-CGI-only: the same script runs under FastCGI (mod_fcgid + FCGI, the
-  recommended deployment) or falls back to plain CGI.
-- A global $CGI::POST_MAX request-size cap (2 MB) is now set.
+Device debug logs
+-----------------
+
+- View on the Device backup status page, in a new Debug column shown to admins
+  and holders of the new read_debug right. Greyed out when the device has no
+  <device-id>.debug file.
+- The buttons key on the file, not on the debug option -- a device set back to
+  debug=off keeps the log written while it was on.
+- The viewer highlights the Net::Telnet hex dump, with SEND / RECV badges, a
+  per-direction tint and a rule where the direction turns.
+- Sent only / Received only filter in the browser; Transcript view reassembles
+  the bytes into a readable session.
+- SSH log hidden / shown -- the ssh client's own stderr, hidden by default.
+  Classified by complement (not a hex line, not a # marker), so it can never
+  hide device traffic; the # markers always stay visible.
+- Copy returns the log as shown, with the original < / > markers: the badges are
+  CSS generated content, not markup.
+- New Tools entry Device debug logs: every device that has one, plus Delete all
+  debug logs.
+- Views and deletions are audited (view_debug, delete_debug, delete_all_debug).
+
+Debug log permissions
+---------------------
+
+- New per-user right read_debug -- view device debug logs, for the user's own
+  sites. Not implied by being site-unrestricted, unlike the other per-user
+  rights: a debug log can contain the device password in clear text, so it must
+  be granted explicitly.
+- Download (raw file) and Delete stay admin only.
+- Buttons: Device backup status has View only; Tools has View | Download |
+  Delete; the viewer has Download and Delete for admins.
+- The viewer returns to the page it was opened from.
+
+Other
+-----
+
+- Device backup status gains Site and Device-ID filters, with the same behaviour
+  as the device list (site exact, device-id a case-insensitive substring).
+  Filters persist in the existing cookie.
+- Device backup status and Tools -> Device debug logs are sorted by device-id,
+  case-insensitively, instead of device-table order.
+- Fixed: sorting a column on Device backup status reordered only the rows on the
+  current page. It now sorts the whole table, as the device list already did.
+- The user editor's permission boxes are wider, so no permission label wraps.
+- The Device backup status filter row uses the same control sizes as the Devices
+  page.
+- Fixed: APP_VERSION was left at 2.07. It is what the footer shows and what
+  cache-busts the stylesheet, so browsers kept the old CSS.
+- Per page on Device backup status now offers All/10/20/40/80/160, defaulting to
+  40, as the device list does.
+
+Viewer size limits
+------------------
+
+- Under 2 MB in full; 2--16 MB as the first and last 1 MB with ----- content cut
+  because of a 2 MB viewing size limit ----- between them; over 16 MB not
+  displayed or downloaded (it can still be deleted).
+- Chunks are cut on line boundaries, so no half hex-dump line is rendered.
+
+Reading root-owned debug logs
+-----------------------------
+
+- fetchconfig creates <device-id>.debug as root, mode 0600, so the web-server
+  user can neither read nor delete it (unlink needs write permission on the
+  root-owned repository directory).
+- With TEMPLATE_HELPER set, the viewer reads and deletes through that helper. It
+  is the one the template editor already uses -- no new sudoers rule; redeploy
+  the helper.
+- Without it the buttons explain the permission problem instead of failing with
+  a generic error.
+- Helper v1.5 adds read-debug and delete-debug, hardened like the template
+  commands: absolute path, no .., must end .debug, plain file only. read-debug
+  takes a byte window, so a large log is not pulled through the pipe in full.
+
+Upgrading: run fetchconfig-web-dbupdate-2.08.sql once, and redeploy the helper.
+
+Security
+--------
+
+- A debug log is a full session transcript and can contain device credentials.
+  Secret masking cannot help -- it matches key=value, while a password in a hex
+  dump is split across 16-byte lines as hex and ASCII. The controls are the
+  admin-only gate and fetchconfig's own print_secret().
+- The delete path takes a device id only. The file path is re-derived from the
+  device table, symlinks are refused, and a missing file is not an error.
+- Read errors show generic text; the reason goes to the audit log.
+
+2.07
+====
+
+Requires fetchconfig 9.72. Template management on the Templates page, plus a
+server-side input-validation audit and its fixes.
+
+Upgrading: add the second sudoers rule -- without it every template write fails
+-- and redeploy the helper (now v1.3):
+
+    <webuser> ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig-web-install-template.pl
+
+Requires
+--------
+
+- fetchconfig 9.72 (was 9.71).
+- prompt_settle removed from the generic model -- dropped in 9.72, it was a no-
+  op. An existing prompt_settle= is preserved as an "(unrecognized)" chip, not
+  discarded. Unrelated to prompt_settle_ms, which stays.
+- Perl floors lowered to what the code uses: CGI 4.31, DBD::Pg 3.0.0, DBI 1.614.
+  The old floors made perl Makefile.PL fail on stock RHEL 9 and SLES 15.
+  Security guidance moved to INSTALL.md, where it belongs -- a floor rejects a
+  patched vendor build and accepts an unpatched CPAN one.
+
+Template management
+-------------------
+
+- Upload, download, rename and delete templates. Uploads are name-checked,
+  capped at 100 KB, syntax-checked before install, and never overwrite (atomic).
+  Rename and delete are refused for a template in use by a device, re-checked
+  server-side.
+- New Used column on the Templates page.
+- Generate a template from a HEX capture via fetchconfig's generate_template.pl,
+  stamping the chosen syntax_style. The result is a draft -- review it against
+  the device.
+- Session-recorder downloads (record_session.exe, record_session.py), each shown
+  only when present, with size, date and a cached SHA-256. Not shipped; build
+  the exe from fetchconfig's contrib/windows.
+- Helper v1.3: adds install-new, delete and rename (v1.2), and refuses a
+  symlinked .bak on revert (v1.3). The existing sudoers entry covers every
+  subcommand. Helper errors in the UI are condensed to the single error line
+  instead of its full --help.
+
+Security and validation
+-----------------------
+
+An audit asked whether all input is validated on the server or only in the
+browser. It was not. Fixed:
+
+- Per-site scope on the device page. The scope check keyed on the action name,
+  and that page is reached with no action, so a site-limited user could read any
+  device's backups by typing the URL. Unmasked downloads were gated separately
+  and never exposed.
+- Unknown model no longer destroys the stored enable password. The secret write-
+  back keyed on the catalog type; for a model outside the catalog it wrote the
+  mask string into the table as the password. No attacker needed -- the editor
+  keeps an unknown model, so a table from a newer fetchconfig lost the secret on
+  any ordinary save. It now keys on the mask alone.
+- Report logo upload/delete, and report delete/prune, are admin-only. All four
+  handlers were reachable by any logged-in user; the admin-only menu was the
+  only gate. Controls are hidden for non-admins and the handlers check.
+- lock_dir is checked against the directory allow-list (opt-in: without a lock
+  line it stays unrestricted, as documented).
+- Option values are checked against their catalog type -- the same sets the
+  widgets offer, case-insensitively -- and report_logo against
+  valid_logo_name(). Behaviour change: a table hand-edited to carry a value
+  outside the documented set (say changes_only=yes) is now refused on save, with
+  an error naming the record, option and accepted values.
+- Unknown models and option keys are still accepted and labelled "(unknown)" /
+  "(unrecognized)", so a table written by a newer fetchconfig stays editable --
+  but checked for illegal content: an option name cannot carry = or ,, and no
+  value may contain a control character.
+- Bounded the editor's form indices. A crafted <key>__<n> pre-extended a Perl
+  array; the record loop also re-read every parameter per record.
+- Site codes reject , = # -- they are written as site=<code> into the device
+  table.
+- Template rename without the helper is now atomic (link(), not check-then-act).
+- Name and token validators anchor on \z, not $, which also matches before a
+  trailing newline.
+- An oversized POST now returns 413 instead of a misleading "No file was
+  selected."
+- Removed the legacy set_download_full_report / set_download_full_config
+  handlers -- dead since 1.63; do_user_save covers the same rights and still
+  emits the same audit actions.
+- run_check_empty() removed (dead).
+- Global $CGI::POST_MAX of 2 MB.
+- New suites t/C8-server-validation.t, t/C9-lock-dir-optin.t and t/D0-helper-
+  revert.t, each verified to fail against the previous code.
+
+Documentation
+-------------
+
+- The device-table editor and bulk editor now POST url-encoded, not multipart.
+  CGI.pm's start_form defaults to multipart/form-data, which costs about 86
+  bytes of framing per field -- neither form has a file input, so that was pure
+  overhead against $CGI::POST_MAX. The same table is now 4-6x smaller (1000
+  collapsed devices: 196 KB -> 34 KB), raising the ceiling from roughly 10,600
+  to 55,000 collapsed devices. Upload forms stay multipart, as they must.
+- A device-table save that would exceed the request limit is now refused in the
+  browser, with the estimated and permitted sizes, instead of being discarded by
+  CGI.pm and losing every edit in the form. The estimate carries a 20% margin
+  (the browser picks its own multipart boundary, and non-ASCII values encode to
+  a variable number of bytes). Advisory only -- the server enforces
+  $CGI::POST_MAX regardless.
+- Over-sized uploads are now refused in the browser, before the request starts.
+  Once an upload is under way an over-sized one cannot be reported properly --
+  the server answers while the browser is still sending, the connection is
+  reset, and the browser shows its own error page whatever ErrorDocument is
+  configured (Apache bug 17722). The three upload forms now carry their cap as
+  data-max-upload and a file over it is refused with a styled message and no
+  upload. This is a convenience, not a control: the server re-checks every
+  upload and remains the only thing that decides. The caps live in one place
+  (UPLOAD_MAX_LOGO / _TEMPLATE / _HEX), used by both the forms and the handlers,
+  so the hint cannot drift from the rule.
+- INSTALL's web-server setup consolidated into one Step 7. The Apache
+  configuration was spread over Steps 4, 7, 7a, 7b and 7c and shown six times
+  over. It is now a single complete virtual host, given once in 2.4 syntax, with
+  the three lines that differ on 2.2 listed beside it -- plus TLS, the FastCGI
+  choice, the size limits, the plain-CGI variant and how to verify.
+- INSTALL's Apache snippets now cover both 2.2 and 2.4: the Step 4 sample used
+  Require all granted, which is 2.4-only and makes 2.2 fail to start with
+  Invalid command 'Require', and the mod_fcgid <Directory> block carried no
+  access directive at all, so a copied vhost answered 403 on either branch.
+- mod_fcgid deployments must raise FcgidMaxRequestLen (default 131072 = 128 KB)
+  to 2097152, matching $CGI::POST_MAX. Below that, mod_fcgid rejects an upload
+  before the script runs -- a bare 500, with exceeds MaxRequestLen in the error
+  log -- so a 100 KB logo or template fails and a 1 MB HEX capture can never
+  succeed. Documented in Step 7, in a callout beside the timeout requirements,
+  and in the verification checklist. Plain CGI is unaffected.
+
+- Audited against the source: the missing sudoers rule, per-distribution package
+  names for RHEL 9 / SLES 15 / Ubuntu, bcrypt (not $apr1$) password storage, the
+  DB-backed login throttle, a documented action that never existed, and assorted
+  stale names and values.
+- New Installing newer modules from CPAN section in INSTALL.md.
+- The application is not a single self-contained file: the logo and login icon
+  are inlined for load performance, while the stylesheet, fonts, favicon, help
+  tree and back.jpg are deployed under WEB_DIR. Document headers now read Perl
+  FCGI/CGI, and the prose no longer describes the app as plain-CGI-only.
+- Help menus list up to 15 files (was 10).
 
 2.04
 ====
@@ -168,9 +288,9 @@ Requires fetchconfig 9.71 or newer.
   entries were removed.
 - Minimum fetchconfig raised to 9.71 (was 9.69).
 - Reworded the "device table modified outside fetchconfig-web" editor warning
-  for clarity; the audit-log link text is now "audit log". The notice now also
-  shows the on-disk file owner and the table's last-written date/time (yyyy-mm-
-  dd / HH:MM:SS).
+  for clarity; the audit-log link text is now "audit log".
+- The notice now also shows the on-disk file owner and the table's last- written
+  date/time (yyyy-mm-dd / HH:MM:SS).
 
 2.01
 ====
@@ -259,8 +379,9 @@ Other
   (and its now-unused checkempty action); a 0-byte (empty) backup row is
   highlighted red instead. The site-wide Tools -> Empty backup cleanup is
   unaffected.
-- Ships favicon.ico. FastCGI deployment (FCGI optional). Every function now
-  carries a uniform header block.
+- Ships favicon.ico.
+- FastCGI deployment (FCGI optional).
+- Every function now carries a uniform header block.
 
 1.52
 ====
@@ -353,15 +474,17 @@ Other
   fetchconfig-web, Documentation fetchconfig, GNU GPL v3, Additional terms, and
   Privacy policy -- each static doc shown only if present in the help directory
   and opened in a new browser tab (the Help page itself opens in the same tab).
-  Help config split: HELP_DIR (filesystem dir, for the existence check) +
+- Help config split: HELP_DIR (filesystem dir, for the existence check) +
   HELP_FILE (filename) + HELP_BASE_URL (URL base, for the menu links), with the
-  old full-path HELP_FILE still accepted. Removed the obsolete "Fetchconfig
-  manual" topic from help.html. The internal help fallback is now a short notice
-  that help.html is missing from the web help directory and should be copied
-  from the source package, rather than a duplicate feature description.
+  old full-path HELP_FILE still accepted.
+- Removed the obsolete "Fetchconfig manual" topic from help.html.
+- The internal help fallback is now a short notice that help.html is missing
+  from the web help directory and should be copied from the source package,
+  rather than a duplicate feature description.
 - Audit log viewer: added a second First/Prev/Next/Last pager at the bottom
-  (left-aligned, like the other pages); both pagers stay in sync. Added the
-  floating Top / Bottom scroll buttons that the other pages have.
+  (left-aligned, like the other pages); both pagers stay in sync.
+- Audit log viewer: added the floating Top / Bottom scroll buttons that the
+  other pages have.
 - Email config: a gray hint after the "to" field notes that multiple recipients
   may be separated by ";".
 - Backup Now now has a wall-clock timeout (BACKUP_TIMEOUT, default 120s, 0
@@ -413,14 +536,15 @@ Other
   COPYRIGHT or the built-in default], installed fetchconfig.pl version, GPLv3
   note; OK/Esc/backdrop to close). The page footer also falls back to the built-
   in copyright when none is configured, instead of ending in a bare dash.
-- Report logo handling. The report_logo editor option is now a drop-down of the
+- Report logo handling: the report_logo editor option is now a drop-down of the
   image files (.png/.jpg/.gif, up to 25, case-sensitive) in the report_dir, with
-  a red warning if the directory holds more than 25. New Tools -> Upload report
-  logo page uploads a logo into the report_dir (<=100KB, PNG/JPEG/GIF verified
-  by magic bytes, safe case-preserved filename) and lists existing logos with a
-  Delete button and an inline base64 preview (the report directory is not web-
-  served, so previews are embedded as data: URIs). The stored value is the bare
-  filename.
+  a red warning if the directory holds more than 25. The stored value is the
+  bare filename.
+- New Tools -> Upload report logo page uploads a logo into the report_dir
+  (<=100KB, PNG/JPEG/GIF verified by magic bytes, safe case-preserved filename)
+  and lists existing logos with a Delete button and an inline base64 preview
+  (the report directory is not web-served, so previews are embedded as data:
+  URIs).
 - Fixed two edited-card round-trip bugs: a collapsed edited device no longer
   auto-expands after Preview -> Back to editor, and its red dot (and its edits)
   are no longer lost on the first or a repeated round-trip. The "Back to editor"
@@ -469,13 +593,15 @@ Other
   against a table that has since changed is refused instead of silently
   discarding the newer change (Gap C, Layers 1-2).
 - New INSTALL.md (rendered to INSTALL.html by render-doc.py): a step-by-step
-  installation and upgrade guide. render-doc.py: clearer usage errors (reversed
-  args / missing input now print a usage message and exit cleanly instead of a
-  traceback). render-doc.py now derives the page title/lede from the input
-  document so it renders both README.md and INSTALL.md. Corrected the Perl
-  requirements: Digest::MD5 and Time::HiRes listed; the phantom Digest::SHA /
-  MIME::Base64 requirements removed (neither is used -- MD5 is used deliberately
-  to avoid a Digest::SHA dependency on older Perls such as AIX).
+  installation and upgrade guide.
+- render-doc.py: clearer usage errors (reversed args / missing input now print a
+  usage message and exit cleanly instead of a traceback).
+- render-doc.py now derives the page title/lede from the input document so it
+  renders both README.md and INSTALL.md.
+- Corrected the Perl requirements: Digest::MD5 and Time::HiRes listed; the
+  phantom Digest::SHA / MIME::Base64 requirements removed (neither is used --
+  MD5 is used deliberately to avoid a Digest::SHA dependency on older Perls such
+  as AIX).
 - Concurrency hardening of device-table writes. The staleness token is now
   <hires-mtime>:<size>:<md5> (Time::HiRes::stat for sub-second mtimes on AIX
   JFS2 / Linux XFS, plus a content digest), so a same-second rewrite is
@@ -509,7 +635,8 @@ Other
   reported as a $alias rather than a path).
 - Editor: the green "Save changes without preview" button is now just "Save
   changes"; the Preview raw table page is view-only (its Save button removed --
-  use "Back to editor" to save). The Bulk edit editor keeps its own Save.
+  use "Back to editor" to save).
+- The Bulk edit editor keeps its own Save.
 - Fixed a severe editor bug: Preview raw table -> Back to editor could change a
   device's model (e.g. generic -> nexus-ssh) because the reconstructed record
   order no longer matched the on-disk table that the collapsed rows re-fetch
@@ -537,7 +664,7 @@ Other
   model drop-down, its live JS refresh, and the save-time validation.
 - Editor collapsed rows now show a Comment column after Site, and the device
   filter gains a searchable Site drop-down (alongside Device-ID and comment).
-  Fixed: collapsing a previously-expanded device left the row blank -- the
+- Fixed: collapsing a previously-expanded device left the row blank -- the
   summary line (ID/Model/Site/Comment) now stays and the card is hidden below
   it.
 - New config key HTTPS_ENABLED (0|1, default 0, in the misc section of
@@ -592,18 +719,22 @@ Other
   their back button "Restore device table". The copyright footer sticks to the
   bottom of short pages and follows the content on long pages.
 - Editor: "Cancel" is now "Reject all changes" (red) and reloads the table from
-  disk after a confirm. Preview shows only "Back to editor". Tools/User landing
-  pages prompt to pick from the menu; every tool sub-screen returns to its own
-  tool. Add-user / change-password errors return to that page with the message
-  above the form. Removed leftover back buttons (Sites, Check site assignment,
-  log/template viewers).
+  disk after a confirm.
+- Preview shows only "Back to editor".
+- Tools/User landing pages prompt to pick from the menu; every tool sub-screen
+  returns to its own tool.
+- Add-user / change-password errors return to that page with the message above
+  the form.
+- Removed leftover back buttons (Sites, Check site assignment, log/template
+  viewers).
 - The title bar now uses application-style drop-down menus (Devices, Setup
   devices, Tools, User); Status/Reports moved under Devices; the Setup page is
-  the read-only highlighted view (edit/bulk are menu entries). Each Tools and
-  User menu item is now its own single-function page (one page per tool / per
-  user action, no overview page, no back buttons). New Tools entry "Check site
-  assignment" lists devices with no site=. Edit device table and Bulk edit lost
-  their back button; the device list no longer nests a second scrollbar.
+  the read-only highlighted view (edit/bulk are menu entries).
+- Each Tools and User menu item is now its own single-function page (one page
+  per tool / per user action, no overview page, no back buttons).
+- New Tools entry "Check site assignment" lists devices with no site=.
+- Edit device table and Bulk edit lost their back button; the device list no
+  longer nests a second scrollbar.
 - site= is now a mandatory, non-deletable, auto-added device option rendered as
   a drop-down; saving a device with no site is blocked. For a site-limited user
   the requirement applies only to their own devices (others are preserved). The
@@ -614,12 +745,12 @@ Other
   only a user assignment blocked deletion); enforced in the UI and server-side.
 - Green section boxes now inset their content equally on the left and right
   (padding on the box, tables at full content width), so wide tables are no
-  longer flush/clipped on the right. The User page also uses the full-width
-  layout.
-- The User page Users table has a "Full Report" column (the download-full-report
-  right, with a grant/revoke toggle for site-limited users) between "Edit
+  longer flush/clipped on the right.
+- The User page also uses the full-width layout.
+- The User page Users table has a "Full Report" column (the download-full-
+  report right, with a grant/revoke toggle for site-limited users) between "Edit
   device" and "Sites"; the edit-right heading is shortened to "Edit device".
-  (Fixed the column so the granted state is actually shown.)
+- Fixed the "Full Report" column so the granted state is actually shown.
 - The Status page shows the site code as its first column; the Devices page
   shows it as the second column and adds a site filter drop-down (like the model
   filter), with a "(no site)" choice.
@@ -705,8 +836,8 @@ README.imageconvert).
   layout for the config/compare/log/backup views; editor, preview and bulk-edit
   action buttons moved to the top of the page.
 - Documentation restructured into parts with a table of contents and quick
-  start. Minimum required fetchconfig version is now 9.65; fetchconfig-web is
-  1.15.
+  start.
+- Minimum required fetchconfig version is now 9.65; fetchconfig-web is 1.15.
 
 1.12
 ====
@@ -716,29 +847,29 @@ user/pass/enable, optional transport=ssh|telnet|auto, adds an enum_transport
 editor field and an AudioCodes-syntax highlighter) and "nexus-ssh" (Cisco
 Nexus / NX-OS over SSH, with a dedicated NX-OS highlighter). + Tools: run the
 device scans (without-backups / empty / suffix) in parallel,   controlled by
-MAX_PARALLEL_SCAN (1..5, default 1); the progress line shows how   many scan
-processes are active. Fixed intermittent scan failures by rewriting   session
-files atomically (temp file + rename) and hardening child-process I/O   (EINTR
-retry, checked waitpid, ASCII-safe JSON); each failed device now shows   why. +
+MAX_PARALLEL_SCAN (1..5, default 1); the progress line shows   how many scan
+processes are active. + Fixed intermittent scan failures by rewriting session
+files atomically (temp   file + rename) and hardening child-process I/O (EINTR
+retry, checked   waitpid, ASCII-safe JSON); each failed device now shows why. +
 Tools: new "Empty Directory Cleanup" (fetchconfig.pl -e / -e -D) and "Check
 devices for consistent backup suffixes" (fetchconfig.pl -s), plus a per-device
 "Check backup suffixes" button; and, under Restore device table, "Delete
 backups older than N days" (always keeps the newest). + Login page shows a full-
 page backdrop image (IMAGE_BASE_URL/back.jpg) behind   the title bar, login box
-and bottom-centred footer. New config keys   FONT_BASE_URL and IMAGE_BASE_URL
-(URL-path bases for fonts and images).
+and bottom-centred footer. + New config keys FONT_BASE_URL and IMAGE_BASE_URL
+(URL-path bases for fonts   and images).
 - Config: the fetchconfig executable is now two keys -- FETCHCONFIG_PATH
   (install dir, also used to find Constants.pm) and FETCHCONFIG_BIN (executable
-  name); the old single full-path form is no longer accepted. The page footer
-  shows the installed fetchconfig version, and a warning banner appears if it is
-  older than the required minimum or cannot be determined.
+  name); the old single full-path form is no longer accepted.
+- The page footer shows the installed fetchconfig version, and a warning banner
+  appears if it is older than the required minimum or cannot be determined.
 + Device-table editor: numeric time fields show their unit (s / ms); the Email
-tab gained optional "port" and "tls" (off|starttls|ssl) options; the   aruba-cx-
-ssh model gained optional prompt_settle_ms. Fixed: coriant-8600 no   longer
+tab gained optional "port" and "tls" (off|starttls|ssl) options; the aruba-
+cx-ssh model gained optional prompt_settle_ms. + Fixed: coriant-8600 no longer
 wrongly requires an "enable" password. + Backup-filename parsing tolerates
 fetchconfig's filename_append_suffix (the   backup list dates/times stay correct
-and "Download latest configuration"   keeps a dotted suffix, else .cfg). Empty-
-backup check also recognises   fetchconfig's newer "N zero-byte backup(s)"
+and "Download latest configuration"   keeps a dotted suffix, else .cfg). +
+Empty-backup check also recognises fetchconfig's newer "N zero-byte   backup(s)"
 message.
 - Security hardening: device ids/usernames reject a leading "-" (central
   valid_id, so an id can't be read as a CLI option); unsalted {SHA} password
@@ -746,11 +877,11 @@ message.
   uniform 2s delay on failed logins; Backup-Now cleartext temp file auto-removed
   on exit; SESSION_TTL is now an idle timeout; numeric/boolean config keys
   validated with fallback to defaults.
-+ Licensed under the GNU GPL v3+ (headers in both programs, LICENSE file, README
-section). render-doc.py runs on Python 3 and 2.7. Documentation reworked
-(added a "How fetchconfig.pl is invoked" reference and a security overview;
-wider HTML manual). APP_VERSION is a built-in constant, overridable by the
-config.
++ Licensed under the GNU GPL v3+ (headers in both programs, LICENSE file,
+README section). + render-doc.py runs on Python 3 and 2.7. + Documentation
+reworked (added a "How fetchconfig.pl is invoked" reference   and a security
+overview; wider HTML manual). + APP_VERSION is a built-in constant, overridable
+by the config.
 
 1.11
 ====

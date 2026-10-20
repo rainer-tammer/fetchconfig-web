@@ -35,7 +35,7 @@ use strict;
 use warnings;
 use Getopt::Long qw(:config no_ignore_case bundling);
 
-use constant APP_VERSION_INTERNAL => '2.06';
+use constant APP_VERSION_INTERNAL => '2.07';
 use constant DEFAULT_COPYRIGHT    => 'Copyright (c) 2026, Rainer Tammer';
 
 my $CONFIG_FILE = '/etc/fetchconfig-web.cfg';

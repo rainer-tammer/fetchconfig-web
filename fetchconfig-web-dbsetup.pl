@@ -313,6 +313,7 @@ if ($table_exists) {
             admin_function       BOOLEAN  NOT NULL DEFAULT FALSE,
             download_full_report BOOLEAN  NOT NULL DEFAULT FALSE,
             download_full_config BOOLEAN  NOT NULL DEFAULT FALSE,
+            read_debug           BOOLEAN  NOT NULL DEFAULT FALSE,
             email                TEXT
         )
     }) or die_clean("CREATE TABLE failed: " . $dbh->errstr);
@@ -679,7 +680,7 @@ HTTPS_ENABLED           = 0
 SHOW_RENDER_TIME        = 0
 # APP_VERSION overrides the version shown in the footer; normally leave it
 # commented out so the application reports its own version.
-#APP_VERSION            = 2.06
+#APP_VERSION            = 2.07
 COPYRIGHT               = 2026 (c) Rainer Tammer
 
 # --- PostgreSQL user database ---

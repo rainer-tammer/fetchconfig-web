@@ -87,12 +87,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.06';
+use constant APP_VERSION => '2.08';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.06';
+use constant APP_VERSION_INTERNAL => '2.08';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -110,6 +110,41 @@ use constant MIN_FETCHCONFIG_VERSION => '9.72';
 # menu). HELP_TITLE_BYTES caps how much of each file is read to find <title>.
 use constant HELP_MAX_FILES   => 15;
 use constant HELP_TITLE_BYTES => 1024;
+
+# --- Device-table editor form limits (see reconstruct_records_from_form) ---
+# Upper bound on the index of a repeatable option field ("<key>__<n>"). The
+# index arrives in the submitted field NAME and is used as an array subscript,
+# so it must be bounded before use or one crafted field pre-extends a Perl
+# array to that length. The editor emits 1000 + a small counter, so this is
+# far above anything real. REC_MAX is the matching bound on rec_count.
+# Upload byte caps. The SERVER enforces these (see do_upload_logo,
+# do_upload_template, do_upload_hex); they are also handed to the browser as
+# data-max-upload so an over-sized file is refused before the request starts --
+# a convenience only, never the control. Keep the two in step.
+use constant UPLOAD_MAX_LOGO     => 100 * 1024;
+use constant UPLOAD_MAX_TEMPLATE => 100 * 1024;
+use constant UPLOAD_MAX_HEX      => 1024 * 1024;
+
+use constant OPT_REPEAT_MAX_INDEX => 10000;
+use constant REC_MAX              => 10000;
+
+# Device debug logs (<repository>/<dev-id>.debug, written by fetchconfig with
+# debug=on). Highlighted markup runs roughly 5x the source bytes, so what the
+# viewer renders has to be bounded independently of how large the file grows:
+#
+#   < 2 MB            rendered in full
+#   2 MB .. 16 MB     first 1 MB + last 1 MB, with a cut marker between them
+#   > 16 MB           not rendered, and not downloadable either
+#
+# The effect is that the viewer never renders more than 2 MB of source in any
+# band, so the worst case is uniform (~10 MB of markup) however big the file
+# is. DEBUG_MAX_BYTES is a sanity limit rather than a performance one -- the
+# chunked reads would keep a 500 MB file just as cheap -- but a log that size
+# means something is badly wrong and its head and tail will not diagnose it.
+# It is decided from lstat alone, so an oversized file costs no I/O at all.
+use constant DEBUG_VIEW_FULL_MAX => 2 * 1024 * 1024;
+use constant DEBUG_VIEW_CHUNK    => 1 * 1024 * 1024;
+use constant DEBUG_MAX_BYTES     => 16 * 1024 * 1024;
 
 # --- Login throttle (see login_record_failure / login_is_throttled) ---
 use constant LOGIN_MAX_FAILURES  => 5;     # failures in the window before throttling
@@ -1249,6 +1284,28 @@ sub handle_request {
         return;
     }
 
+    # Request body over $CGI::POST_MAX. CGI.pm discards the entire body and
+    # records the condition in cgi_error(); every parameter is gone, including
+    # the CSRF token, so the request cannot be dispatched whatever it was. The
+    # script used to ignore this and carry on with an empty parameter list,
+    # which surfaced as a misleading "No file was selected." with HTTP 200.
+    # Report it honestly instead, with the status the condition deserves.
+    # can(): CGI.pm has always provided cgi_error, but the request object is
+    # whatever the caller hands handle_request() -- CGI, CGI::Fast or a test
+    # double -- and this must not be the thing that makes a request die.
+    if (my $cgi_err = ($cgi->can('cgi_error') ? $cgi->cgi_error : undef)) {
+        my $limit = $CGI::POST_MAX;
+        audit(action => 'error', object_type => 'request',
+              detail => "request rejected by CGI.pm: $cgi_err");
+        print std_header(-type => 'text/plain', -status => $cgi_err);
+        print "The request was rejected before it could be processed.\n\n"
+            . "$cgi_err\n\n";
+        print "The upload limit is " . int($limit / 1024) . " KB per request "
+            . "(\$CGI::POST_MAX). Nothing was saved or changed.\n"
+            if defined $limit && $limit > 0;
+        return;
+    }
+
     if (!-d $SESSION_DIR) {
         make_path($SESSION_DIR, { mode => 0700 }) or do {
             my $why = "$!";
@@ -1307,8 +1364,6 @@ my %STATE_CHANGING = map { $_ => 1 } qw(
   edit_site
   delete_site
   set_user_sites
-  set_download_full_report
-  set_download_full_config
   set_email
   user_save
   note_save
@@ -1317,6 +1372,8 @@ my %STATE_CHANGING = map { $_ => 1 } qw(
   reset_do
   upload_logo
   delete_logo
+  delete_debug
+  delete_all_debug
 );
 
 ################################################################################
@@ -1453,10 +1510,6 @@ sub main {
             show_user_sites_form($user);
         } elsif ($action eq 'set_user_sites') {
             do_set_user_sites($user);
-        } elsif ($action eq 'set_download_full_report') {
-            do_set_download_full_report($user);
-        } elsif ($action eq 'set_download_full_config') {
-            do_set_download_full_config($user);
         } elsif ($action eq 'set_email') {
             do_set_email($user);
         } elsif ($action eq 'add_user') {
@@ -1483,6 +1536,16 @@ sub main {
             do_prune_reports($user);
         } elsif ($action eq 'status') {
             show_status_page($user);
+        } elsif ($action eq 'view_debug') {
+            show_debug_log($user);
+        } elsif ($action eq 'download_debug') {
+            do_download_debug($user);
+        } elsif ($action eq 'delete_debug') {
+            do_delete_debug($user);
+        } elsif ($action eq 'tool_debug') {
+            show_tool_debug($user);
+        } elsif ($action eq 'delete_all_debug') {
+            do_delete_all_debug($user);
         } elsif ($action eq 'tools') {
             show_tools($user);
         } elsif ($action eq 'tool_orphan') {
@@ -2000,7 +2063,7 @@ sub db_get_user {
     my ($dbh, $username) = @_;
     my $row = $dbh->selectrow_hashref(
         'SELECT username, pass_hash, edit_device_table, admin_function, '
-      . 'download_full_report, download_full_config, email FROM users WHERE username = ?',
+      . 'download_full_report, download_full_config, read_debug, email FROM users WHERE username = ?',
         undef, $username);
     return $row;
 }
@@ -2449,7 +2512,7 @@ sub reset_token_create {
 ################################################################################
 sub reset_token_user {
     my ($dbh, $tok) = @_;
-    return undef unless $dbh && defined $tok && $tok =~ /^[0-9a-f]{32}$/;
+    return undef unless $dbh && defined $tok && $tok =~ /^[0-9a-f]{32}\z/;
     my ($u) = eval {
         $dbh->selectrow_array(
             'SELECT username FROM password_resets '
@@ -2505,7 +2568,7 @@ sub db_all_users {
     my ($dbh) = @_;
     my $rows = $dbh->selectall_arrayref(
         'SELECT username, pass_hash, edit_device_table, admin_function, '
-      . 'download_full_report, download_full_config, email FROM users ORDER BY username',
+      . 'download_full_report, download_full_config, read_debug, email FROM users ORDER BY username',
         { Slice => {} });
     return $rows || [];
 }
@@ -2575,13 +2638,14 @@ sub db_set_password {
 #   $dbh        database handle
 #   $username   target user
 #   $column     one of: edit_device_table, admin_function,
-#               download_full_report, download_full_config
+#               download_full_report, download_full_config, read_debug
 #   $value      truthy -> 1, else 0
 ################################################################################
 sub db_set_user_flag {
     my ($dbh, $username, $column, $value) = @_;
     my %ALLOWED = map { $_ => 1 }
-        qw(edit_device_table admin_function download_full_report download_full_config);
+        qw(edit_device_table admin_function download_full_report download_full_config
+           read_debug);
     return (0, "invalid flag column: $column") unless $ALLOWED{$column};
     my $ok = $dbh->do("UPDATE users SET $column = ? WHERE username = ?",
         undef, $value ? 1 : 0, $username);
@@ -2967,6 +3031,61 @@ sub user_may_download_full_report {
 #   $dbh
 #   $username
 ################################################################################
+################################################################################
+# user_may_read_debug
+#
+# True if $username may VIEW device debug logs. Downloading and deleting them
+# are administrator-only and do not go through here.
+#
+# NOTE FOR ANYONE TIDYING THIS UP: the shape deliberately differs from its
+# three siblings (user_may_edit_table, user_may_download_full_report,
+# user_may_download_full_config), which all begin with
+#
+#     return 1 if user_is_unrestricted($dbh, $username);
+#
+# user_is_unrestricted() means "not limited to any site" -- NOT "admin" -- so
+# that line grants the right to every non-admin account that simply has no
+# site restriction. That is acceptable for a masked config view. It is not
+# acceptable here: a debug log is a full session transcript, and on a model
+# that does not suspend its session log around password sends it contains the
+# device password in clear text, which no output masking can reach (masking
+# matches key=value; a password in a hex dump is split across 16-byte lines as
+# hex AND as ASCII). So this right is admin OR the explicit flag, never
+# implied. Do not "align" it with the others.
+#
+# Which devices they then see is a separate question, answered as usual by
+# device_accessible() / user_site_access().
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
+sub user_may_read_debug {
+    my ($dbh, $username) = @_;
+    return 1 if user_is_admin($dbh, $username);
+    my $u = db_get_user($dbh, $username);
+    return ($u && $u->{read_debug}) ? 1 : 0;
+}
+
+################################################################################
+# user_may_view_debug
+#
+# user_may_read_debug() with its own database handle, for the handlers and the
+# status page (which have no $dbh in hand). Mirrors user_may_use_tools().
+#
+# Parameters:
+#   $user
+################################################################################
+sub user_may_view_debug {
+    my ($user) = @_;
+    return 0 unless defined $user;
+    return 1 if $user eq $PROTECTED_USER;
+    my $dbh = db_connect() or return 0;
+    my $ok = user_may_read_debug($dbh, $user);
+    $dbh->disconnect;
+    return $ok;
+}
+
 sub user_may_download_full_config {
     my ($dbh, $username) = @_;
     return 1 if user_is_unrestricted($dbh, $username);
@@ -3497,7 +3616,7 @@ sub create_session {
 ################################################################################
 sub load_session {
     my ($sid) = @_;
-    return () unless defined $sid && $sid =~ /^[0-9a-f]{48}$/;
+    return () unless defined $sid && $sid =~ /^[0-9a-f]{48}\z/;
     my $path = "$SESSION_DIR/$sid";
     return () unless -f $path;
     open(my $fh, '<', $path) or return ();
@@ -3566,7 +3685,7 @@ sub load_session {
 ################################################################################
 sub destroy_session {
     my ($sid) = @_;
-    return unless defined $sid && $sid =~ /^[0-9a-f]{48}$/;
+    return unless defined $sid && $sid =~ /^[0-9a-f]{48}\z/;
     unlink("$SESSION_DIR/$sid");
 }
 
@@ -3599,7 +3718,7 @@ sub sweep_sessions {
     my $margin = $SESSION_TTL;
     $margin = $SESSION_MAX_LIFETIME if $SESSION_MAX_LIFETIME > $margin;
     opendir(my $dh, $SESSION_DIR) or return;
-    my @ids = grep { /^[0-9a-f]{48}$/ } readdir($dh);   # session files only
+    my @ids = grep { /^[0-9a-f]{48}\z/ } readdir($dh);   # session files only
     closedir($dh);
     for my $id (@ids) {
         my $path = "$SESSION_DIR/$id";
@@ -3667,7 +3786,7 @@ sub invalidate_user_sessions {
     return unless defined $username && $username ne '';
     return unless defined $SESSION_DIR && -d $SESSION_DIR;
     opendir(my $dh, $SESSION_DIR) or return;
-    my @ids = grep { /^[0-9a-f]{48}$/ } readdir($dh);
+    my @ids = grep { /^[0-9a-f]{48}\z/ } readdir($dh);
     closedir($dh);
     for my $id (@ids) {
         next if defined $keep_sid && $id eq $keep_sid;
@@ -4667,6 +4786,847 @@ JS
 }
 
 ################################################################################
+# debug_helper_available
+#
+# True when the privileged helper can be used for debug logs.
+#
+# WHY THIS IS NEEDED AT ALL. fetchconfig runs as root (cron/sudo) and creates
+# <repository>/<dev-id>.debug mode 0600 root-owned -- correctly, since the file
+# can contain device credentials. The web-server user therefore cannot open it,
+# and cannot unlink it either, because unlink needs write permission on the
+# root-owned repository DIRECTORY, not on the file. stat() still succeeds (it
+# only needs +x on the directory), so the file is visible but unusable.
+#
+# The helper is the same one the template editor already uses, so an existing
+# installation needs NO new sudoers rule -- only the helper redeployed.
+#
+# Parameters: none
+################################################################################
+sub debug_helper_available {
+    return ($TEMPLATE_HELPER ne '' && $USE_SUDO_FOR_BACKUP_NOW) ? 1 : 0;
+}
+
+################################################################################
+# run_privileged
+#
+# Run a command and capture stdout and stderr SEPARATELY. run_command_capture()
+# merges them, which is fine for a transcript but destroys a binary payload:
+# one sudo warning in the middle of a debug log would corrupt the file content.
+#
+# Same open3 + IO::Select shape as run_fetchconfig(), for the same reason --
+# reading one stream to completion while the other fills its pipe deadlocks.
+#
+# Returns ($stdout, $stderr, $status, $fork_err).
+#
+# Parameters:
+#   @cmd
+################################################################################
+sub run_privileged {
+    my (@cmd) = @_;
+    my ($stdin, $stdout, $stderr);
+    $stderr = gensym();
+    my $pid = eval { open3($stdin, $stdout, $stderr, @cmd) };
+    return (undef, undef, undef, "cannot run $cmd[0]: $@") if !$pid;
+    close($stdin) if $stdin;
+    binmode($stdout);
+
+    my $sel = IO::Select->new($stdout, $stderr);
+    my %buf = ($stdout => '', $stderr => '');
+    while ($sel->count) {
+        for my $fh ($sel->can_read) {
+            my $chunk;
+            my $n = sysread($fh, $chunk, 65536);
+            if (!defined $n) {
+                next if $! == Errno::EINTR();
+                $sel->remove($fh); close($fh);
+            } elsif ($n == 0) {
+                $sel->remove($fh); close($fh);
+            } else {
+                $buf{$fh} .= $chunk;
+            }
+        }
+    }
+    my $reaped = waitpid($pid, 0);
+    my $raw    = $?;
+    my $status = ($reaped == $pid) ? ($raw >> 8) : 0;
+    return ($buf{$stdout}, $buf{$stderr}, $status, undef);
+}
+
+################################################################################
+# debug_log_window
+#
+# Read one byte window of a .debug file: ($bytes, $err). $length undef reads
+# to end of file.
+#
+# A direct open is tried first and is what happens on a normal installation.
+# Only if that fails do we go through the privileged helper -- fetchconfig
+# creates these files as root, mode 0600. The helper takes the same window, so
+# reading the HEAD of a very large log does not pull the whole file through
+# the pipe just to discard the rest.
+#
+# Parameters:
+#   $path
+#   $offset
+#   $length   undef => to end of file
+################################################################################
+sub debug_log_window {
+    my ($path, $offset, $length) = @_;
+
+    if (open(my $fh, '<', $path)) {
+        binmode($fh);
+        seek($fh, $offset, 0) if $offset;
+        my $raw = '';
+        if (defined $length) {
+            read($fh, $raw, $length);
+        } else {
+            $raw = do { local $/; <$fh> };
+        }
+        close($fh);
+        return (defined $raw ? $raw : '', undef);
+    }
+    unless (debug_helper_available()) {
+        return (undef, 'not readable by the web server user, and no '
+                       . 'TEMPLATE_HELPER is configured');
+    }
+    my ($out, $err, $status, $fork_err) =
+        run_privileged($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'read-debug', $path,
+                       ($offset || defined $length ? ($offset) : ()),
+                       (defined $length ? ($length) : ()));
+    return (undef, $fork_err) if $fork_err;
+    if ($status != 0) {
+        $err = '' unless defined $err;
+        $err =~ s/\s+\z//;
+        return (undef, 'privileged read failed'
+                       . ($err ne '' ? ": $err" : " (exit $status)"));
+    }
+    return (defined $out ? $out : '', undef);
+}
+
+################################################################################
+# debug_log_read
+#
+# Read a .debug file for display. Returns ($bytes, $cut, $err), where $cut is
+# true when the content is the head and tail of a larger file with the middle
+# left out. The caller is responsible for not calling this at all above
+# DEBUG_MAX_BYTES.
+#
+# Bytes are read with binmode: this is raw device traffic, not text, and the
+# ASCII gutter is Latin-1 (see _dbg_esc).
+#
+# CHUNK BOUNDARIES ARE CUT ON LINE BREAKS. The head drops its trailing partial
+# line and the tail drops its leading one. This is not cosmetic: the hex
+# parser is positional, so half a dump line would be sliced at the wrong
+# column and render with a garbage ASCII gutter. A chunk with no newline in it
+# at all is not a real debug log; it is kept whole rather than discarded, so
+# the viewer shows one long line instead of silently showing nothing.
+#
+# Parameters:
+#   $path
+#   $size
+################################################################################
+sub debug_log_read {
+    my ($path, $size) = @_;
+    $size = 0 unless defined $size;
+
+    if ($size <= DEBUG_VIEW_FULL_MAX) {
+        my ($raw, $err) = debug_log_window($path, 0, undef);
+        return (undef, 0, $err) unless defined $raw;
+        return ($raw, 0, undef);
+    }
+
+    my ($head, $herr) = debug_log_window($path, 0, DEBUG_VIEW_CHUNK);
+    return (undef, 0, $herr) unless defined $head;
+    my ($tail, $terr) = debug_log_window($path, $size - DEBUG_VIEW_CHUNK,
+                                         DEBUG_VIEW_CHUNK);
+    return (undef, 0, $terr) unless defined $tail;
+
+    # Head: keep everything up to and including the LAST newline.
+    if ((my $i = rindex($head, "\n")) >= 0) { $head = substr($head, 0, $i + 1); }
+    # Tail: drop everything up to and including the FIRST newline.
+    if ((my $j = index($tail, "\n")) >= 0)  { $tail = substr($tail, $j + 1); }
+
+    return ([$head, $tail], 1, undef);
+}
+
+################################################################################
+# debug_size_note
+#
+# The one explanation of the viewer's size bands, shown whenever something is
+# not displayed in full. Kept in one place so the numbers in the text cannot
+# drift away from the constants that enforce them.
+#
+# Parameters: none
+################################################################################
+sub debug_size_note {
+    my ($full, $chunk, $max) =
+        (_dbg_mb(DEBUG_VIEW_FULL_MAX), _dbg_mb(DEBUG_VIEW_CHUNK), _dbg_mb(DEBUG_MAX_BYTES));
+    return qq{<p class="cfg-note">Note: Log files smaller than $full are displayed }
+         . qq{in full. For log files between $full and $max, only the first $chunk }
+         . qq{and the last $chunk are displayed. Log files larger than $max cannot }
+         . qq{be processed or downloaded.</p>\n};
+}
+
+################################################################################
+# _dbg_mb
+#
+# A whole-megabyte limit as "2 MB". human_size() would render the same value
+# as "2.0 MB", which reads badly in a sentence; these constants are always
+# whole megabytes, so the decimal carries no information.
+#
+# Parameters:
+#   $bytes
+################################################################################
+sub _dbg_mb {
+    my ($bytes) = @_;
+    return sprintf('%d MB', $bytes / (1024 * 1024));
+}
+
+################################################################################
+# debug_cut_marker
+#
+# The separator placed between the head and the tail of a cut log.
+#
+# It carries ONLY dbg-cut -- never a direction class and never dbg-ssh -- so
+# Sent only, Received only and SSH log hidden all leave it visible. A reader
+# must never be able to filter away the fact that content is missing.
+#
+# Parameters:
+#   $view
+################################################################################
+sub debug_cut_marker {
+    my ($view) = @_;
+    my $text = '----- content cut because of a '
+             . _dbg_mb(DEBUG_VIEW_FULL_MAX) . ' viewing size limit -----';
+    return esc($text) . "\n" if $view eq 'plain';
+    return qq{<span class="dbg-l dbg-cut">} . esc($text) . qq{\n</span>};
+}
+
+################################################################################
+# show_debug_log
+#
+# The admin-only device debug log viewer (?action=view_debug&dev=...).
+#
+# WHAT THIS EXPOSES. fetchconfig writes <repository>/<dev-id>.debug when the
+# device has debug=on. It is a full session transcript: every byte sent to and
+# read from the device. Models that log a session suspend their logs around
+# password sends via Abstract::print_secret(), so a correct model leaves
+# "# [secret sent - not logged]" where the password was. A model that does NOT
+# use print_secret writes the password in clear text, and no amount of output
+# filtering here can find it: mask_secrets() matches key=value shapes, while a
+# password in a hex dump exists as hex bytes AND in the ASCII gutter, split
+# across 16-byte boundaries.
+#
+# The controls are therefore (a) this admin-only gate, repeated server-side
+# because main() has no central authorization gate, and (b) fetchconfig doing
+# the right thing in the model. The page says so, because a fetchconfig-web
+# admin is not necessarily entitled to device credentials.
+#
+# GET, read-only, no CSRF. The view is audited: reading device credentials --
+# even accidentally -- is worth a record.
+#
+# Parameters:
+#   $user
+################################################################################
+sub show_debug_log {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+
+    # Viewing needs the read_debug right (administrators have it implicitly).
+    # Downloading and deleting, further down this page, need admin.
+    unless (user_may_view_debug($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to view device debug logs.</p>\n};
+        print page_foot();
+        return;
+    }
+    my $is_admin = user_may_use_tools($user);
+
+    my $dev = $cgi->param('dev');
+    $dev = '' unless defined $dev;
+    unless (valid_id($dev)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">Invalid device id.</p>\n};
+        print page_foot();
+        return;
+    }
+    # Redundant for a full admin, correct if the gate above is ever relaxed
+    # to a site-scoped role.
+    unless (device_accessible($user, $dev)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">Device not found, or not accessible.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    my $path = device_debug_file($dev);
+    my @st   = defined $path ? lstat($path) : ();
+    print page_head("Debug log: $dev", $user, 'full');
+    # Return to the page this was opened from. Checked against a fixed set,
+    # never used to build a URL: "from" is request input.
+    my $from = $cgi->param('from');
+    $from = '' unless defined $from;
+    my ($back_act, $back_lbl) = ($from eq 'tool')
+        ? ('tool_debug', 'Device debug logs')
+        : ('status',     'Device backup status');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=' . $back_act) . qq{">&larr; }
+        . esc($back_lbl) . qq{</a></p>\n};
+
+    unless (@st && -f _) {
+        print qq{<div class="tool-section">\n}
+            . qq{<p>No debug log for <code>} . esc($dev) . qq{</code>.</p>\n}
+            . qq{<p class="muted">fetchconfig writes <code>}
+            . esc($dev) . qq{.debug</code> into the device's repository only when the }
+            . qq{device has <code>debug=on</code>. The file is rewritten on every run.</p>\n}
+            . qq{</div>\n};
+        print page_foot();
+        return;
+    }
+    my ($size, $mtime) = ($st[7], $st[9]);
+
+    my $view = $cgi->param('view');
+    $view = 'hex' unless defined $view && $view =~ /^(?:hex|plain|transcript)\z/;
+
+    # Over the ceiling nothing is read at all -- the decision comes from the
+    # lstat above, so an oversized file costs no I/O. Delete still works, and
+    # is the only thing that does, so say so to whoever can use it.
+    if ($size > DEBUG_MAX_BYTES) {
+        audit(action => 'view_debug', object_type => 'device', object_id => $dev,
+              detail => "debug log too large to display ($size bytes)");
+        print qq{<div class="tool-section">\n};
+        print qq{<h2 class="tool-section-title">Debug log: } . esc($dev) . qq{</h2>\n};
+        print qq{<p class="error">This debug log is } . esc(human_size($size))
+            . qq{ and cannot be displayed or downloaded.</p>\n};
+        print debug_size_note();
+        # Delete is the only action left on a file this size, so offer it here
+        # rather than sending the admin back to the Tools page to find it.
+        if ($is_admin) {
+            print qq{<p class="muted">It can still be deleted.</p>\n};
+            print qq{<form method="POST" action="} . esc(script_url()) . qq{" }
+                . qq{data-confirm="Delete the debug log for } . esc($dev)
+                . qq{? This cannot be undone." data-confirm-danger="y">}
+                . qq{<input type="hidden" name="action" value="delete_debug">}
+                . qq{<input type="hidden" name="dev" value="} . esc($dev) . qq{">}
+                . qq{<input type="hidden" name="from" value="}
+                . esc($from eq 'tool' ? 'tool' : 'status') . qq{">}
+                . csrf_field()
+                . qq{<p><button type="submit" class="btn btn-danger">Delete</button></p>}
+                . qq{</form>\n};
+        }
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    my ($raw, $cut, $rderr) = debug_log_read($path, $size);
+    unless (defined $raw) {
+        # A permission failure here is a PREDICTABLE deployment state, not an
+        # internal error, so it gets a specific, actionable message rather than
+        # the generic one. The errno itself still stays off the page.
+        audit(action => 'view_debug', object_type => 'device', object_id => $dev,
+              detail => 'debug log unreadable: ' . (defined $rderr ? $rderr : "$!"));
+        print qq{<p class="error">The debug log could not be read.</p>\n};
+        unless (debug_helper_available()) {
+            print qq{<p class="cfg-note">fetchconfig creates }
+                . qq{<code>&lt;device-id&gt;.debug</code> as <code>root</code> with mode }
+                . qq{<code>0600</code>, so the web-server user cannot open it. Either set }
+                . qq{<code>TEMPLATE_HELPER</code> in <code>fetchconfig-web.cfg</code> (the }
+                . qq{same privileged helper the template editor uses &mdash; no new sudoers }
+                . qq{rule is needed), or make the repository readable for the web-server }
+                . qq{user.</p>\n};
+        }
+        print page_foot();
+        return;
+    }
+
+    audit(action => 'view_debug', object_type => 'device', object_id => $dev,
+          detail => "viewed debug log ($size bytes, $view view)");
+
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Debug log: } . esc($dev) . qq{</h2>\n};
+    print qq{<p class="cfg-note dbg-warn"><strong>This file can contain device }
+        . qq{credentials.</strong> It is a full session transcript. Secrets are kept }
+        . qq{out of it by fetchconfig, not by this page &mdash; a model that does not }
+        . qq{use <code>print_secret()</code> writes the password in clear text, and }
+        . qq{output masking cannot find a password inside a hex dump.</p>\n};
+
+    # View selector: a GET per view. Rendering all three into one page would
+    # triple the markup for no benefit; the direction filter below is the one
+    # that has to be instant, and it is pure CSS.
+    my $vurl = sub {
+        my ($v) = @_;
+        return esc(script_url() . '?action=view_debug&dev=' . CGI::escape($dev)
+                   . '&view=' . $v);
+    };
+    my $vbtn = sub {
+        my ($v, $label) = @_;
+        my $on = ($view eq $v) ? ' on' : '';
+        return qq{<a class="seg-btn$on" href="} . $vurl->($v) . qq{">} . esc($label) . qq{</a>};
+    };
+
+    print qq{<div class="dbg-bar">\n};
+    if ($view ne 'plain') {
+        print qq{<span class="seg" id="dbg-dir">}
+            . qq{<button type="button" class="seg-btn on" data-dir="both">Both</button>}
+            . qq{<button type="button" class="seg-btn" data-dir="tx">Sent only</button>}
+            . qq{<button type="button" class="seg-btn" data-dir="rx">Received only</button>}
+            . qq{</span>\n};
+        # SSH client chatter is hidden by DEFAULT: on an ssh device it is the
+        # bulk of the file and none of it is device traffic. The "#" markers
+        # stay visible either way, so the structure of the session is still
+        # readable with it off.
+        print qq{<span class="seg" id="dbg-ssh">}
+            . qq{<button type="button" class="seg-btn on" data-ssh="hide">SSH log hidden</button>}
+            . qq{<button type="button" class="seg-btn" data-ssh="show">SSH log shown</button>}
+            . qq{</span>\n};
+    }
+    print qq{<span class="seg">}
+        . $vbtn->('hex',        'Hex')
+        . $vbtn->('plain',      'Hex, no highlighting')
+        . $vbtn->('transcript', 'Transcript')
+        . qq{</span>\n};
+    print qq{<span class="dbg-spacer"></span>\n};
+    print qq{<span class="dbg-meta">} . esc(human_size($size)) . qq{ &middot; }
+        . esc(fmt_mtime($mtime)) . qq{</span>\n};
+    # Download and Delete are administrator-only and are simply not rendered
+    # for a read_debug holder: nothing to POST, nothing to explain away.
+    if ($is_admin) {
+        if ($size > DEBUG_MAX_BYTES) {
+            print qq{<button type="button" class="btn btn-small btn-gray" disabled }
+                . qq{title="} . esc(human_size($size) . ' - over the '
+                                    . _dbg_mb(DEBUG_MAX_BYTES) . ' limit')
+                . qq{">Download</button>\n};
+        } else {
+            print qq{<a class="btn btn-small" href="}
+                . esc(script_url() . '?action=download_debug&dev=' . CGI::escape($dev))
+                . qq{">Download</a>\n};
+        }
+        print qq{<form method="POST" action="} . esc(script_url()) . qq{" class="dbg-del-form" }
+            . qq{data-confirm="Delete the debug log for } . esc($dev)
+            . qq{? This cannot be undone." data-confirm-danger="y">}
+            . qq{<input type="hidden" name="action" value="delete_debug">}
+            . qq{<input type="hidden" name="dev" value="} . esc($dev) . qq{">}
+            . qq{<input type="hidden" name="from" value="} . esc($from eq 'tool' ? 'tool' : 'status') . qq{">}
+            . csrf_field()
+            . qq{<button type="submit" class="btn btn-small btn-danger">Delete</button>}
+            . qq{</form>\n};
+    }
+    print qq{</div>\n};
+
+    print debug_size_note() if $size > DEBUG_VIEW_FULL_MAX;
+
+    # When the file was cut, $raw is [head, tail]. Each piece is rendered
+    # INDEPENDENTLY and the marker is concatenated between them: the marker is
+    # composed, never parsed, so no log line can spoof it and no new line
+    # shape reaches the parser. Direction and turn state reset at the cut,
+    # which is correct -- what was in between is genuinely unknown.
+    my ($body, $cls);
+    my $render;
+    if ($view eq 'plain') {
+        $cls = 'config';
+        $render = sub { my $p = $_[0]; $p =~ s/\r\n/\n/g; return _dbg_esc($p); };
+    } elsif ($view eq 'transcript') {
+        $cls = 'config hl';
+        $render = \&debug_log_transcript;
+    } else {
+        $cls = 'config hl';
+        $render = \&highlight_debug_log;
+    }
+    if ($cut) {
+        my ($head, $tail) = @$raw;
+        $body = $render->($head) . debug_cut_marker($view) . $render->($tail);
+    } else {
+        $body = $render->($raw);
+    }
+
+    $cls .= ' no-ssh' if $view ne 'plain';   # default: ssh chatter hidden
+    print qq{<div class="config-wrap">\n};
+    print copy_button_html(0);
+    print qq{<pre class="$cls" id="config-content">$body</pre>\n};
+    print qq{</div>\n};
+
+    if ($view ne 'plain') {
+        print qq{<div class="dbg-legend">}
+            . qq{<span><i class="dbg-sw-tx"></i>SEND &mdash; written to the device (<code>&gt;</code>)</span>}
+            . qq{<span><i class="dbg-sw-rx"></i>RECV &mdash; read from the device (<code>&lt;</code>)</span>}
+            . qq{<span><i class="dbg-sw-iac"></i>telnet IAC / secret marker</span>}
+            . qq{<span><i class="dbg-sw-hex"></i>hex bytes</span>}
+            . qq{<span><i class="dbg-sw-gut"></i>ASCII gutter</span>}
+            . qq{</div>\n};
+    }
+    print qq{</div>\n};   # .tool-section
+
+    print copy_button_script(0, undef, undef);
+    print debug_filter_script() if $view ne 'plain';
+    print top_bottom_nav();
+    print page_foot();
+}
+
+################################################################################
+# debug_filter_script
+#
+# The Sent/Received filter. Pure class toggle on the <pre>; the CSS hides the
+# other direction. It works because highlight_debug_log() puts each line's
+# newline INSIDE its span, so display:none removes the whole line rather than
+# leaving an empty row behind.
+#
+# Parameters: none
+################################################################################
+sub debug_filter_script {
+    return <<'JS';
+<script>
+(function () {
+  var pre = document.getElementById('config-content');
+  if (!pre) return;
+  var state = { dir: 'both', ssh: 'hide' };   // must match the pressed buttons
+
+  function apply() {
+    pre.className = 'config hl'
+      + (state.dir === 'tx' ? ' only-tx' : state.dir === 'rx' ? ' only-rx' : '')
+      + (state.ssh === 'hide' ? ' no-ssh' : '');
+  }
+  function wire(id, key) {
+    var seg = document.getElementById(id);
+    if (!seg) return;
+    seg.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('button') : null;
+      if (!b) return;
+      var v = b.getAttribute('data-' + key);
+      if (!v) return;
+      var all = seg.querySelectorAll('button');
+      for (var i = 0; i < all.length; i++) { all[i].className = 'seg-btn'; }
+      b.className = 'seg-btn on';
+      state[key] = v;
+      apply();
+    });
+  }
+  wire('dbg-dir', 'dir');
+  wire('dbg-ssh', 'ssh');
+})();
+</script>
+JS
+}
+
+################################################################################
+# do_delete_debug
+#
+# Delete one device's debug log (POST + CSRF via %STATE_CHANGING).
+#
+# The path is re-derived from the device table through device_debug_file():
+# the request supplies a device id and nothing else, so there is no path, no
+# directory and no filename for a caller to influence. A symlink is refused
+# for the same reason the privileged template helper refuses one -- what it
+# points at is not ours to unlink.
+#
+# A missing file is NOT an error: the log may have been deleted in another
+# tab, or never written. Deleting while a backup is running is harmless --
+# fetchconfig holds an open descriptor, so the writes simply go nowhere and
+# the next run recreates the file.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_delete_debug {
+    my ($user) = @_;
+    unless (user_may_use_tools($user)) {
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
+    my $dev = $cgi->param('dev');
+    $dev = '' unless defined $dev;
+    my $back = ($cgi->param('from') || '') eq 'status' ? 'status' : 'tool_debug';
+
+    unless (valid_id($dev) && device_accessible($user, $dev)) {
+        redirect_to_action($back, err => 'Device not found, or not accessible.');
+        return;
+    }
+    my $path = device_debug_file($dev);
+    unless (defined $path) {
+        redirect_to_action($back, err => "No repository is configured for $dev.");
+        return;
+    }
+    my @st = lstat($path);
+    unless (@st && -f _) {
+        redirect_to_action($back, msg => "No debug log for $dev (nothing to delete).");
+        return;
+    }
+    my $size = $st[7];
+    my ($ok, $how) = (unlink($path) ? (1, 'direct') : (0, ''));
+    if (!$ok) {
+        # unlink needs write permission on the root-owned repository DIRECTORY,
+        # which the web-server user normally does not have. Same helper, same
+        # sudoers rule as the template editor.
+        ($ok, $how) = debug_log_delete_privileged($path);
+    }
+    if ($ok) {
+        audit(action => 'delete_debug', object_type => 'device', object_id => $dev,
+              detail => "deleted debug log ($size bytes, $how)");
+        redirect_to_action($back, msg => "Deleted the debug log for $dev ("
+                                         . human_size($size) . ").");
+    } else {
+        audit(action => 'delete_debug', object_type => 'device', object_id => $dev,
+              detail => "delete failed: " . ($how ne '' ? $how : "$!"));
+        redirect_to_action($back, err => "Could not delete the debug log for $dev. "
+                                         . (debug_helper_available()
+                                            ? 'See the audit log for details.'
+                                            : 'The repository is not writable by the '
+                                              . 'web-server user and no TEMPLATE_HELPER '
+                                              . 'is configured.'));
+    }
+}
+
+################################################################################
+# do_download_debug
+#
+# Download a device debug log as a file (?action=download_debug&dev=...).
+#
+# ADMINISTRATOR ONLY -- read_debug grants viewing, not downloading. The bytes
+# are the same either way (a hex dump defeats masking, so the on-screen view
+# is not a redacted one); the difference is that a download leaves the audited
+# UI as a file on disk, which is the thing worth restricting.
+#
+# Capped at DEBUG_MAX_BYTES like the viewer, so an oversized log is neither
+# displayed nor downloaded. The cap is re-checked here and not merely on the
+# button, which is UI.
+#
+# GET, read-only, no CSRF. Unlike the viewer this streams the WHOLE file --
+# never the head/tail split, which exists only to bound what is rendered.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_download_debug {
+    my ($user) = @_;
+    unless (user_may_use_tools($user)) {
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
+    my $dev = $cgi->param('dev');
+    $dev = '' unless defined $dev;
+    unless (valid_id($dev) && device_accessible($user, $dev)) {
+        print std_header(-status => '404 Not Found', -type => 'text/plain', -charset => 'UTF-8');
+        print "Device not found, or not accessible.\n";
+        return;
+    }
+    my $path = device_debug_file($dev);
+    my @st   = defined $path ? lstat($path) : ();
+    unless (@st && -f _) {
+        print std_header(-status => '404 Not Found', -type => 'text/plain', -charset => 'UTF-8');
+        print "No debug log for $dev.\n";
+        return;
+    }
+    my $size = $st[7];
+    if ($size > DEBUG_MAX_BYTES) {
+        audit(action => 'download_debug', object_type => 'device', object_id => $dev,
+              detail => "refused: too large ($size bytes)");
+        print std_header(-type => 'text/html', -charset => 'UTF-8');
+        print page_head('Too large', $user);
+        print qq{<p class="error">The debug log for <code>} . esc($dev)
+            . qq{</code> is } . esc(human_size($size))
+            . qq{ and cannot be downloaded.</p>\n};
+        print debug_size_note();
+        print page_foot();
+        return;
+    }
+
+    # Whole file, streamed. The helper path is used only when the web-server
+    # user cannot open the root-owned file itself; there is no window here, so
+    # it reads to end of file.
+    my ($bytes, $err) = debug_log_window($path, 0, undef);
+    unless (defined $bytes) {
+        audit(action => 'download_debug', object_type => 'device', object_id => $dev,
+              detail => 'unreadable: ' . (defined $err ? $err : "$!"));
+        print std_header(-type => 'text/html', -charset => 'UTF-8');
+        print page_head('Not available', $user);
+        print qq{<p class="error">The debug log could not be read. }
+            . qq{See the audit log for details.</p>\n};
+        print page_foot();
+        return;
+    }
+    audit(action => 'download_debug', object_type => 'device', object_id => $dev,
+          detail => "downloaded debug log ($size bytes)");
+    print std_header(-type => 'application/octet-stream',
+                     -attachment => "$dev.debug",
+                     '-Content_length' => length($bytes));
+    binmode(STDOUT);
+    print $bytes;
+}
+
+################################################################################
+# debug_log_delete_privileged
+#
+# Unlink a debug log through the privileged helper. Returns ($ok, $how), where
+# $how is a short reason string used for the audit entry.
+#
+# Parameters:
+#   $path
+################################################################################
+sub debug_log_delete_privileged {
+    my ($path) = @_;
+    return (0, 'no TEMPLATE_HELPER configured') unless debug_helper_available();
+    my ($out, $err, $status, $fork_err) =
+        run_privileged($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'delete-debug', $path);
+    return (0, $fork_err) if $fork_err;
+    return (1, 'via helper') if defined $status && $status == 0;
+    $err = '' unless defined $err;
+    $err =~ s/\s+\z//;
+    return (0, 'helper: ' . ($err ne '' ? $err : "exit $status"));
+}
+
+################################################################################
+# do_delete_all_debug
+#
+# Delete every device debug log in one pass (POST + CSRF).
+#
+# This is the remediation tool. A debug log written by a model that does not
+# suspend its session log around password sends contains device credentials in
+# clear text, and such a file is only overwritten on that device's NEXT run --
+# which for a decommissioned or failing device may never come. Without this,
+# cleaning up means shell access to the repository.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_delete_all_debug {
+    my ($user) = @_;
+    unless (user_may_use_tools($user)) {
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
+    my ($rows, $err) = read_all_status($user);
+    if ($err) {
+        redirect_to_action('tool_debug', err => $err);
+        return;
+    }
+    my ($n, $bytes, @failed) = (0, 0);
+    for my $r (@$rows) {
+        next unless $r->{dbg};
+        my $path = device_debug_file($r->{id});
+        next unless defined $path;
+        my @st = lstat($path);
+        next unless @st && -f _;
+        my $ok = unlink($path);
+        $ok = (debug_log_delete_privileged($path))[0] unless $ok;
+        if ($ok) { $n++; $bytes += $st[7]; }
+        else     { push @failed, $r->{id}; }
+    }
+    audit(action => 'delete_all_debug', object_type => 'device', object_id => '*',
+          detail => "deleted $n debug log(s), $bytes bytes"
+                    . (@failed ? '; failed: ' . join(',', @failed) : ''));
+    if (@failed) {
+        redirect_to_action('tool_debug',
+            err => "Deleted $n debug log(s); could not delete: " . join(', ', @failed) . '.');
+    } else {
+        redirect_to_action('tool_debug',
+            msg => $n ? "Deleted $n debug log(s), " . human_size($bytes) . " freed."
+                      : 'No debug logs to delete.');
+    }
+}
+
+################################################################################
+# show_tool_debug
+#
+# Tools -> Device debug logs: every device that currently has a .debug file,
+# with View/Delete per device and a purge-all control.
+#
+# Parameters:
+#   $user
+################################################################################
+sub show_tool_debug {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to use Tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    print page_head('Device debug logs', $user, 'full');
+    my $flash_msg = $cgi->param('msg');
+    my $flash_err = $cgi->param('err');
+    print qq{<p class="success">} . esc($flash_msg) . qq{</p>\n}
+        if defined $flash_msg && $flash_msg ne '';
+    print qq{<p class="error">} . esc($flash_err) . qq{</p>\n}
+        if defined $flash_err && $flash_err ne '';
+
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Device debug logs</h2>\n};
+    print qq{<p class="muted">fetchconfig writes <code>&lt;device-id&gt;.debug</code> into a }
+        . qq{device's repository when the device has <code>debug=on</code>. The file is a }
+        . qq{full session transcript and is rewritten on every run.</p>\n};
+
+    my ($rows, $err) = read_all_status($user);
+    if ($err) {
+        print qq{<p class="error">} . esc($err) . qq{</p>\n</div>\n};
+        print page_foot();
+        return;
+    }
+    my @have = grep { $_->{dbg} } @$rows;
+    unless (@have) {
+        print qq{<p>No device currently has a debug log.</p>\n</div>\n};
+        print page_foot();
+        return;
+    }
+    my $total = 0; $total += $_->{dbg}{size} for @have;
+
+    print qq{<p>} . scalar(@have) . qq{ device(s) with a debug log, }
+        . esc(human_size($total)) . qq{ in total.</p>\n};
+
+    print qq{<table class="list">\n<tr><th>Device-ID</th><th>Size</th><th>Written</th>}
+        . qq{<th>Actions</th></tr>\n};
+    for my $r (@have) {          # already in device-id order (read_all_status)
+        my $dev  = $r->{id};
+        my $size = $r->{dbg}{size};
+        my $view = script_url() . '?action=view_debug&from=tool&dev=' . CGI::escape($dev);
+        my $dl   = script_url() . '?action=download_debug&dev=' . CGI::escape($dev);
+        # Over the ceiling the file can be neither displayed nor downloaded;
+        # only Delete still works, so say that on the greyed button rather
+        # than letting the reader find out by clicking.
+        my $too_big = ($size > DEBUG_MAX_BYTES) ? 1 : 0;
+        my $big_tip = esc(human_size($size) . ' - over the '
+                          . _dbg_mb(DEBUG_MAX_BYTES) . ' limit; it can only be deleted');
+        print qq{<tr><td>} . esc($dev) . qq{</td>}
+            . qq{<td>} . esc(human_size($size)) . qq{</td>}
+            . qq{<td>} . esc(fmt_mtime($r->{dbg}{mtime})) . qq{</td>}
+            . qq{<td>}
+            . ($too_big
+                ? qq{<button type="button" class="btn btn-small btn-gray" disabled }
+                  . qq{title="$big_tip">View</button> }
+                  . qq{<button type="button" class="btn btn-small btn-gray" disabled }
+                  . qq{title="$big_tip">Download</button> }
+                : qq{<a class="btn btn-small" href="} . esc($view) . qq{">View</a> }
+                  . qq{<a class="btn btn-small" href="} . esc($dl) . qq{">Download</a> })
+            . qq{<form method="POST" action="} . esc(script_url()) . qq{" class="dbg-del-form" }
+            . qq{data-confirm="Delete the debug log for } . esc($dev)
+            . qq{? This cannot be undone." data-confirm-danger="y">}
+            . qq{<input type="hidden" name="action" value="delete_debug">}
+            . qq{<input type="hidden" name="dev" value="} . esc($dev) . qq{">}
+            . csrf_field()
+            . qq{<button type="submit" class="btn btn-small btn-danger">Delete</button>}
+            . qq{</form></td></tr>\n};
+    }
+    print qq{</table>\n};
+
+    print qq{<h3>Delete all debug logs</h3>\n};
+    print qq{<p class="muted">Removes every file listed above. Use this after enabling }
+        . qq{<code>debug</code> for troubleshooting, and whenever a device password that }
+        . qq{may appear in a log has been rotated. Logs come back on the next run of any }
+        . qq{device still set to <code>debug=on</code>.</p>\n};
+    print qq{<form method="POST" action="} . esc(script_url()) . qq{" }
+        . qq{data-confirm="Permanently DELETE all } . scalar(@have)
+        . qq{ debug logs? This cannot be undone." data-confirm-danger="y">}
+        . qq{<input type="hidden" name="action" value="delete_all_debug">}
+        . csrf_field()
+        . qq{<p><button type="submit" class="btn btn-danger">Delete all debug logs</button></p>}
+        . qq{</form>\n};
+    print qq{</div>\n};
+    print page_foot();
+}
+
+################################################################################
 # show_status_page
 #
 # Parameters:
@@ -4682,6 +5642,23 @@ sub show_status_page {
     my ($rows, $err) = read_all_status($user);
     my $load_secs = Time::HiRes::tv_interval($t0);
 
+    # The Debug column is for administrators AND holders of the read_debug
+    # right. This decides the COLUMN; the handler it links to repeats the
+    # check, because main() has no central authorization gate and a forged
+    # request reaches it whatever this page rendered. Rows are already
+    # site-filtered by read_all_status(), so a site-limited holder sees only
+    # their own devices here.
+    my $show_debug = user_may_view_debug($user);
+
+    # Flash messages: do_delete_debug() redirects back here after deleting a
+    # debug log, so this page has to be able to show the result.
+    my $flash_msg = $cgi->param('msg');
+    my $flash_err = $cgi->param('err');
+    print qq{<p class="success">} . esc($flash_msg) . qq{</p>\n}
+        if defined $flash_msg && $flash_msg ne '';
+    print qq{<p class="error">} . esc($flash_err) . qq{</p>\n}
+        if defined $flash_err && $flash_err ne '';
+
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
         print page_foot();
@@ -4696,7 +5673,18 @@ sub show_status_page {
     print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">Device backup status</h2>\n};
 
-    # Filter row: State + Changed dropdowns, Clear, and Per-page selector.
+    # Filter row: State, Changed, Site, Device-ID, then Clear and Per-page.
+    # The Site and Device-ID controls behave exactly as on the device list:
+    # site is an exact match from a drop-down of the codes actually present,
+    # device-id is a case-insensitive SUBSTRING match.
+    #
+    # This is the VISUAL order only. The cookie keeps its own field order
+    # (state|changed|pagesize|site|dev) -- reordering that would make a
+    # cookie written by an earlier version restore into the wrong controls.
+    my %by_site;
+    $by_site{ $_->{site} }++ for grep { defined $_->{site} && $_->{site} ne '' } @$rows;
+    my $have_untagged = grep { !defined $_->{site} || $_->{site} eq '' } @$rows;
+
     print qq{<div class="dev-filter-row">\n};
     print qq{<label class="filter-label">State }
         . qq{<select id="status-state-filter" class="filter-select">}
@@ -4715,14 +5703,34 @@ sub show_status_page {
         . qq{<option value="unknown">unknown</option>}
         . qq{<option value="n/a">N/A</option>}
         . qq{</select></label>\n};
-    print qq{<button type="button" class="btn btn-small" id="status-clear">Clear filter</button>\n};
+    print qq{<label class="filter-label">Site }
+        . qq{<select id="status-site-filter" class="filter-select">}
+        . qq{<option value="">All sites</option>};
+    for my $sc (sort keys %by_site) {
+        print qq{<option value="} . esc(lc $sc) . qq{">} . esc($sc) . qq{</option>};
+    }
+    # Untagged devices report the "\0none" sentinel in data-site (same
+    # convention as the device list), so plain equality covers this option.
+    print qq{<option value="\0none">(no site)</option>} if $have_untagged;
+    print qq{</select></label>\n};
+    print qq{<label class="filter-label">Device-ID }
+        . qq{<input type="text" id="status-dev-filter" class="filter-box" }
+        . qq{placeholder="Filter device&hellip;" autocomplete="off"></label>\n};
+    # Plain .btn, not .btn-small: this row's controls are sized to match the
+    # Devices filter row, and its Clear filter button is a full-size .btn.
+    print qq{<button type="button" class="btn" id="status-clear">Clear filter</button>\n};
     print qq{<label class="page-size-label">Per page }
+        # Same ladder and the same default as the device list, so the two
+        # pages behave alike. A cookie holding one of the old sizes (25/50/
+        # 100) simply finds no matching option and the select keeps this
+        # default -- restore() only assigns on an exact match.
         . qq{<select id="status-page-size" class="filter-select">}
         . qq{<option value="0">All</option>}
         . qq{<option value="10">10</option>}
-        . qq{<option value="25">25</option>}
-        . qq{<option value="50">50</option>}
-        . qq{<option value="100" selected>100</option>}
+        . qq{<option value="20">20</option>}
+        . qq{<option value="40" selected>40</option>}
+        . qq{<option value="80">80</option>}
+        . qq{<option value="160">160</option>}
         . qq{</select></label>\n};
     print qq{</div>\n};
 
@@ -4738,7 +5746,11 @@ sub show_status_page {
     print qq{<table class="list" id="status-table">\n}
         . qq{<tr>}
         . qq{<th class="sortable" data-key="site">Site<span class="sort-ind"></span></th>}
-        . qq{<th class="sortable" data-key="dev">Device-ID<span class="sort-ind"></span></th>}
+        # Rows arrive in device-id order, so mark this column as the active
+        # sort: the arrow then matches what is on screen, and the first click
+        # flips to descending rather than re-applying ascending.
+        . qq{<th class="sortable" data-key="dev" data-dir="asc">Device-ID}
+          . qq{<span class="sort-ind">&nbsp;&#9650;</span></th>}
         . qq{<th class="sortable" data-key="sdate">Start Date<span class="sort-ind"></span></th>}
         . qq{<th class="sortable" data-key="stime">Start Time<span class="sort-ind"></span></th>}
         . qq{<th class="sortable" data-key="edate">End Date<span class="sort-ind"></span></th>}
@@ -4746,6 +5758,12 @@ sub show_status_page {
         . qq{<th class="sortable" data-key="dur">Duration<span class="sort-ind"></span></th>}
         . qq{<th class="sortable" data-key="state">State<span class="sort-ind"></span></th>}
         . qq{<th class="sortable" data-key="changed">Changed<span class="sort-ind"></span></th>}
+        . ($show_debug
+            ? qq{<th class="admin-col">Debug}
+              . qq{<span class="admin-tag" title="Administrators">admin</span>}
+              . qq{<span class="admin-tag" title="Users holding the }
+              . qq{&quot;View device debug logs&quot; right">view debug</span></th>}
+            : '')
         . qq{</tr>\n};
 
     for my $r (@$rows) {
@@ -4777,7 +5795,7 @@ sub show_status_page {
 
         my $site = defined $r->{site} ? $r->{site} : '';
         print qq{<tr }
-            . qq{data-site="}   . esc(lc $site)  . qq{" }
+            . qq{data-site="}   . esc($site ne '' ? lc $site : "\0none") . qq{" }
             . qq{data-dev="}    . esc(lc $dev)   . qq{" }
             . qq{data-sdate="}  . esc($sdate)    . qq{" }
             . qq{data-stime="}  . esc($stime)    . qq{" }
@@ -4795,6 +5813,7 @@ sub show_status_page {
             . qq{<td>} . esc($dur) . qq{</td>}
             . qq{<td><span class="} . esc($state_cls) . qq{">} . esc($state) . qq{</span></td>}
             . qq{<td><span class="} . esc($chg_cls)   . qq{">} . esc($chg)   . qq{</span></td>}
+            . ($show_debug ? status_debug_cell($dev, $r->{dbg}) : '')
             . qq{</tr>\n};
     }
     print qq{</table>\n};
@@ -4813,6 +5832,41 @@ sub show_status_page {
 }
 
 ################################################################################
+# status_debug_cell
+#
+# The admin-only "Debug" cell for one status row: a View debug link and a
+# Delete form, or two greyed-out buttons when the device has no debug log.
+#
+# The buttons key on FILE PRESENCE, never on the device's debug= option: a
+# device switched back to debug=off keeps the log written while it was on, and
+# that stale file is exactly the one an admin wants to see and remove.
+#
+# Parameters:
+#   $dev
+#   $dbg    hashref { size, mtime } from read_all_status, or undef
+################################################################################
+sub status_debug_cell {
+    my ($dev, $dbg) = @_;
+
+    unless ($dbg) {
+        my $t = esc('No debug log for this device');
+        return qq{<td class="admin-col">}
+             . qq{<button type="button" class="btn btn-small btn-gray" disabled }
+             . qq{title="$t">View</button></td>};
+    }
+
+    # View only. Download and Delete are administrator-only and live on
+    # Tools -> Device debug logs and on the viewer itself, so a reader who
+    # cannot use them is never shown a button for them here.
+    my $meta = human_size($dbg->{size}) . ' - ' . fmt_mtime($dbg->{mtime});
+    my $view = script_url() . '?action=view_debug&from=status&dev=' . CGI::escape($dev);
+
+    return qq{<td class="admin-col">}
+         . qq{<a class="btn btn-small" href="} . esc($view) . qq{" title="}
+         . esc($meta) . qq{">View</a></td>};
+}
+
+################################################################################
 # status_page_script
 #
 # Client-side filter/sort/paginate for the Status table. Self-contained,
@@ -4826,6 +5880,8 @@ sub status_page_script {
 (function () {
   var table = document.getElementById('status-table');
   if (!table) return;
+  var siteSel  = document.getElementById('status-site-filter');
+  var devBox   = document.getElementById('status-dev-filter');
   var stateSel = document.getElementById('status-state-filter');
   var chgSel   = document.getElementById('status-changed-filter');
   var clearBtn = document.getElementById('status-clear');
@@ -4848,7 +5904,11 @@ sub status_page_script {
   function setCookie(v){ document.cookie = COOKIE+'='+encodeURIComponent(v)+';path=/;max-age=31536000'; }
   function getCookie(){ var m=document.cookie.match(/(?:^|;\s*)fcweb_statusfilter=([^;]*)/); return m?decodeURIComponent(m[1]):''; }
   function save(){
-    setCookie([ stateSel?stateSel.value:'', chgSel?chgSel.value:'', sizeSel?sizeSel.value:'100' ]
+    // Site and device-id are APPENDED, never inserted: a cookie written by an
+    // older version has only the first three fields and must still restore
+    // them to the right controls.
+    setCookie([ stateSel?stateSel.value:'', chgSel?chgSel.value:'', sizeSel?sizeSel.value:'40',
+                siteSel?siteSel.value:'', devBox?devBox.value:'' ]
       .map(encodeURIComponent).join('|'));
   }
   function restore(){
@@ -4858,21 +5918,31 @@ sub status_page_script {
     setSel(stateSel, p[0]?decodeURIComponent(p[0]):'');
     setSel(chgSel,   p[1]?decodeURIComponent(p[1]):'');
     setSel(sizeSel,  p[2]?decodeURIComponent(p[2]):'');
+    setSel(siteSel,  p[3]?decodeURIComponent(p[3]):'');
+    if (devBox) devBox.value = p[4]?decodeURIComponent(p[4]):'';
   }
 
   function matches(row){
     var sq = stateSel ? stateSel.value : '';
     var cq = chgSel ? chgSel.value : '';
+    // Same rules as the device list: site is an exact match (the "(no site)"
+    // option matches the \0none sentinel in data-site), device-id is a
+    // case-insensitive substring. data-dev is already lower-cased server-side.
+    var siq = siteSel ? siteSel.value : '';
+    var dq  = devBox ? devBox.value.trim().toLowerCase() : '';
     var st = row.getAttribute('data-state') || '';
     var ch = row.getAttribute('data-changed') || '';
-    return (sq==='' || st===sq) && (cq==='' || ch===cq);
+    var si = row.getAttribute('data-site') || '';
+    var dv = row.getAttribute('data-dev') || '';
+    return (sq==='' || st===sq) && (cq==='' || ch===cq)
+        && (siq==='' || si===siq) && (dq==='' || dv.indexOf(dq)!==-1);
   }
 
   function esc(){}
   function render(){
     var matched = rows.filter(matches);
     var total = matched.length;
-    var size = sizeSel ? parseInt(sizeSel.value,10) : 100;
+    var size = sizeSel ? parseInt(sizeSel.value,10) : 40;   // match the markup default
     var allOne = (!size || size<=0);
     var pages = allOne ? 1 : Math.max(1, Math.ceil(total/size));
     if (page>=pages) page=pages-1;
@@ -4896,9 +5966,13 @@ sub status_page_script {
   if (stateSel) stateSel.addEventListener('change', onFilter);
   if (chgSel)   chgSel.addEventListener('change', onFilter);
   if (sizeSel)  sizeSel.addEventListener('change', onFilter);
+  if (siteSel)  siteSel.addEventListener('change', onFilter);
+  if (devBox)   devBox.addEventListener('input',  onFilter);
   if (clearBtn) clearBtn.addEventListener('click', function(){
     if (stateSel) stateSel.value='';
     if (chgSel)   chgSel.value='';
+    if (siteSel)  siteSel.value='';
+    if (devBox)   devBox.value='';
     page=0; render(); save();
   });
   if (pFirst) pFirst.addEventListener('click', function(){ page=0; render(); });
@@ -4919,6 +5993,12 @@ sub status_page_script {
     });
     var tb = table.tBodies[0] || table;
     sorted.forEach(function(r){ tb.appendChild(r); });
+    // Keep the ARRAY in the new order too, not just the DOM. render() pages
+    // by slicing this array, so without it the page would still be chosen
+    // from the original order and only the rows that happened to be visible
+    // would appear sorted. (The device list does the same; this is the line
+    // that was missing here.)
+    rows = sorted;
   }
   headers.forEach(function(h){
     h.addEventListener('click', function(){
@@ -4954,6 +6034,19 @@ sub show_backup_list {
     unless (valid_id($dev)) {
         print page_head('Error', $user);
         print qq{<p class="error">Invalid device id.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    # Per-site scope. main()'s %dev_scoped guard is keyed on the ACTION name,
+    # so it does not cover this handler: the device page is reached with no
+    # action parameter at all (the else branch of the dispatcher). Without the
+    # check here a site-limited user reads any device's backups by typing the
+    # URL -- exactly what device_accessible() exists to prevent. Enforce it at
+    # the handler so it holds however the route is reached.
+    unless (device_accessible($user, $dev)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">Device not found.</p>\n};
         print page_foot();
         return;
     }
@@ -6358,6 +7451,261 @@ sub _hl_generic_line {
     return $h;
 }
 
+################################################################################
+# Device debug log rendering (<repository>/<dev-id>.debug)
+#
+# The file holds three kinds of line:
+#
+#   1. Net::Telnet dump_log hex dump, strictly positional:
+#
+#        < 0x00000: 0d 0d 0a 00  2a 2a 2a 2a  ...  ....************
+#        ^ ^        ^                              ^
+#        0 2        11                             63
+#        |  offset   hex: 16*3 chars + 4 group gaps = 52
+#        direction: '<' read FROM the device, '>' written TO it
+#
+#      The offset is "0x%05x" today but widens past 1 MB, so the hex field is
+#      taken RELATIVE to the end of the offset match, never from column 11.
+#
+#   2. ssh client stderr ("debug1: ...", "debug2: ...").
+#   3. Markers written by fetchconfig: "# switch session (...)" and
+#      "# [secret sent - not logged]".
+#
+# SECURITY: mask_secrets() cannot help here. It matches key=value shapes, and
+# a password in a hex dump exists twice (as hex bytes and in the ASCII gutter)
+# split across 16-byte boundaries. The controls for this data are the
+# admin-only gate on the viewer and fetchconfig's own print_secret() -- not
+# output masking. See the comment on show_debug_log().
+################################################################################
+
+# Width of the hex field, measured from the first byte: 16 bytes rendered as
+# "%02x " plus one extra space after every fourth byte.
+use constant DEBUG_HEX_WIDTH => 16 * 3 + 4;
+
+################################################################################
+# _dbg_esc
+#
+# esc() for debug-log text. The file is raw device bytes, so the ASCII gutter
+# is Latin-1, not UTF-8: Net::Telnet prints 0x80-0xFF literally (0xff 0xfc
+# shows as "yu" with diaeresis). STDOUT is binmode with charset=UTF-8, so
+# those bytes must be widened to their UTF-8 encoding or the browser sees
+# invalid UTF-8 and substitutes replacement characters. ASCII is untouched,
+# which is the overwhelmingly common case.
+#
+# Parameters:
+#   $s
+################################################################################
+sub _dbg_esc {
+    my ($s) = @_;
+    return '' unless defined $s;
+    my $h = esc($s);
+    $h =~ s/([\x80-\xFF])/_cp_utf8(ord($1))/ge if $h =~ /[\x80-\xFF]/;
+    return $h;
+}
+
+################################################################################
+# _dbg_hex_line
+#
+# Split one dump_log line into its parts, or undef if it is not one. Keeping
+# the column arithmetic in a single place is deliberate -- it is the only
+# fragile part of this parser, and both the hex view and the transcript view
+# depend on getting it right.
+#
+# Parameters:
+#   $line
+################################################################################
+sub _dbg_hex_line {
+    my ($line) = @_;
+    return undef unless defined $line;
+    return undef unless $line =~ /^([<>]) (0x[0-9a-f]+:) (.*)\z/s;
+    my ($dir, $off, $rest) = ($1, $2, $3);
+    my $w = DEBUG_HEX_WIDTH;
+    return {
+        dir => $dir,
+        head => "$dir $off",
+        hex  => substr($rest, 0, $w),
+        asc  => (length($rest) > $w ? substr($rest, $w) : ''),
+    };
+}
+
+################################################################################
+# highlight_debug_log
+#
+# Render a device debug log as highlighted HTML for a <pre class="config hl">.
+#
+# Direction is the signal that matters, so it is carried three ways: a CSS
+# ::before badge spelling SEND/RECV (generated content, so the Copy button --
+# which reads pre.textContent -- still returns the file byte for byte), a
+# background tint over the whole line, and a rule above the first line of each
+# run so the request/response turns read as blocks.
+#
+# Each line's trailing newline is placed INSIDE its span. That is what lets
+# the "Sent only"/"Received only" filter hide whole lines with display:none
+# without leaving the newlines behind as blank rows.
+#
+# Parameters:
+#   $content   raw bytes of the .debug file
+################################################################################
+sub highlight_debug_log {
+    my ($content) = @_;
+    $content = '' unless defined $content;
+    $content =~ s/\n\z//;            # re-added per line below
+    my @out;
+    my $prev_dir  = '';   # last hex direction, for turn detection
+    my $block_dir = '';   # direction of the dump block we are currently inside
+
+    for my $line (split /\n/, $content, -1) {
+        # CRLF. fetchconfig's ssh client writes its stderr through a pty, and
+        # the tty's ONLCR turns every \n into \r\n, so a real .debug file is
+        # CRLF-terminated. The \r is a LINE TERMINATOR, not content, and it
+        # must not reach the markup: inside a span it ends up before a tag
+        # rather than before our \n, so the HTML parser treats it as a line
+        # break of its own. Every hex line then rendered as two lines, the
+        # second one empty -- and hiding the span hid the text but not that
+        # second line, which is what made the direction filter look broken.
+        $line =~ s/\r\z//;
+        my $h = _dbg_hex_line($line);
+
+        if (!$h) {
+            # Net::Telnet writes a BLANK LINE after every dump block. It has no
+            # direction of its own, so if it is left untagged it survives the
+            # Sent-only/Received-only filter and leaves one blank row on screen
+            # for every hidden block -- which is most of the page on a real
+            # session. Tag it with the block it closes so it is hidden with it.
+            #
+            # It must also be TRANSPARENT to turn detection: every hex line in
+            # a real log is preceded by one of these, so treating it as a break
+            # means a direction change is never seen and no turn rule is ever
+            # drawn.
+            if ($line =~ /^\s*\z/ && $block_dir ne '') {
+                push @out, qq{<span class="dbg-l }
+                         . ($block_dir eq '>' ? 'dbg-tx' : 'dbg-rx')
+                         . qq{ dbg-blank">\n</span>};
+                next;
+            }
+            $prev_dir  = '';         # a marker breaks the run
+            $block_dir = '';
+            my $cls = '';
+            my $body;
+            if ($line =~ /^#\s*\[secret/) {
+                $cls  = ' dbg-sec';
+                $body = _dbg_esc($line);
+            } elsif ($line =~ /^\s*#/) {
+                $cls  = ' dbg-hdr';
+                $body = _dbg_esc($line);
+            } elsif ($line =~ /^(debug\d+:)(.*)\z/s) {
+                $cls  = ' dbg-ssh';
+                $body = qq{<span class="dbg-tag">} . esc($1) . qq{</span>} . _dbg_esc($2);
+            } else {
+                # Everything else is the ssh client's stderr, which Abstract.pm
+                # points at this same file (master_stderr_fh => $debug_fh).
+                # Classified by COMPLEMENT, not by recognising ssh's wording:
+                # device traffic reaches the file only as dump_log hex lines
+                # (input_log is never attached), so a line that is neither a
+                # hex line nor a "#" marker cannot carry a byte of the session.
+                # That is what makes hiding this safe, and it does not depend
+                # on the OpenSSH version, the log level or the locale --
+                # "Warning:", "Authenticated to", "Transferred:" and
+                # "Bytes per second:" need no patterns of their own.
+                $cls  = ' dbg-ssh';
+                $body = _dbg_esc($line);
+            }
+            push @out, qq{<span class="dbg-l$cls">$body\n</span>};
+            next;
+        }
+
+        # Hex bytes are de-emphasised, but telnet IAC (ff) and the CR/LF/NUL
+        # padding are worth picking out: they are protocol noise, not payload.
+        # s///g does not rescan replacement text, so the inserted markup
+        # cannot be re-matched by the same pass.
+        my $hexh = esc($h->{hex});
+        $hexh =~ s{(?<![0-9a-f])(ff|00|0d|0a)(?![0-9a-f])}
+                  {'<span class="dbg-' . ($1 eq 'ff' ? 'iac' : 'ctl') . qq{">$1</span>}}ge;
+
+        my $dircls = $h->{dir} eq '>' ? 'dbg-tx' : 'dbg-rx';
+        my $turn   = ($prev_dir ne '' && $prev_dir ne $h->{dir}) ? ' dbg-turn' : '';
+        $prev_dir  = $h->{dir};
+        $block_dir = $h->{dir};
+
+        push @out, qq{<span class="dbg-l $dircls$turn">}
+                 . qq{<span class="dbg-off">} . esc($h->{head}) . qq{</span> }
+                 . qq{<span class="dbg-hex">$hexh</span>}
+                 . qq{<span class="dbg-gut">} . _dbg_esc($h->{asc}) . qq{</span>}
+                 . qq{\n</span>};
+    }
+    return join('', @out);
+}
+
+################################################################################
+# debug_log_transcript
+#
+# The same log as a readable conversation: the hex bytes are reassembled per
+# direction and rendered as text, telnet IAC negotiation dropped.
+#
+# This is not a nicety. PLANET's slow_print() sends one character per
+# Net::Telnet put(), and dump_log records every put separately, so typing a
+# five-character username produces five 79-column dump lines carrying one byte
+# each. In hex view a login is mostly whitespace; here it is five characters
+# on one line.
+#
+# Parameters:
+#   $content   raw bytes of the .debug file
+################################################################################
+sub debug_log_transcript {
+    my ($content) = @_;
+    $content = '' unless defined $content;
+    my @out;
+    my @buf;
+    my $cur = '';
+
+    my $flush = sub {
+        return unless $cur ne '' && @buf;
+        my $raw = join('', @buf);
+        @buf = ();
+        # Drop IAC negotiation (0xff + 2 bytes), keep printable ASCII, turn
+        # LF into a line break and discard the rest of the control bytes.
+        my $txt = '';
+        my @b = split //, $raw;
+        for (my $i = 0; $i < @b; $i++) {
+            my $o = ord($b[$i]);
+            if ($o == 0xff && $i + 2 < @b) { $i += 2; next; }
+            if ($o == 0x0a) { $txt .= "\n"; next; }
+            $txt .= $b[$i] if ($o >= 0x20);
+        }
+        my $cls = $cur eq '>' ? 'dbg-tx' : 'dbg-rx';
+        for my $l (split /\n/, $txt) {
+            next if $l =~ /^\s*\z/;
+            push @out, qq{<span class="dbg-l $cls"><span class="dbg-gut">}
+                     . _dbg_esc($l) . qq{</span>\n</span>};
+        }
+    };
+
+    for my $line (split /\n/, $content, -1) {
+        $line =~ s/\r\z//;                      # CRLF: see highlight_debug_log
+        my $h = _dbg_hex_line($line);
+        if (!$h) {
+            # The blank line Net::Telnet writes after each dump block is a
+            # formatting artifact, not a break in the conversation: flushing on
+            # it would chop a reply that spans several blocks into one
+            # transcript line per block.
+            next if $line =~ /^\s*\z/ && $cur ne '';
+            $flush->(); $cur = '';
+            next if $line =~ /^\s*\z/;
+            # ssh chatter is carried with the dbg-ssh class rather than
+            # dropped, so the same Show/Hide control governs both views.
+            my $cls = ($line =~ /^#\s*\[secret/) ? 'dbg-sec'
+                    : ($line =~ /^\s*#/)         ? 'dbg-hdr' : 'dbg-ssh';
+            push @out, qq{<span class="dbg-l $cls">} . _dbg_esc($line) . qq{\n</span>};
+            next;
+        }
+        $flush->() if ($cur ne '' && $cur ne $h->{dir});
+        $cur = $h->{dir};
+        push @buf, join('', map { chr(hex($_)) } ($h->{hex} =~ /([0-9a-f]{2})/g));
+    }
+    $flush->();
+    return join('', @out);
+}
+
 # Register the highlighters. Add new models here.
 $SYNTAX_HIGHLIGHTERS{'cisco-ios'}     = \&highlight_cisco_ios;
 $SYNTAX_HIGHLIGHTERS{'cisco-ios-ssh'} = \&highlight_cisco_ios;
@@ -6385,6 +7733,7 @@ $SYNTAX_HIGHLIGHTERS{'generic'}       = \&highlight_generic;
 
 # Synthetic key for the Tools template viewer (not a device model).
 $SYNTAX_HIGHLIGHTERS{'__template__'}  = \&highlight_template;
+$SYNTAX_HIGHLIGHTERS{'__debug__'}     = \&highlight_debug_log;
 $SYNTAX_HIGHLIGHTERS{'template'}      = \&highlight_template;
 
 ################################################################################
@@ -6593,14 +7942,74 @@ sub read_all_status {
         $repo = $default_repo{ $r->{model} } if (!defined $repo || $repo eq '');
         $repo = resolve_dir_alias('repository', $repo);   # $alias -> real path
         my $info;
+        my $dbg;
         if (defined $repo && $repo ne '' && valid_id($dev)) {
             $info = read_status_file("$repo/$dev.status");
+            # <dev>.debug sits beside <dev>.status, so the repository path is
+            # already resolved here and this costs one extra stat per device.
+            # lstat + "-f _" deliberately: a symlink in the repository is not
+            # a debug log we are willing to open or unlink, and testing the
+            # LSTAT buffer makes a symlink fail -f (it is not a plain file).
+            my @st = lstat("$repo/$dev.debug");
+            $dbg = { size => $st[7], mtime => $st[9] } if @st && -f _;
         }
         my $site = device_site_code($r);
         $site = '' if $site eq SITE_ALL_CODE;   # untagged shows blank, not '*'
-        push @rows, { id => $dev, info => $info, site => $site };
+        push @rows, { id => $dev, info => $info, site => $site, dbg => $dbg };
     }
+    # Device-id order, case-insensitively: the device table is kept in
+    # whatever order it was edited in, which is no order at all to read.
+    # Sorted HERE rather than in the page, so every consumer (status table,
+    # Tools -> Device debug logs, the purge) lists devices the same way and
+    # the order holds even with JavaScript off. The second comparison only
+    # breaks ties between ids that differ by case, to keep the sort stable.
+    @rows = sort { lc($a->{id}) cmp lc($b->{id}) || $a->{id} cmp $b->{id} } @rows;
     return (\@rows, undef);
+}
+
+################################################################################
+# device_debug_file
+#
+# Absolute path of the device debug log (<repository>/<dev-id>.debug) that
+# fetchconfig writes when the device has debug=on, or undef if $dev is not a
+# valid id, is not in the device table, or has no resolvable repository.
+#
+# The path is DERIVED from the device table, never from the request: the
+# caller passes a device id and nothing else. A request can therefore only
+# name a device that exists in the table, which -- together with valid_id()
+# rejecting anything with a slash -- is what keeps this out of path-traversal
+# territory. Existence/symlink checks are left to the caller, because the
+# viewer and the delete handler want different answers for a missing file.
+#
+# Parameters:
+#   $dev
+################################################################################
+sub device_debug_file {
+    my ($dev) = @_;
+    return undef unless valid_id($dev);
+
+    my ($content, $err) = slurp_device_table();
+    return undef if $err;
+    my $recs = parse_device_table($content);
+
+    my %default_repo;   # model => default: repository
+    for my $r (@$recs) {
+        next unless $r->{kind} eq 'default';
+        for my $p (@{ $r->{opts} }) {
+            $default_repo{ $r->{model} } = $p->[1] if $p->[0] eq 'repository';
+        }
+    }
+    for my $r (@$recs) {
+        next unless $r->{kind} eq 'device';
+        next unless defined $r->{id} && $r->{id} eq $dev;
+        my $repo;
+        for my $p (@{ $r->{opts} }) { $repo = $p->[1] if $p->[0] eq 'repository'; }
+        $repo = $default_repo{ $r->{model} } if (!defined $repo || $repo eq '');
+        $repo = resolve_dir_alias('repository', $repo);   # $alias -> real path
+        return undef unless defined $repo && $repo ne '';
+        return "$repo/$dev.debug";
+    }
+    return undef;   # device id is not in the device table
 }
 
 
@@ -6650,6 +8059,15 @@ sub show_backup_content {
     unless (valid_id($dev) && $idx =~ /^\d+$/) {
         print page_head('Error', $user);
         print qq{<p class="error">Invalid device id or backup index.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    # Per-site scope -- see the note in show_backup_list. This handler is
+    # reached with no action parameter, so main()'s %dev_scoped guard misses it.
+    unless (device_accessible($user, $dev)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">Device not found.</p>\n};
         print page_foot();
         return;
     }
@@ -7620,6 +9038,7 @@ my %TOOL_TITLE = (
     logo       => 'Upload report logo',
     diskspace  => 'Disk space',
     audit      => 'Audit log',
+    debug      => 'Device debug logs',
 );
 ################################################################################
 # show_tools
@@ -8046,7 +9465,9 @@ sub show_tool_logo {
 
     # Upload form (its own multipart POST, independent of the editor form).
     print qq{<h3>Upload a new logo</h3>\n};
-    print $cgi->start_multipart_form(-method => 'POST', -action => script_url());
+    print $cgi->start_multipart_form(-method => 'POST', -action => script_url(),
+        -data_max_upload       => UPLOAD_MAX_LOGO,
+        -data_max_upload_label => '100 KB');
     print qq{<input type="hidden" name="action" value="upload_logo">\n};
     print csrf_field();
     print qq{<input type="file" name="logofile" accept=".png,.jpg,.jpeg,.gif">\n};
@@ -9474,7 +10895,7 @@ sub valid_logo_name {
     my ($f) = @_;
     return 0 unless defined $f && $f ne '';
     return 0 if $f =~ m{[/\\]} || $f eq '.' || $f eq '..' || $f =~ /\0/;
-    return $f =~ /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|gif)$/i ? 1 : 0;
+    return $f =~ /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|gif)\z/i ? 1 : 0;
 }
 
 ################################################################################
@@ -9535,7 +10956,7 @@ sub logo_data_uri {
     my ($path) = @_;
     return undef unless defined $path && -f $path;
     my $sz = (stat($path))[7];
-    return undef unless defined $sz && $sz > 0 && $sz <= 100 * 1024;
+    return undef unless defined $sz && $sz > 0 && $sz <= UPLOAD_MAX_LOGO;
     open(my $fh, '<', $path) or return undef;
     binmode($fh);
     local $/;
@@ -9590,7 +11011,7 @@ sub valid_report_name {
     # fetchconfig report files are report-<digits/dashes>.html; restrict to a
     # safe character set (letters, digits, '.', '_', '-') so no HTML-unsafe or
     # shell-unsafe character can ride through, e.g. across the login deep link.
-    return $f =~ /^report-[A-Za-z0-9._-]*\.html$/ ? 1 : 0;
+    return $f =~ /^report-[A-Za-z0-9._-]*\.html\z/ ? 1 : 0;
 }
 
 ################################################################################
@@ -9685,6 +11106,11 @@ sub show_reports {
     my $reports = list_reports($dir);
     print qq{<p class="muted">Change reports in <code>} . esc($dir) . qq{</code>.</p>\n};
 
+    # Deleting and pruning reports are admin-only. The buttons below are hidden
+    # for everyone else, and do_delete_report / do_prune_reports repeat the
+    # check -- hiding a control is presentation, never a permission.
+    my $may_admin = user_may_use_tools($user);
+
     if (!@$reports) {
         print qq{<p class="muted">No reports found.</p>\n};
     } else {
@@ -9713,22 +11139,25 @@ sub show_reports {
             print qq{<a class="btn" href="}
                 . esc(script_url() . '?action=download_report&file=' . $fenc) . qq{">Download</a>\n}
                 if $may_download;
-            # Delete (POST + CSRF + confirm)
-            print $cgi->start_form(-method => 'POST', -action => script_url(),
-                -data_confirm => 'Delete report ' . esc($n) . '? This cannot be undone.',
-                -data_confirm_danger => 'y');
-            print qq{<input type="hidden" name="action" value="delete_report">\n};
-            print qq{<input type="hidden" name="file" value="} . esc($n) . qq{">\n};
-            print csrf_field();
-            print qq{<button type="submit" class="btn btn-danger">Delete</button>\n};
-            print $cgi->end_form;
+            # Delete (POST + CSRF + confirm) -- admin only.
+            if ($may_admin) {
+                print $cgi->start_form(-method => 'POST', -action => script_url(),
+                    -data_confirm => 'Delete report ' . esc($n) . '? This cannot be undone.',
+                    -data_confirm_danger => 'y');
+                print qq{<input type="hidden" name="action" value="delete_report">\n};
+                print qq{<input type="hidden" name="file" value="} . esc($n) . qq{">\n};
+                print csrf_field();
+                print qq{<button type="submit" class="btn btn-danger">Delete</button>\n};
+                print $cgi->end_form;
+            }
             print qq{</div></td></tr>\n};
         }
         print qq{</table>\n};
     }
 
     # Prune: delete reports older than N days (always keeps the newest), same
-    # pattern as the device-table backup cleanup.
+    # pattern as the device-table backup cleanup. Admin only.
+    if ($may_admin) {
     print qq{<div class="prune-box">\n};
     print $cgi->start_form(-method => 'POST', -action => script_url(),
                            -data_confirm => 'Delete all reports older than the given number of days? The newest report is always kept.',
@@ -9740,6 +11169,7 @@ sub show_reports {
         . qq{<button type="submit" class="btn btn-danger">Delete reports older than days</button>\n};
     print $cgi->end_form;
     print qq{</div>\n};   # .prune-box
+    }
 
     print qq{</div>\n};   # .tool-section
     print top_bottom_nav();
@@ -10003,6 +11433,14 @@ sub do_download_report {
 ################################################################################
 sub do_delete_report {
     my ($user) = @_;
+    # Admin only. The Reports page hides the Delete/Prune controls for
+    # everyone else, but main() has no central authorization gate, so a forged
+    # POST reaches here directly and the check must be repeated server-side.
+    unless (user_may_use_tools($user)) {
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
     my $dir  = report_directory();
     my $file = $cgi->param('file');
     $file = '' unless defined $file;
@@ -10031,6 +11469,15 @@ sub do_delete_report {
 ################################################################################
 sub do_upload_logo {
     my ($user) = @_;
+    # Tools is admin-only. main() enforces POST and CSRF but has no central
+    # authorization gate, so every handler must carry its own check: the
+    # admin-only Tools menu and show_tool_logo()'s refusal are UI-side only and
+    # a forged POST reaches here directly.
+    unless (user_may_use_tools($user)) {
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
     my $dir = report_directory();
     unless (defined $dir && -d $dir) {
         redirect_to_action('tool_logo', err => 'No usable report_dir is configured; set it first.');
@@ -10055,7 +11502,7 @@ sub do_upload_logo {
         redirect_to_action('tool_logo', err => 'Upload failed (no file handle).');
         return;
     }
-    my $limit = 100 * 1024;
+    my $limit = UPLOAD_MAX_LOGO;
     my $data = '';
     my $buf;
     binmode($fh);
@@ -10107,6 +11554,12 @@ sub do_upload_logo {
 ################################################################################
 sub do_delete_logo {
     my ($user) = @_;
+    # Admin-only; see the note in do_upload_logo.
+    unless (user_may_use_tools($user)) {
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
     my $dir  = report_directory();
     my $name = $cgi->param('name');
     $name = '' unless defined $name;
@@ -10132,6 +11585,14 @@ sub do_delete_logo {
 ################################################################################
 sub do_prune_reports {
     my ($user) = @_;
+    # Admin only. The Reports page hides the Delete/Prune controls for
+    # everyone else, but main() has no central authorization gate, so a forged
+    # POST reaches here directly and the check must be repeated server-side.
+    unless (user_may_use_tools($user)) {
+        print std_header(-type => 'text/plain', -status => '403 Forbidden');
+        print "Not allowed.\n";
+        return;
+    }
     my $dir  = report_directory();
     unless (defined $dir && -d $dir) {
         redirect_to_action('report', err => 'Reporting is not configured.');
@@ -10356,7 +11817,8 @@ sub show_view_templates {
         my $up_url = esc(script_url());
         print qq{<details class="tpl-upload">\n};
         print qq{<summary class="btn btn-green">Upload template</summary>\n};
-        print qq{<form class="tpl-upload-form" method="POST" action="$up_url" enctype="multipart/form-data">\n};
+        print qq{<form class="tpl-upload-form" method="POST" action="$up_url" enctype="multipart/form-data" }
+            . qq{data-max-upload="} . UPLOAD_MAX_TEMPLATE . qq{" data-max-upload-label="100 KB">\n};
         print qq{<input type="hidden" name="action" value="upload_template">\n};
         print csrf_field();
         print qq{<label class="tpl-up-field">Template file }
@@ -10378,7 +11840,8 @@ sub show_view_templates {
         # capture, then install it like a normal upload.
         print qq{<details class="tpl-upload">\n};
         print qq{<summary class="btn btn-green">Upload HEX capture</summary>\n};
-        print qq{<form class="tpl-upload-form" method="POST" action="$up_url" enctype="multipart/form-data">\n};
+        print qq{<form class="tpl-upload-form" method="POST" action="$up_url" enctype="multipart/form-data" }
+            . qq{data-max-upload="} . UPLOAD_MAX_HEX . qq{" data-max-upload-label="1 MB">\n};
         print qq{<input type="hidden" name="action" value="upload_hex">\n};
         print csrf_field();
         print qq{<label class="tpl-up-field">HEX capture }
@@ -10975,7 +12438,7 @@ sub do_upload_template {
     unless (defined $up) {
         print qq{<p class="error">Upload failed (no file handle).</p>\n}; return $done->();
     }
-    my $limit = 100 * 1024;
+    my $limit = UPLOAD_MAX_TEMPLATE;
     my ($data, $buf) = ('', undef);
     binmode($up);
     while (read($up, $buf, 8192)) {
@@ -11125,7 +12588,7 @@ sub do_upload_hex {
     unless (defined $up) {
         print qq{<p class="error">Upload failed (no file handle).</p>\n}; return $done->();
     }
-    my $limit = 1024 * 1024;
+    my $limit = UPLOAD_MAX_HEX;
     my ($data, $buf) = ('', undef);
     binmode($up);
     while (read($up, $buf, 8192)) {
@@ -11179,7 +12642,7 @@ sub do_upload_hex {
         return $done->();
     }
     binmode($tfh); print $tfh $tmpl; close($tfh); chmod(0600, $tmp);
-    if (-s $tmp > 100 * 1024) {
+    if (-s $tmp > UPLOAD_MAX_TEMPLATE) {
         unlink($tmp);
         print qq{<p class="error">The generated template is larger than 100&nbsp;KB.</p>\n};
         return $done->();
@@ -12757,6 +14220,11 @@ sub do_add_site {
     my $code = $cgi->param('code') // ''; $code =~ s/^\s+|\s+$//g;
     my $desc = $cgi->param('description') // '';
     if ($code eq '' || $code =~ /\s/) { $dbh->disconnect; _sites_redirect(err=>'Code must be a single non-empty token.'); return; }
+    # A site code is written into the device table as "site=<code>", so it must
+    # not carry the characters that structure that line: ',' separates options,
+    # '=' separates key from value and '#' starts a comment. Without this a
+    # code like "x,pass=y" perturbs how the device line parses.
+    if ($code =~ /[,=#]/) { $dbh->disconnect; _sites_redirect(err=>q{Code must not contain ',' '=' or '#'.}); return; }
     if ($code eq SITE_ALL_CODE) { $dbh->disconnect; _sites_redirect(err=>"Code '*' is reserved."); return; }
     my $dup = $dbh->selectrow_array('SELECT 1 FROM sites WHERE code = ?', undef, $code);
     if ($dup) { $dbh->disconnect; _sites_redirect(err=>"Site code '$code' already exists."); return; }
@@ -12782,6 +14250,8 @@ sub do_edit_site {
     my $site = db_site_by_id($dbh, $id);
     unless ($site) { $dbh->disconnect; _sites_redirect(err=>'Site not found.'); return; }
     if ($code eq '' || $code =~ /\s/ || $code eq SITE_ALL_CODE) { $dbh->disconnect; _sites_redirect(err=>'Invalid code.'); return; }
+    # See do_add_site: these characters structure the device-table line.
+    if ($code =~ /[,=#]/) { $dbh->disconnect; _sites_redirect(err=>q{Code must not contain ',' '=' or '#'.}); return; }
     my $dup = $dbh->selectrow_array('SELECT 1 FROM sites WHERE code = ? AND id <> ?', undef, $code, $id);
     if ($dup) { $dbh->disconnect; _sites_redirect(err=>"Site code '$code' already exists."); return; }
     my $oldcode = $site->{code};
@@ -13002,49 +14472,6 @@ sub do_set_user_sites {
     redirect_to_user_page(action=>"user_edit", username=>$target, msg=>"Updated sites for $target.");
 }
 
-################################################################################
-# do_set_download_full_report
-#
-# Parameters:
-#   $admin
-################################################################################
-sub do_set_download_full_report {
-    my ($admin) = @_;
-    my $dbh = db_connect();
-    unless ($dbh && user_is_admin($dbh, $admin)) { $dbh->disconnect if $dbh;
-        print std_header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
-    my $target = $cgi->param('username') // '';
-    my $val = $cgi->param('value') ? 1 : 0;
-    $dbh->do('UPDATE users SET download_full_report = ? WHERE username = ?', undef, $val, $target)
-        if $target ne '';
-    $dbh->disconnect;
-    audit(action=>'set_download_full_report', object_type=>'user', object_id=>$target,
-          field=>'download_full_report', new_value=>($val?'yes':'no'),
-          detail=>($val ? 'granted report-download right' : 'revoked report-download right'));
-    redirect_to_user_page(action=>"user_list", msg=>"Updated report-download right for $target.");
-}
-
-################################################################################
-# do_set_download_full_config
-#
-# Parameters:
-#   $admin
-################################################################################
-sub do_set_download_full_config {
-    my ($admin) = @_;
-    my $dbh = db_connect();
-    unless ($dbh && user_is_admin($dbh, $admin)) { $dbh->disconnect if $dbh;
-        print std_header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
-    my $target = $cgi->param('username') // '';
-    my $val = $cgi->param('value') ? 1 : 0;
-    $dbh->do('UPDATE users SET download_full_config = ? WHERE username = ?', undef, $val, $target)
-        if $target ne '';
-    $dbh->disconnect;
-    audit(action=>'set_download_full_config', object_type=>'user', object_id=>$target,
-          field=>'download_full_config', new_value=>($val?'yes':'no'),
-          detail=>($val ? 'granted config-download right' : 'revoked config-download right'));
-    redirect_to_user_page(action=>"user_list", msg=>"Updated config-download right for $target.");
-}
 
 ################################################################################
 # do_set_email
@@ -13355,6 +14782,7 @@ sub show_user_edit {
         my $e = $row->{edit_device_table}  ? ' checked' : '';
         my $r = $row->{download_full_report} ? ' checked' : '';
         my $c = $row->{download_full_config} ? ' checked' : '';
+        my $g = $row->{read_debug}           ? ' checked' : '';
         # Administrator: when on, it supersedes the individual rights below; JS
         # greys them out. The server treats admin as granting everything anyway.
         print qq{<p><label class="checkbox-label"><input type="checkbox" name="admin" value="1" id="ue-admin"$a> }
@@ -13366,6 +14794,16 @@ sub show_user_edit {
             . qq{Download full (unfiltered) report</label></p>\n};
         print qq{<p><label class="checkbox-label"><input type="checkbox" name="full_config" value="1" class="ue-sub"$c> }
             . qq{Download / copy unmasked device config</label></p>\n};
+        # Deliberately last and deliberately spelled out: a debug log is a full
+        # session transcript, and on a model that does not suspend its session
+        # log around password sends it holds the device password in CLEAR TEXT.
+        # Granting this is closer to handing over device credentials than to a
+        # read-only view, so the label says so rather than calling it
+        # "diagnostics". Downloading and deleting stay admin-only.
+        print qq{<p><label class="checkbox-label"><input type="checkbox" name="read_debug" value="1" class="ue-sub"$g> }
+            . qq{View device debug logs }
+            . qq{<span class="ue-warn">&mdash; a debug log is a full session transcript and may }
+            . qq{contain the device password in clear text</span></label></p>\n};
         print qq{</div>\n};
     }
     print qq{</fieldset>\n};
@@ -13510,14 +14948,17 @@ sub do_user_save {
         edit_device_table    => $is_protected ? 1 : ($cgi->param('edit')        ? 1 : 0),
         download_full_report => $is_protected ? 1 : ($cgi->param('full_report') ? 1 : 0),
         download_full_config => $is_protected ? 1 : ($cgi->param('full_config') ? 1 : 0),
+        read_debug           => $is_protected ? 1 : ($cgi->param('read_debug')  ? 1 : 0),
     );
 
     # Write all fields in one statement.
     my $ok = eval {
         $dbh->do('UPDATE users SET email = ?, admin_function = ?, edit_device_table = ?, '
-               . 'download_full_report = ?, download_full_config = ? WHERE username = ?',
+               . 'download_full_report = ?, download_full_config = ?, read_debug = ? '
+               . 'WHERE username = ?',
                undef, $new{email}, $new{admin_function}, $new{edit_device_table},
-               $new{download_full_report}, $new{download_full_config}, $target);
+               $new{download_full_report}, $new{download_full_config},
+               $new{read_debug}, $target);
         1;
     };
     unless ($ok) {
@@ -13547,6 +14988,7 @@ sub do_user_save {
         $log->('edit_device_table',    'set_edit_right',            $old->{edit_device_table},    $new{edit_device_table},    $yn);
         $log->('download_full_report', 'set_download_full_report',  $old->{download_full_report}, $new{download_full_report}, $yn);
         $log->('download_full_config', 'set_download_full_config',  $old->{download_full_config}, $new{download_full_config}, $yn);
+        $log->('read_debug',           'set_read_debug',            $old->{read_debug},           $new{read_debug},           $yn);
     }
     $dbh->disconnect;
 
@@ -14214,6 +15656,12 @@ sub do_add_user {
 # Parameters:
 #   $user
 ################################################################################
+# Note on self-delete and "the last admin": there is deliberately no such rule.
+# An admin may clear their own admin box or delete another admin. This cannot
+# lock anyone out, because $PROTECTED_USER can never be deleted (the check
+# below) and user_is_admin() returns true for it unconditionally -- so that
+# account can always sign in and grant the right back. A security audit tends
+# to flag the missing guard rail; it is absent on purpose, not by oversight.
 sub do_delete_user {
     my ($user) = @_;
     my $target = $cgi->param('username') // '';
@@ -15241,6 +16689,10 @@ sub render_option_field {
     my $name = ($spec && $spec->{repeatable})
              ? "${rk}_opt_${key}__${idx}" : "${rk}_opt_${key}";
     my $mand = ($spec && $spec->{mandatory}) ? qq{ <span class="opt-req">*</span>} : '';
+    # An option outside this model's catalog is kept and labelled rather than
+    # dropped or refused, so a table from a newer fetchconfig round-trips. It
+    # is still checked for illegal content on save -- see the note on
+    # validate_records()'s option loop.
     my $unrecognized = $spec ? '' : qq{ <span class="opt-unknown">(unrecognized)</span>};
     my $ev = esc(defined $val ? $val : '');
 
@@ -15739,7 +17191,17 @@ sub show_edit_table {
         . qq{table is saved before your changes are written. Edits take effect on the }
         . qq{next backup run.</p>\n};
 
-    print $cgi->start_form(-method => 'POST', -action => script_url(), -id => 'edit-form');
+    # URL-ENCODED, not multipart. CGI.pm's start_form defaults to
+    # multipart/form-data whenever $XHTML is on (it is), which costs roughly
+    # 86 bytes of boundary and Content-Disposition framing PER FIELD -- on a
+    # table of a few thousand devices that is megabytes of pure overhead, and
+    # the whole POST is bounded by $CGI::POST_MAX (and, under mod_fcgid, by
+    # FcgidMaxRequestLen). This form has no file input, so multipart buys
+    # nothing; url-encoding the same table is 4-6x smaller. Set explicitly so
+    # it cannot revert if CGI.pm's default changes.
+    print $cgi->start_form(-method => 'POST', -action => script_url(), -id => 'edit-form',
+        -enctype => 'application/x-www-form-urlencoded',
+        -data_max_post => $CGI::POST_MAX);
     print qq{<input type="hidden" name="table_mtime" value="} . esc($mtime) . qq{">\n};
     print csrf_field();
 
@@ -15997,8 +17459,14 @@ sub reconstruct_records_from_form {
     # Bound the loop: a device table has at most a few hundred records, so
     # cap this well above any real table to stop a crafted huge rec_count
     # from spinning the CPU. Records beyond the cap are simply ignored.
-    $count = 100000 if $count > 100000;
+    $count = REC_MAX if $count > REC_MAX;
     my (@records, @warnings);
+
+    # The submitted parameter names, read ONCE. This loop used to call
+    # $cgi->param() again for every record, making the pass O(records x
+    # params) -- a form with a large (but legal) rec_count cost seconds of CPU
+    # in a single request. The list cannot change while we walk it.
+    my @all_params = $cgi->param();
 
     for (my $n = 0; $n < $count; $n++) {
         my $rk = "r$n";
@@ -16039,7 +17507,7 @@ sub reconstruct_records_from_form {
         my %submitted;
         my @submitted_order;   # order options first appeared in the form
         my %repeat;            # repeatable key -> [ values in index order ]
-        for my $pname ($cgi->param()) {
+        for my $pname (@all_params) {
             next unless $pname =~ /^\Q${rk}\E_opt_(.+)$/;
             my $key = $1;
             # Repeatable options use an indexed name "<key>__<n>"; collect them
@@ -16048,6 +17516,15 @@ sub reconstruct_records_from_form {
                 my ($rkey, $ridx) = ($1, $2);
                 my $rspec = $is_email ? $EMAIL_OPTS{$rkey} : option_spec($model, $rkey);
                 if ($rspec && $rspec->{repeatable}) {
+                    # Bound the index before it is used as an array subscript.
+                    # It comes straight from the submitted field NAME, and
+                    # assigning to $repeat{$rkey}[$ridx] pre-extends the array
+                    # to that length: a single crafted field such as
+                    # "<key>__100000000" allocated hundreds of MB and burned
+                    # seconds of CPU. The editor only ever emits small indices
+                    # (1000 + a counter), so anything past the cap is a forged
+                    # request and is dropped rather than honoured.
+                    next if $ridx > OPT_REPEAT_MAX_INDEX;
                     my $rv = $cgi->param($pname);
                     $rv = '' unless defined $rv;
                     $repeat{$rkey}[$ridx] = $rv;
@@ -16060,8 +17537,21 @@ sub reconstruct_records_from_form {
             $val = '' unless defined $val;
             # Secret write-back: a field still holding the mask keeps the
             # original stored value; anything else (including empty) is new.
-            my $spec = $is_email ? $EMAIL_OPTS{$key} : option_spec($model, $key);
-            if ($spec && $spec->{type} eq 'secret' && $val eq $SECRET_KEEP) {
+            #
+            # The test is on the MASK VALUE ALONE, deliberately not on the
+            # option's catalog type. option_spec() falls back to %COMMON_OPTS
+            # for a model it does not know (see its fallback), and 'enable' is
+            # not in that set -- so keying this on $spec->{type} eq 'secret'
+            # meant that saving a device whose model is missing from the
+            # catalog wrote the literal mask string into the table as the
+            # password, silently destroying the stored secret. That is not
+            # hypothetical: the editor deliberately re-offers an unknown model
+            # as a selected "(unknown)" option, so a device table written by a
+            # newer fetchconfig round-trips through here on any ordinary save.
+            # $SECRET_KEEP is a sentinel this application emits itself and is
+            # never a legitimate option value, so restoring on it unconditionally
+            # is always the safe reading.
+            if ($val eq $SECRET_KEEP) {
                 my $ov = orig_option_value($orig, $n, $key);
                 $val = defined $ov ? $ov : '';
             }
@@ -16215,6 +17705,11 @@ sub validate_records {
         my $where = $r->{kind} . " #$i";
 
         if ($r->{kind} eq 'device' || $r->{kind} eq 'default') {
+            # The model is checked for ILLEGAL CONTENT, not for catalog
+            # membership: a name outside the catalog is kept and shown in the
+            # dropdown as "(unknown)" so a device table written by a newer
+            # fetchconfig stays editable. See the long note on the option loop
+            # below for why that is deliberate and what bounds it.
             my $m = defined $r->{model} ? $r->{model} : '';
             if ($m eq '' || $m !~ /^[\w.\-]+$/) {
                 push @errors, "$where has an invalid model name" . ($m ne '' ? " '$m'" : '')
@@ -16223,10 +17718,51 @@ sub validate_records {
         }
 
         # Option keys and values (for every kind that has options).
+        #
+        # ---------------------------------------------------------------
+        # DELIBERATE, NOT AN OVERSIGHT -- please read before "fixing" this.
+        #
+        # An option this model does not declare is NOT rejected here, and a
+        # model missing from the catalog is NOT rejected either. Both are
+        # kept and labelled in the editor instead: an unknown option renders
+        # as a free-text field marked "(unrecognized)", and an unknown model
+        # stays in the dropdown marked "(unknown)".
+        #
+        # The reason is forward compatibility. fetchconfig gains models and
+        # options faster than this catalog is updated, and the device table
+        # is shared with the CLI, which may well be newer. If an unknown
+        # model or option were an error, a table written by a newer
+        # fetchconfig could not be opened and saved here at all -- one new
+        # option on one device would lock an operator out of the editor --
+        # and a save that silently dropped them would corrupt the table for
+        # the CLI. Labelling them keeps the table round-trippable and makes
+        # the gap visible to the operator.
+        #
+        # A security audit will flag this as "no catalog validation on
+        # save". That trade-off is understood and intentional; the control
+        # is that unknown input is still checked for ILLEGAL content, which
+        # is what the two checks immediately below do and what the typed
+        # checks further down add wherever a spec does exist:
+        #
+        #   * option NAME  -- must be [A-Za-z0-9_.-] only, so an unknown key
+        #     can never carry '=', ',', whitespace or quotes and so can
+        #     never add or split a key/value pair on the line.
+        #   * option VALUE -- must contain no control characters, so it can
+        #     never inject a newline and forge a second device line.
+        #
+        # Commas and whitespace inside a value are safe without rejection:
+        # serialize_opts() quotes such a value and parse_opts() parses it
+        # back through Text::ParseWords, so it round-trips intact.
+        #
+        # What is deliberately NOT validated is the MEANING of an unknown
+        # option -- only fetchconfig itself can know that, and it reports an
+        # unusable option when the backup runs.
+        # ---------------------------------------------------------------
         for my $pair (@{ $r->{opts} || [] }) {
             my ($k, $v) = @$pair;
             $k = '' unless defined $k;
             $v = '' unless defined $v;
+            # Applies to EVERY option, known or unknown -- see the note above.
             if ($k !~ /^[\w.\-]+$/) {
                 push @errors, "$where has an invalid option name '$k' "
                             . "(letters, digits, dot, dash, underscore only).";
@@ -16234,6 +17770,64 @@ sub validate_records {
             if ($v =~ $ctrl) {
                 push @errors, "$where option '$k' contains a control character "
                             . "(newlines and tabs are not allowed).";
+            }
+
+            # Value must match the type its catalog spec declares. The editor
+            # renders each option with a widget derived from that spec -- a
+            # number field, an on/off select, a transport select -- but the
+            # widget is browser-side only and this is the first and last place
+            # the submitted value is checked, so a forged POST previously wrote
+            # timeout=abc, transport=PWN or debug=BANANA straight into the
+            # device table.
+            #
+            # Validated only where a spec EXISTS. An option this model does not
+            # declare has no type to check against, and the editor deliberately
+            # preserves such options as free-text "(unrecognized)" chips so
+            # nothing is ever silently dropped -- see the catalog header. The
+            # same goes for an option carried on a model missing from the
+            # catalog: option_spec() falls back to the common set, so the
+            # common options are still typed and the model-specific ones are
+            # preserved verbatim.
+            my $spec = ($r->{kind} eq 'email')
+                     ? $EMAIL_OPTS{$k}
+                     : option_spec(defined $r->{model} ? $r->{model} : '', $k);
+            if ($spec && $v ne '') {
+                my $t = defined $spec->{type} ? $spec->{type} : '';
+                # The accepted sets mirror the <option> values that
+                # render_option_field emits for each type; keep them in step.
+                my %ENUM = (
+                    bool           => ['1', '0'],
+                    debug          => ['on', 'off'],
+                    enum_timezone  => ['', 'hide'],
+                    enum_tls       => ['off', 'starttls', 'ssl'],
+                    enum_transport => ['ssh', 'telnet', 'auto'],
+                    enum_onoff     => ['', 'on', 'off'],
+                );
+                if ($t eq 'int') {
+                    # Digits only, and bounded in length: every int option here
+                    # is a count or a number of seconds, so a 20-digit value is
+                    # never meaningful and only invites overflow downstream.
+                    push @errors, "$where option '$k=$v' must be a whole number."
+                        unless $v =~ /^\d{1,10}$/;
+                } elsif ($ENUM{$t}) {
+                    # Compare case-insensitively: a hand-edited table may well
+                    # carry On/OFF, and rejecting that would block the save of
+                    # an otherwise valid table.
+                    my $lv = lc $v;
+                    unless (grep { $_ eq $lv } @{ $ENUM{$t} }) {
+                        push @errors, "$where option '$k=$v' is not one of: "
+                            . join(', ', map { $_ eq '' ? "(empty)" : $_ } @{ $ENUM{$t} }) . ".";
+                    }
+                } elsif ($t eq 'enum_report_logo') {
+                    # The widget offers the image files actually present in the
+                    # report directory. valid_logo_name() was applied when
+                    # listing, uploading and serving a logo, but not here, so a
+                    # forged value could put a traversal path into the email:
+                    # line for fetchconfig to resolve.
+                    push @errors, "$where option '$k=$v' is not a valid image "
+                                . "file name."
+                        unless valid_logo_name($v);
+                }
             }
         }
         # Bare-recipient email value.
@@ -16373,6 +17967,18 @@ sub directory_allowlist_violations {
                 my $kind = $k eq 'repository' ? 'repository' : 'template';
                 next if defined resolve_allowed_path($kind, $v);
                 push @v, "$who: $k=$v is not in the allowed directory list.";
+            } elsif ($k eq 'lock_dir' && @{ $al->{lock} || [] }) {
+                # lock_dir was missing from this chain entirely, so the
+                # restricted dropdown in the editor was the only thing stopping
+                # an arbitrary path and a forged POST wrote it straight through.
+                #
+                # Opt-in, like fetch_run and report and as README documents:
+                # "without a lock line, lock_dir= is unrestricted". Gating on
+                # declared lock entries rather than on the allow-list block as
+                # a whole keeps an install that armors repository/template but
+                # never declared lock directories working exactly as before.
+                next if defined resolve_allowed_path('lock', $v);
+                push @v, "$who: $k=$v is not in the allowed lock directory list.";
             } elsif ($k eq 'on_fetch_run' && $al->{fetch_run_configured}) {
                 if ($al->{fetch_run_disabled}) {
                     push @v, "$who: on_fetch_run is not allowed "
@@ -16793,17 +18399,17 @@ sub valid_host {
     return 0 if $host =~ /[\s,]/;   # no spaces/commas -- would break the table
 
     # IPv4: four 0-255 octets.
-    if ($host =~ /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/) {
+    if ($host =~ /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\z/) {
         return !(grep { $_ > 255 } ($1, $2, $3, $4));
     }
     # IPv6: hex groups and/or '::'. Cheap structural check (not full RFC).
     if ($host =~ /:/) {
-        return ($host =~ /^[0-9A-Fa-f:]+$/ && $host =~ /::|(?:[0-9A-Fa-f]{1,4}:){2,}/) ? 1 : 0;
+        return ($host =~ /^[0-9A-Fa-f:]+\z/ && $host =~ /::|(?:[0-9A-Fa-f]{1,4}:){2,}/) ? 1 : 0;
     }
     # Hostname / FQDN: dot-separated labels, each 1-63 chars of
     # letters/digits/hyphen, not starting or ending with a hyphen.
     for my $label (split /\./, $host, -1) {
-        return 0 unless $label =~ /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+        return 0 unless $label =~ /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\z/;
     }
     return 1;
 }
@@ -16860,7 +18466,7 @@ sub _basename { my ($p) = @_; $p =~ s{.*/}{}; return $p; }
 ################################################################################
 sub backup_name_re {
     my $base = quotemeta(_basename($DEVICE_TABLE));
-    return qr/^${base}\.\d{4}-\d\d-\d\d_\d{6}\.bak$/;
+    return qr/^${base}\.\d{4}-\d\d-\d\d_\d{6}\.bak\z/;
 }
 
 ################################################################################
@@ -17082,7 +18688,12 @@ sub show_bulk_edit {
             . join('<br>', map { esc($_) } @$errors) . qq{</p>\n};
     }
 
+    # url-encoded for the same reason as the device-table editor form (see
+    # there): no file input, and the textarea carries the whole devices
+    # section, so multipart framing is wasted bytes against $CGI::POST_MAX.
     print $cgi->start_form(-method => 'POST', -action => script_url(), -id => 'bulk-form',
+        -enctype => 'application/x-www-form-urlencoded',
+        -data_max_post => $CGI::POST_MAX,
         -onsubmit => "fcBulkConfirm(event); return false;");
     print qq{<input type="hidden" name="action" value="bulk_save">\n};
     print qq{<input type="hidden" name="table_mtime" value="} . esc($mtime) . qq{">\n};
@@ -17456,7 +19067,10 @@ sub render_record_card {
             my $s = ($_ eq $model) ? ' selected' : '';
             qq{<option value="} . esc($_) . qq{"$s>} . esc($_) . qq{</option>}
         } @models);
-        # If the record's model isn't a known one, keep it as a selected option too.
+        # If the record's model isn't a known one, keep it as a selected option
+        # too, labelled "(unknown)". This is what keeps a device table written
+        # by a newer fetchconfig editable; validate_records() deliberately does
+        # not reject it -- see the note on its option loop.
         unless (grep { $_ eq $model } @models) {
             $sel = qq{<option value="} . esc($model) . qq{" selected>} . esc($model)
                  . qq{ (unknown)</option>} . $sel;
@@ -18657,7 +20271,7 @@ HTML
 sub host_sort_key {
     my ($host) = @_;
     $host = '' unless defined $host;
-    if ($host =~ /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
+    if ($host =~ /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\z/
         && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255) {
         return sprintf('0-%03d.%03d.%03d.%03d', $1, $2, $3, $4);
     }
@@ -20117,7 +21731,7 @@ sub template_upload_name_ok {
     return 0 if $name =~ m{[/\\]};          # no path separators
     return 0 if $name =~ /\.\./;            # no ".."
     return 0 if $name =~ /^\./;             # no leading dot (hidden / .bak-ish)
-    return 0 unless $name =~ /^[A-Za-z0-9._-]+\.tmpl$/;
+    return 0 unless $name =~ /^[A-Za-z0-9._-]+\.tmpl\z/;
     return 1;
 }
 
@@ -20192,12 +21806,25 @@ sub rename_template_file {
         return ($status == 0) ? (1, 'Renamed.')
                               : (0, helper_fail_msg($status, $out));
     }
-    return (0, "target already exists: $new") if -e $new;   # never overwrite
-    unless (rename($old, $new)) {
-        return (0, "cannot rename $old: $! (set TEMPLATE_HELPER, or make the template directory writable)");
+    # Atomic no-overwrite rename. This used to test -e $new and then call
+    # rename(), which is check-then-act: POSIX rename() replaces an existing
+    # target silently, so anything created in the gap was destroyed. link()
+    # fails if the target exists, which closes the gap -- the same way
+    # _atomic_create_new_file() handles the upload path. Both names are in one
+    # directory (the caller pins it), so link() cannot fail across devices.
+    unless (link($old, $new)) {
+        my $e = $!;
+        return (0, 'a template with that name already exists') if -e $new;
+        return (0, "cannot rename $old: $e (set TEMPLATE_HELPER, or make the template directory writable)");
+    }
+    unless (unlink($old)) {
+        # The new name is in place; leaving the old one behind is better than
+        # reporting success for a half-done rename.
+        return (0, "created $new but could not remove $old: $!");
     }
     my ($obak, $nbak) = ("$old.bak", "$new.bak");
-    rename($obak, $nbak) if -e $obak && !-l $obak;          # best-effort: move the backup
+    # Best-effort, and never over an existing backup.
+    rename($obak, $nbak) if -e $obak && !-l $obak && !-e $nbak;
     return (1, 'Renamed.');
 }
 
@@ -20790,7 +22417,7 @@ sub esc {
 ################################################################################
 sub valid_id {
     my ($id) = @_;
-    return defined $id && $id =~ /^[\w.][\w.\-]*$/;
+    return defined $id && $id =~ /^[\w.][\w.\-]*\z/;
 }
 
 ################################################################################
@@ -21006,6 +22633,7 @@ sub page_head {
                 $su->('Login failures',                               '?action=tool_login_failures'),
                 $su->('Check devices for consistent backup suffixes', '?action=tool_suffix'),
                 $su->('Check site assignment',                        '?action=check_site_assignment'),
+                $su->('Device debug logs',                            '?action=tool_debug'),
                 $su->('Devices without backups',                      '?action=tool_nobackup'),
                 $su->('Disk space',                                   '?action=tool_diskspace'),
                 $su->('Empty backup cleanup',                         '?action=tool_empty_bk'),
@@ -21634,12 +23262,133 @@ sub confirm_modal_html {
     window.fcConfirm(message, function () {}, { alertOnly: true });
   };
 
+  // UTF-8 byte length of a string (each %XX escape is one byte).
+  function fcUtf8Bytes(v) {
+    if (v == null) return 0;
+    try { return encodeURIComponent(String(v)).replace(/%[0-9A-Fa-f]{2}/g, 'x').length; }
+    catch (err) { return String(v).length; }
+  }
+
+  // Estimate the encoded size of a form submission, in bytes. Used by the
+  // data-max-post guard; see the note there on why it is only an estimate.
+  //
+  // The two encodings have very different costs, so each is counted the way it
+  // actually goes on the wire:
+  //   url-encoded  "name=value&"     -- percent-escaping inflates the VALUE,
+  //                                     so measure the escaped form directly.
+  //   multipart    boundary + header -- about 86 bytes of framing per field,
+  //                                     values travel as raw UTF-8 bytes.
+  window.fcEstimatePostBytes = function (form) {
+    var enc  = (form.getAttribute('enctype') || '').toLowerCase();
+    var mp   = enc.indexOf('multipart') !== -1;
+    var els  = form.elements || [];
+    var tot  = 0;
+    var pair = function (n, v) {
+      if (mp) {
+        // --boundary CRLF + Content-Disposition line + CRLF CRLF + value CRLF
+        return 86 + fcUtf8Bytes(n) + fcUtf8Bytes(v);
+      }
+      try { return encodeURIComponent(n).length + 1 + encodeURIComponent(v).length + 1; }
+      catch (err) { return fcUtf8Bytes(n) + fcUtf8Bytes(v) + 2; }
+    };
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (!el || !el.name || el.disabled) continue;
+      var t = (el.type || '').toLowerCase();
+      // Not successful controls.
+      if (t === 'submit' || t === 'button' || t === 'reset' || t === 'image') continue;
+      if ((t === 'checkbox' || t === 'radio') && !el.checked) continue;
+      if (t === 'file') {
+        var fl = el.files;
+        if (fl) {
+          for (var k = 0; k < fl.length; k++) {
+            tot += pair(el.name, '') + fl[k].size + fcUtf8Bytes(fl[k].name) + 40;
+          }
+        }
+        continue;
+      }
+      if (el.tagName === 'SELECT' && el.multiple) {
+        for (var j = 0; j < el.options.length; j++) {
+          if (el.options[j].selected) tot += pair(el.name, el.options[j].value);
+        }
+        continue;
+      }
+      tot += pair(el.name, el.value);
+    }
+    return tot;
+  };
+
   // Forms with data-confirm="..." defer submission until confirmed. Using
   // form.submit() (which does not re-fire the submit event) avoids any
   // re-entry guard.
   document.addEventListener('submit', function (e) {
     var form = e.target;
     if (!form || !form.getAttribute) return;
+
+    // data-max-upload="<bytes>": refuse an over-sized file BEFORE the upload
+    // starts. This is a convenience, NOT a control -- the server re-checks
+    // every upload with its own byte cap and is the only thing that decides.
+    // Do not remove the server-side check because this exists.
+    //
+    // It is here because an over-sized upload cannot be reported properly once
+    // it is under way: the web server answers while the browser is still
+    // sending, the browser keeps sending, and the connection is reset before
+    // the response is read -- so the user sees the browser's own error page,
+    // not ours, whatever ErrorDocument is configured (Apache bug 17722). The
+    // only way to show a usable message is to never start the request.
+    var maxAttr = form.getAttribute('data-max-upload');
+    if (maxAttr) {
+      var max = parseInt(maxAttr, 10);
+      var files = form.querySelectorAll('input[type=file]');
+      for (var fi = 0; fi < files.length; fi++) {
+        var f = files[fi].files;
+        // No File API (very old browser) -> skip; the server still refuses it.
+        if (!f || !f.length || typeof f[0].size !== 'number') continue;
+        if (max > 0 && f[0].size > max) {
+          e.preventDefault();
+          var lbl = form.getAttribute('data-max-upload-label') || (Math.round(max / 1024) + ' KB');
+          var kb  = function (n) {
+            return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB'
+                                : Math.round(n / 1024) + ' KB';
+          };
+          window.fcAlert('"' + f[0].name + '" is ' + kb(f[0].size) +
+                         '. The limit is ' + lbl + '. Choose a smaller file.');
+          return;
+        }
+      }
+    }
+
+    // data-max-post="<bytes>": estimate the encoded request size and REFUSE to
+    // send one that would exceed it. Like data-max-upload this is advisory --
+    // the server enforces $CGI::POST_MAX regardless -- but here refusing is
+    // the kinder behaviour: an over-sized POST is discarded by CGI.pm before
+    // the script runs, so the operator would lose every edit in the form with
+    // nothing saved and no way back. Better to stop and say so.
+    //
+    // The estimate cannot be exact: the browser picks its own boundary length
+    // for multipart, and non-ASCII values encode to a variable number of
+    // bytes. A 20% margin covers that, and is deliberately generous -- a false
+    // refusal is recoverable (collapse some rows), a false pass is not.
+    var maxPost = form.getAttribute('data-max-post');
+    if (maxPost) {
+      var cap = parseInt(maxPost, 10);
+      if (cap > 0) {
+        var est = window.fcEstimatePostBytes(form);
+        if (est * 1.2 > cap) {
+          e.preventDefault();
+          var mb = function (n) { return (n / 1048576).toFixed(2) + ' MB'; };
+          window.fcAlert(
+            'This form is too large to send: about ' + mb(est) +
+            ' against a limit of ' + mb(cap) + '.\n\n' +
+            'Nothing has been saved. Collapse the device rows you are not ' +
+            'editing (an expanded row is sent in full even after you collapse ' +
+            'it, so reload the page to reset), or save your changes in ' +
+            'smaller batches.');
+          return;
+        }
+      }
+    }
+
     // data-prompt: ask for a value, write it into the named hidden field, submit.
     var pmsg = form.getAttribute('data-prompt');
     if (pmsg) {

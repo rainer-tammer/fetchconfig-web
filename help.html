@@ -122,6 +122,7 @@
         <li><a href="#help-loginfail">Login failures</a></li>
         <li><a href="#help-restore">Restore device table</a></li>
         <li><a href="#help-cleanup">Repository checks &amp; cleanup</a></li>
+        <li><a href="#help-debug">Device debug logs</a></li>
         <li><a href="#help-diskspace">Disk space</a></li>
         <li><a href="#help-cfg">Show fetchconfig-web.cfg</a></li>
         <li><a href="#help-email">E-mail setup &amp; report logo</a></li>
@@ -279,11 +280,25 @@
     <li>Devices with no status file yet show <strong>N/A</strong> in the date,
         time, duration, State and Changed columns; Site and Device-ID always
         show their real values.</li>
-    <li>Filter with the <strong>State</strong> and <strong>Changed</strong>
-        drop-downs (N/A can be filtered too), sort by any column header, and page
-        through long lists.</li>
+    <li>The list is sorted by <strong>Device-ID</strong>, ignoring upper and
+        lower case. Click any column header to sort by that column instead;
+        sorting always covers every device, not just the page you are
+        looking at.</li>
+    <li>Filter by <strong>State</strong>, <strong>Changed</strong>,
+        <strong>Site</strong> and <strong>Device-ID</strong>. State and Changed
+        can also be filtered on <em>N/A</em>; Device-ID matches any part of the
+        name and ignores upper and lower case, exactly as on the Devices page.
+        <strong>Clear filter</strong> resets all four, and your choices are
+        remembered for the next visit.</li>
+    <li><strong>Per page</strong> sets how many devices are listed at once
+        (up to 160, or all of them).</li>
     <li>Click a Device-ID to open its backups; the back button there returns you
         to this page.</li>
+    <li>A <strong>Debug</strong> column with a <strong>View</strong> button
+        appears for administrators and for users holding the <em>View device
+        debug logs</em> permission &mdash; see
+        <a href="#help-debug">Device debug logs</a>. Downloading and deleting
+        those logs is done from Tools, by administrators only.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
@@ -705,6 +720,64 @@
         is no longer in the table, unless the note's <strong>Keep</strong> flag is
         set.</li>
   </ul>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-debug">
+  <h2>Device debug logs <span class="badge">admins only</span></h2>
+  <p>A device with <code>debug=on</code> makes fetchconfig write a full session
+  transcript to <code>&lt;device-id&gt;.debug</code> in that device's
+  repository. The file is rewritten on every run.</p>
+  <ul>
+    <li>On <a href="#help-status">Device backup status</a> a
+        <strong>Debug</strong> column offers <strong>View</strong>, greyed out
+        when the device has no debug file. It follows the <em>file</em>, not
+        the <code>debug</code> option &mdash; a device set back to
+        <code>debug=off</code> keeps the log written while it was on.</li>
+    <li><strong>Who may do what:</strong> viewing needs the <em>View device
+        debug logs</em> permission on your account (administrators have it
+        automatically), and you only ever see devices your site access already
+        allows. <strong>Downloading and deleting are for administrators
+        only.</strong></li>
+    <li><strong>Large logs:</strong> under 2&nbsp;MB you see the whole file.
+        Between 2&nbsp;MB and 16&nbsp;MB you see the first and last
+        1&nbsp;MB, with a red line marking where the middle was left out.
+        Above 16&nbsp;MB the log cannot be shown or downloaded at all; an
+        administrator can still delete it.</li>
+    <li>The viewer colours the hex dump by direction and labels each line
+        <strong>SEND</strong> (written to the device) or <strong>RECV</strong>
+        (read from it), with a rule where the direction turns.
+        <strong>Sent only</strong> and <strong>Received only</strong> hide the
+        other side.</li>
+    <li><strong>SSH log hidden</strong> / <strong>SSH log shown</strong>
+        controls the ssh client's own messages (<code>debug1: ...</code> and
+        the like). They are hidden by default &mdash; on an ssh device they are
+        most of the file and none of it is traffic with the device. The
+        <code>#</code> lines that mark the session stay visible either way.</li>
+    <li><strong>Transcript</strong> reassembles the bytes into a readable
+        session &mdash; usually easier than the hex, because some devices are
+        typed one character at a time and each character is its own dump
+        line.</li>
+    <li><strong>Copy</strong> copies the log as shown, with the original
+        <code>&lt;</code> / <code>&gt;</code> markers.</li>
+    <li>If the buttons report that the log cannot be read or deleted, the file
+        belongs to <code>root</code> and the web server cannot reach it; your
+        administrator needs to set <code>TEMPLATE_HELPER</code> in the
+        configuration.</li>
+    <li>Tools &rarr; <strong>Device debug logs</strong> (administrators only)
+        lists every device that has one, with size and timestamp, and offers
+        <strong>View</strong>, <strong>Download</strong> and
+        <strong>Delete</strong> per device plus <strong>Delete all debug
+        logs</strong>.</li>
+  </ul>
+  <p><strong>A debug log can contain the device password.</strong> It records
+  the whole session. fetchconfig normally keeps the password out of it and
+  leaves <code># [secret sent - not logged]</code> in its place, but that
+  depends on the device model doing it &mdash; fetchconfig-web cannot mask a
+  password inside a hex dump. Treat these files as sensitive: only
+  administrators can see them, every view and deletion is recorded in the
+  <a href="#help-audit">audit log</a>, and after changing a password that may
+  appear in a log, delete the logs.</p>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 

@@ -112,19 +112,13 @@ ok(!(grep { ($_->[5]//'') eq 'keep' } @ROWS), 'unchanged option not logged');
 
 # Right changes log grant vs revoke distinctly (download-report right).
 {
-    no warnings 'redefine', 'once';
-    local *main::user_is_admin = sub { 1 };
-    local *main::redirect_to_user_page = sub { };
-    for my $case ([1,'granted','yes'], [0,'revoked','no']) {
-        my ($val,$verb,$yn) = @$case;
-        local *CGI::param = sub { my ($s,$k)=@_; return 'bob' if $k eq 'username'; return $val if $k eq 'value'; return; };
-        @ROWS = ();
-        main::do_set_download_full_report('admin');
-        my ($r) = grep { $_->[2] eq 'set_download_full_report' } @ROWS;
-        ok($r, "download-right change logged (value=$val)");
-        like($r->[8], qr/\b$verb report-download right/, "detail says $verb");
-        is($r->[7], $yn, "new_value is $yn");
-    }
+    # The standalone do_set_download_full_report / do_set_download_full_config
+    # handlers were removed in 2.07 as dead code -- the inline toggles they
+    # served stopped being rendered in 1.63, and the modern user editor
+    # (do_user_save) emits the same 'set_download_full_report' /
+    # 'set_download_full_config' audit actions. That logging is covered by
+    # t/C1-user-editor.t; nothing to exercise here any more.
+    ok(1, 'download-right audit logging moved to do_user_save (see C1)');
 }
 
 # Device-table external-change tripwire: records on first check, detects a

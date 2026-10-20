@@ -11,7 +11,7 @@ no warnings 'once', 'redefine';
     local *main::user_is_admin   = sub { 1 };
     local *main::db_connect      = sub { bless {}, 'MUE' };
     local *main::db_get_user     = sub { { username=>'op', email=>'ops@x.de', admin_function=>0,
-        edit_device_table=>1, download_full_report=>0, download_full_config=>1 } };
+        edit_device_table=>1, download_full_report=>0, download_full_config=>1, read_debug=>0 } };
     local *main::db_user_site_ids = sub { [3,5,7] };
     local *main::db_all_sites    = sub { [ map { {id=>$_, code=>"S$_"} } (3,5,7) ] };
     local *main::page_head       = sub { '' };
@@ -41,7 +41,7 @@ no warnings 'once', 'redefine';
     local *main::user_is_admin   = sub { 1 };
     local *main::db_connect      = sub { bless {}, 'MUE' };
     local *main::db_get_user     = sub { { username=>'admin', email=>'', admin_function=>1,
-        edit_device_table=>1, download_full_report=>1, download_full_config=>1 } };
+        edit_device_table=>1, download_full_report=>1, download_full_config=>1, read_debug=>0 } };
     local *main::db_user_site_ids = sub { [0] };
     local *main::db_all_sites    = sub { [] };
     local *main::page_head = sub { '' }; local *main::page_foot = sub { '' };
@@ -55,7 +55,7 @@ no warnings 'once', 'redefine';
 {
     local *main::user_is_admin = sub { 1 };
     local *main::db_get_user   = sub { { username=>'op', email=>'old@x.de', admin_function=>0,
-        edit_device_table=>0, download_full_report=>0, download_full_config=>0 } };
+        edit_device_table=>0, download_full_report=>0, download_full_config=>0, read_debug=>0 } };
     local *main::normalize_email = sub { $_[0] };
     local *main::db_connect    = sub { bless {}, 'MUE' };
     my @A;
@@ -72,7 +72,7 @@ no warnings 'once', 'redefine';
 {
     local *main::user_is_admin = sub { 1 };
     local *main::db_get_user   = sub { { username=>'op', email=>'same@x.de', admin_function=>0,
-        edit_device_table=>1, download_full_report=>0, download_full_config=>0 } };
+        edit_device_table=>1, download_full_report=>0, download_full_config=>0, read_debug=>0 } };
     local *main::normalize_email = sub { $_[0] };
     local *main::db_connect    = sub { bless {}, 'MUE' };
     my @A; local *main::audit = sub { push @A, 1; };
@@ -99,8 +99,15 @@ no warnings 'once', 'redefine';
     like($src, qr/action eq 'user_edit'/, 'user_edit dispatched');
     like($src, qr/action eq 'user_save'/, 'user_save dispatched');
     { my $sc = state_changing_actions($src);
-      ok($sc->{set_download_full_report} && $sc->{set_download_full_config}
-         && $sc->{set_email} && $sc->{user_save}, 'user_save is state-changing'); }
+      ok($sc->{set_email} && $sc->{user_save}, 'user_save is state-changing');
+      # Removed in 2.07 as dead code: the inline toggles stopped being
+      # rendered in 1.63 and do_user_save covers the same rights. Assert they
+      # stay gone -- a re-added half-hardened handler is how this kind of
+      # thing creeps back.
+      ok(!$sc->{set_download_full_report} && !$sc->{set_download_full_config},
+         'legacy download-right actions are gone');
+      unlike($src, qr/sub do_set_download_full_(?:report|config)\b/,
+         'legacy download-right handlers are gone'); }
     # Save/Cancel order is consistent (Cancel left, Save right) on the sites page.
     like($src, qr/">Cancel<\/a> .*?<button type="submit" class="btn btn-green">Save<\/button>/s,
          'sites page: Cancel before Save');
@@ -222,6 +229,20 @@ no warnings 'once', 'redefine';
     like($src,   qr/\[ 'WEB_DIR',/,      'WEB_DIR registered');
     like($src,   qr/\[ 'BASE_URL',/,     'BASE_URL registered');
     like($src,   qr/\[ 'CSS_BASE_URL',/, 'CSS_BASE_URL registered');
+}
+
+# --- the permission labels must fit on one line (2.08) -----------------------
+# The "View device debug logs" label carries a warning clause and needs ~890px
+# including the checkbox, the sub-rights indent and the group padding. At the
+# old 640px it wrapped, which is a poor way to present a right that hands out
+# device credentials. .ue-actions tracks the same width so Cancel/Save stay
+# aligned with the boxes above them.
+{
+    my $css = css_source();
+    my ($grp) = $css =~ /\.ue-group \{[^}]*?max-width:\s*(\d+)px/s;
+    my ($act) = $css =~ /\.ue-actions \{[^}]*?max-width:\s*(\d+)px/s;
+    cmp_ok($grp, '>=', 900, 'the permission group is wide enough for its longest label');
+    is($act, $grp, 'the action row matches the group width');
 }
 
 done_testing();

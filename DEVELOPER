@@ -4,7 +4,7 @@ fetchconfig-web -- Technical / Developer Documentation
 Audience: engineers extending or maintaining fetchconfig-web. Scope:
 architecture, request lifecycle, data structures, the PostgreSQL schema, the
 security model, and step-by-step recipes for adding functionality. Version: this
-document tracks fetchconfig-web 2.06 (requires fetchconfig 9.72+).
+document tracks fetchconfig-web 2.08 (requires fetchconfig 9.72+).
 
 --------------------------------------------------------------------------------
 
@@ -593,6 +593,66 @@ to the related ones, parameterized.
   Top/Bottom nav (top_bottom_nav()).
 - Syntax highlighting of configs is done by per-scheme highlight_* functions,
   selected by highlight_config() after masking.
+- Debug log rendering (highlight_debug_log(), debug_log_transcript()) is
+  registered in %SYNTAX_HIGHLIGHTERS under the pseudo-model __debug__, the same
+  way the template viewer uses __template__. It is not in
+  template_syntax_schemes(), so it is never user-selectable. Three things about
+  it are load-bearing and easy to break:
+  - The hex field is positional, not tokenised. A Net::Telnet dump_log line is
+    <dir> 0x%05x:  followed by exactly 16*3 + 4 characters of hex
+    (DEBUG_HEX_WIDTH) and then the ASCII gutter. _dbg_hex_line() measures that
+    field relative to the end of the offset match, never from a fixed column,
+    because the offset widens past 1 MB. Both the hex view and the transcript go
+    through that one function; keep it that way.
+  - Each line's newline goes INSIDE its <span>. The Sent-only / Received-only
+    filter is CSS display:none on whole lines; with the newline outside the
+    span, a filtered view would be a column of blank rows. t/D1-debug-viewer.t
+    asserts \n(?!</span>) never matches.
+  - user_may_read_debug deliberately breaks the sibling pattern. The other per-
+    user right accessors open with return 1 if user_is_unrestricted($dbh,
+    $username), and user_is_unrestricted means "not limited to any site", NOT
+    "admin". That would hand debug logs -- and so device passwords -- to every
+    non-admin account with no site restriction. It is admin OR the explicit
+    flag, never implied. Do not align it with the others.
+  - The size bands are enforced in three places and must agree: show_debug_log
+    refuses over DEBUG_MAX_BYTES, do_download_debug re-checks the same ceiling
+    server-side (the greyed button is only UI), and debug_log_read splits
+    anything over DEBUG_VIEW_FULL_MAX into two DEBUG_VIEW_CHUNK pieces. The cut
+    marker is composed between two independently highlighted chunks, never
+    parsed out of the content, and carries only dbg-cut so no filter can hide
+    it.
+  - Real .debug files are CRLF. fetchconfig's ssh client writes its stderr
+    through a pty, and ONLCR rewrites every \n. Each renderer strips a trailing
+    \r per line. Leave it in and it lands inside the gutter span, where it sits
+    before a tag rather than before the emitted \n -- the HTML parser then
+    treats it as a line break of its own, every hex line renders as two, and
+    hiding the span hides the text but not the second line. That is what made
+    the direction filter look like it only greyed lines out.
+  - Net::Telnet writes a blank line after every dump block. It carries no
+    direction, so it must be tagged with the block it closes (dbg-blank plus
+    that block's direction class) or it survives the filter -- one blank row per
+    hidden block, which on a device that trickles its output is most of the
+    page. It must also stay transparent to turn detection, since in a real log
+    every hex line is preceded by one.
+  - ssh chatter is classified by COMPLEMENT. A .debug file holds only
+    fetchconfig's five # markers, dump_log hex lines, and the ssh client's
+    stderr (master_stderr_fh => $debug_fh in Abstract.pm). input_log is never
+    attached, so device bytes reach the file only as hex lines. Hence dbg-ssh =
+    not a hex line and not a # marker, which makes pre.config.no-ssh .dbg-ssh {
+    display: none } provably unable to hide session data. Do not "improve" this
+    into a list of ssh message prefixes -- that would be version-, log-level-
+    and locale-dependent, and it would turn a guarantee into a guess. The #
+    markers are deliberately outside the class so # [secret sent - not logged]
+    can never be hidden by a toggle.
+  - The gutter is Latin-1, not UTF-8. dump_log prints bytes 0x80-0xFF literally,
+    so _dbg_esc() widens them to UTF-8 (via _cp_utf8()) to match the app's raw-
+    bytes-out + charset=UTF-8 model. Plain esc() would put invalid UTF-8 on the
+    page.
+
+The SEND/RECV labels are CSS ::before content, not markup: generated   content
+is not part of textContent, so the shared copy button still   returns the file
+byte for byte with its original < / > glyphs. Do not   "simplify" this by
+writing the labels into the HTML.
 - Static downloads from WEB_DIR: recorder_download_html() renders the session-
   recorder download row (record_session.exe / .py) only for files actually
   present in WEB_DIR, linking them at BASE_URL/<name> (served by the web server,

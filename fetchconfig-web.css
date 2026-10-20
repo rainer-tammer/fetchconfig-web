@@ -146,6 +146,100 @@ $backdrop_css
   pre.config.hl .hl-tpurple { color: #d2a8ff; }               /* goto, done */
   pre.config.hl .hl-tdir    { color: #39c5cf; }               /* directives */
   pre.config.hl .hl-tstate  { color: #79c0ff; font-weight: 700; } /* state names */
+
+  /* ------------------------------------------------------------------ */
+  /* Device debug log viewer (?action=view_debug).                       */
+  /*                                                                     */
+  /* Direction is the thing an operator is looking for, so it is carried */
+  /* three ways: a SEND/RECV badge, a tint over the whole line, and a    */
+  /* rule where the direction turns. The badge is ::before generated     */
+  /* content, which is NOT part of textContent -- that is what lets the  */
+  /* Copy button return the file byte for byte with its original         */
+  /* '<' / '>' glyphs. Both badges are 5 columns wide, so every hex line */
+  /* shifts by the same amount and the ASCII gutter stays aligned.       */
+  /* ------------------------------------------------------------------ */
+  pre.config.hl .dbg-off { color: #7f8c98; }                    /* direction glyph + offset */
+  pre.config.hl .dbg-hex { color: #8e9aa6; }                    /* hex bytes: recessive */
+  pre.config.hl .dbg-gut { color: #f2f5f8; font-weight: 600; }  /* ASCII gutter: what is read */
+  pre.config.hl .dbg-iac { color: #f0b866; }                    /* telnet IAC (ff) */
+  pre.config.hl .dbg-ctl { color: #636f7b; }                    /* CR / LF / NUL padding */
+  pre.config.hl .dbg-tx::before { content: "SEND "; color: #39c5cf; font-weight: 700; }
+  pre.config.hl .dbg-rx::before { content: "RECV "; color: #56d364; font-weight: 700; }
+  pre.config.hl .dbg-tx { background: rgba(57,197,207,0.12); }
+  pre.config.hl .dbg-rx { background: rgba(86,211,100,0.09); }
+  pre.config.hl .dbg-tx .dbg-gut { color: #9fe4ea; }
+  pre.config.hl .dbg-rx .dbg-gut { color: #b6f0bd; }
+  pre.config.hl .dbg-turn { border-top: 1px solid rgba(255,255,255,0.16); }
+  /* The blank line Net::Telnet writes after each dump block carries its
+     block's direction class so the filter hides it, but none of the visual
+     treatment: no SEND/RECV badge on an empty line, no tinted empty band. */
+  pre.config.hl .dbg-blank::before { content: none; }
+  pre.config.hl .dbg-blank { background: none; }
+  pre.config.hl .dbg-ssh { color: #6b7682; }
+  pre.config.hl .dbg-ssh .dbg-tag { color: #8e9aa6; font-weight: 600; }
+  pre.config.hl .dbg-hdr { color: #cfd8e2; font-weight: 700;
+                           border-top: 1px solid rgba(255,255,255,0.22);
+                           border-bottom: 1px solid rgba(255,255,255,0.10); }
+  pre.config.hl .dbg-sec { color: #f0b866; font-weight: 700; }
+  /* Marker between the head and tail of a log too large to render in full.
+     It carries ONLY dbg-cut -- no direction class, not dbg-ssh -- so no
+     filter can hide the fact that content is missing. */
+  pre.config.hl .dbg-cut { color: #ff7b72; font-weight: 700; }
+  /* Direction filter. Each line's newline lives INSIDE its span, so hiding a
+     line removes its newline too -- otherwise the filtered view would be a
+     column of blank rows. */
+  pre.config.only-tx .dbg-rx, pre.config.only-rx .dbg-tx { display: none; }
+  /* SSH client chatter, hidden by default. Safe by construction: device
+     traffic reaches a .debug file only as dump_log hex lines, so .dbg-ssh --
+     everything that is neither a hex line nor a "#" marker -- can never carry
+     a byte of the session. The markers stay visible either way. */
+  pre.config.no-ssh .dbg-ssh { display: none; }
+
+  /* Viewer toolbar */
+  .dbg-bar { display: flex; flex-wrap: wrap; gap: 0.5em; align-items: center;
+             margin: 0 0 0.6em; }
+  .dbg-bar .seg { display: inline-flex; border: 1px solid #c3cad2; border-radius: 4px;
+                  overflow: hidden; }
+  .dbg-bar .seg-btn { background: #fff; border: none; padding: 0.25em 0.7em;
+                      font: inherit; font-size: 0.85em; cursor: pointer; color: #33404d;
+                      border-right: 1px solid #e1e5ea; text-decoration: none;
+                      display: inline-block; line-height: 1.5; }
+  .dbg-bar .seg .seg-btn:last-child { border-right: none; }
+  .dbg-bar .seg-btn.on { background: #1a5fb4; color: #fff; }
+  .dbg-bar .seg-btn:hover { background: #eef2f7; }
+  .dbg-bar .seg-btn.on:hover { background: #164a8f; }
+  .dbg-spacer { flex: 1 1 auto; }
+  .dbg-meta { font-size: 0.82em; color: #5b636b; }
+  /* The Delete button lives in a <form>, its neighbours do not. Inside the
+     flex toolbar a "display:inline" form is blockified to a block, so it
+     gets a LINE BOX a little taller than the button and the button sits on
+     that baseline -- leaving Delete a pixel below Download. inline-flex keeps
+     the form the exact height of its button in both places it is used: the
+     flex toolbar, and the Tools table cell, where it stays inline-level and
+     aligns with the neighbouring .btn links. */
+  .dbg-del-form { display: inline-flex; align-items: center; margin: 0;
+                  vertical-align: middle; }
+  .dbg-warn { border-left: 3px solid #b00020; padding-left: 0.6em; }
+  .dbg-legend { display: flex; flex-wrap: wrap; gap: 0.4em 1.4em; margin: 0.6em 0 0;
+                font-size: 0.82em; color: #5b636b; }
+  .dbg-legend i { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 2px;
+                  margin-right: 0.35em; vertical-align: -1px; }
+  .dbg-sw-tx  { background: #39c5cf; }
+  .dbg-sw-rx  { background: #56d364; }
+  .dbg-sw-iac { background: #f0b866; }
+  .dbg-sw-hex { background: #8e9aa6; }
+  .dbg-sw-gut { background: #f2f5f8; border: 1px solid #c3cad2; }
+
+  /* Admin-only column on the Device backup status table. */
+  table.list th.admin-col { background: #f6eecf; }
+  table.list td.admin-col { background: #fffbe6; }
+  table.list tr:hover td.admin-col { background: #fdf3cf; }
+  .admin-tag { font-size: 0.72em; font-weight: 400; color: #8a6d00; margin-left: 0.4em;
+               border: 1px solid #d9c37a; border-radius: 3px; padding: 0 0.3em;
+               white-space: nowrap; }
+  /* The read_debug right carries real weight (a debug log can hold the device
+     password in clear text), so the user editor labels it, not just names it. */
+  .ue-warn { color: #8a6d00; font-size: 0.9em; }
   /* Template editor split view */
   .tpl-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5em; margin: 0 0 0.6em; }
   .tpl-title { margin: 0.2em 0 0.4em; }
@@ -339,7 +433,44 @@ $backdrop_css
   #status-table .ch-unknown { color: #c00; }       /* red   */
   #status-table .ch-na      { color: #888; }       /* N/A muted */
   .dev-filter-row { display: flex; align-items: center; gap: 0.8em; margin: 0.8em 0; flex-wrap: wrap; }
-  .filter-label { font-size: 0.9em; color: #555; display: flex; align-items: center; gap: 0.4em; }
+  /* Controls in this row are styled to match the Devices page's .filter-row
+     exactly: same padding, border, radius and rendered font size, so a
+     drop-down and a text box are the same height as each other and as their
+     counterparts over there.
+     Two things this has to undo:
+       * .filter-box defaults to width:100% with a vertical margin (it doubles
+         as a standalone box). The equivalent reset exists for .filter-row but
+         never covered .dev-filter-row, so the input stretched to fill its
+         label and added 0.8em above and below.
+       * these controls sit INSIDE label.filter-label, which is 0.9em, while
+         the Devices controls are direct children of their row. 0.95/0.9 =
+         1.0556em cancels the label's factor so both render at the same
+         0.95em-of-the-page size (15.2px at a 16px base) instead of 13.7px.
+     Width is uniform rather than copied from Devices: these drop-downs hold
+     short values ("All states"), so the 16em basis used over there would
+     wrap the row without filling the space. */
+  /* "Per page" is a label like the others here; .filter-row styles its own
+     but that rule does not reach this row, which left the select inside it
+     unscaled. */
+  .dev-filter-row .page-size-label { flex: 0 0 auto; font-size: 0.9em; color: #555;
+                                     display: flex; align-items: center; gap: 0.4em;
+                                     white-space: nowrap; }
+  .dev-filter-row .filter-box,
+  .dev-filter-row .filter-select { flex: 0 0 auto; margin: 0; font-size: 1.0556em;
+                                   padding: 0.5em 0.7em; border: 1px solid #ccc;
+                                   border-radius: 4px; background: #fff; width: 10em;
+                                   line-height: 1.25; box-sizing: border-box;
+                                   height: 2.25em; }
+  .dev-filter-row .filter-box:focus,
+  .dev-filter-row .filter-select:focus { outline: none; border-color: #1a5fb4; }
+  /* Per page holds one to three digits; sizing it to content keeps the row
+     from carrying a mostly-empty 12em box at the end. */
+  .dev-filter-row .page-size-label .filter-select { width: auto; }
+  /* nowrap: the label is a flex container, so its text is an anonymous flex
+     item and "Device-ID" would otherwise break across two lines when the
+     control beside it claims the width. */
+  .filter-label { font-size: 0.9em; color: #555; display: flex; align-items: center;
+                  gap: 0.4em; white-space: nowrap; }
   .action-row form { margin: 0; }
   .filter-box { width: 100%; box-sizing: border-box; padding: 0.5em 0.7em; margin: 0.8em 0;
                 font-size: 0.95em; border: 1px solid #ccc; border-radius: 4px; }
@@ -369,8 +500,15 @@ $backdrop_css
   main h2 { font-size: 1.1em; margin-top: 1.8em; }
   /* User edit page: grouped fieldsets, a bounded wrapped site-access summary,
      and a right-aligned action row. */
+  /* 640px was enough when every permission was a two- or three-word label.
+     The "View device debug logs" label carries a warning clause and needs
+     ~886px including the checkbox, the sub-rights indent and the padding, so
+     the group is wide enough to keep each permission on ONE line -- a right
+     this consequential should not be read off a wrapped sentence. The page is
+     main.full, so the width is available; below it the max-width just gives
+     way and the label wraps as before. */
   .ue-group { border: 1px solid #d0d7de; border-radius: 6px; margin: 0 0 1.1em;
-              padding: 0.6em 1em 0.9em; max-width: 640px; }
+              padding: 0.6em 1em 0.9em; max-width: 960px; }
   .ue-group legend { font-weight: 600; color: #24292f; padding: 0 0.4em; }
   .ue-field { display: inline-flex; align-items: baseline; gap: 0.6em; }
   .ue-label { display: inline-block; min-width: 6.5em; color: #57606a; }
@@ -380,8 +518,10 @@ $backdrop_css
   .ue-sites-cell { display: inline-block; max-width: 600px; padding: 0.4em 0.6em;
                    border: 1px solid #d0d7de; border-radius: 4px; background: #f6f8fa;
                    white-space: normal; word-break: break-word; line-height: 1.5; }
+  /* Same width as .ue-group, so Cancel/Save stay aligned with the right edge
+     of the boxes above them. */
   .ue-actions { display: flex; justify-content: flex-end; gap: 0.8em;
-                max-width: 640px; margin-top: 0.4em; }
+                max-width: 960px; margin-top: 0.4em; }
   #ue-subrights { margin-left: 1.6em; }
   .form-narrow { max-width: 360px; }
   .form-narrow label { display: block; margin: 0.8em 0 0.2em; font-size: 0.9em; }

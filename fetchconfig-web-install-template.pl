@@ -1,8 +1,9 @@
 #!/usr/bin/perl
 #
-# fetchconfig-web-install-template.pl -- privileged helper that installs an
-# edited fetchconfig template file, used by fetchconfig-web when the web-server
-# user cannot write the template directories itself.
+# fetchconfig-web-install-template.pl -- privileged helper for fetchconfig-web,
+# used when the web-server user cannot reach a file itself: installing an edited
+# template, and reading or deleting a device debug log (fetchconfig writes those
+# as root, mode 0600).
 #
 # It is meant to be run through sudo, e.g. from /etc/sudoers:
 #
@@ -32,7 +33,7 @@ use File::Basename ();
 use File::Temp qw(tempfile);
 
 my $PROG    = 'fetchconfig-web-install-template.pl';
-my $VERSION = '1.2';
+my $VERSION = '1.5';
 my $COPYRIGHT = 'Copyright (C) 2026 Rainer Tammer. GNU GPL v3 or later.';
 
 sub fail { print STDERR "$PROG: error: $_[0]\n"; exit 2; }
@@ -52,6 +53,8 @@ USAGE:
     $PROG revert      <target.tmpl>
     $PROG delete      <target.tmpl>
     $PROG rename      <old.tmpl> <new.tmpl>
+    $PROG read-debug   <file.debug> [offset] [length]
+    $PROG delete-debug <file.debug>
 
 COMMANDS:
     install      Back up <target.tmpl> to <target.tmpl.bak> (overwriting any
@@ -63,9 +66,16 @@ COMMANDS:
     delete       Remove <target.tmpl> (and its <target.tmpl.bak>, if present).
     rename       Rename <old.tmpl> to <new.tmpl> (atomic; fails if <new.tmpl>
                  already exists). Its <old.tmpl.bak> is moved too, if present.
+    read-debug   Copy a device debug log to stdout (binary). fetchconfig
+                 writes <repository>/<dev-id>.debug as root, mode 0600. An
+                 optional byte window (offset, length) lets the caller take
+                 just the head or the tail of a large log.
+    delete-debug Remove a device debug log. Unlinking it needs write
+                 permission on the root-owned repository directory.
 
 The target must be an ABSOLUTE path, must NOT contain "..", must end in
-".tmpl", and must be a plain regular file (not a symbolic or hard link).
+".tmpl" (".debug" for the two debug commands), and must be a plain regular
+file (not a symbolic or hard link).
 Copies are atomic (temp file in the target directory, then rename).
 
 OPTIONS:
@@ -82,11 +92,22 @@ HELP
 }
 
 sub check_target {
-    my ($t) = @_;
+    my ($t, $suffix) = @_;
+    $suffix = '.tmpl' unless defined $suffix;
     fail("target path is empty")                 if !defined $t || $t eq '';
     fail("target must be an absolute path: $t")  unless $t =~ m{^/};
+    # Scope of this check, so it is not mistaken for more than it is: it
+    # lstat()s the FINAL component only. An intermediate symlinked directory is
+    # not resolved, and the helper enforces no directory allow-list of its own
+    # -- with the documented sudoers grant it will write any absolute *.tmpl
+    # anywhere as root. That is by design: the CGI pins every call site to an
+    # allow-listed template directory, and this guards traversal, suffix and
+    # file type, not WHICH directory. Audits re-raise this; it is intentional.
     fail("target must not contain '..': $t")     if $t =~ m{(?:^|/)\.\.(?:/|$)};
-    fail("target must end in .tmpl: $t")         unless $t =~ /\.tmpl$/;
+    # \z, not $: Perl's $ also matches just before a trailing newline, so
+    # "evil.tmpl\n" would satisfy /\.tmpl$/ and slip past this check. The '..'
+    # test above deliberately keeps $ -- there it widens what is REJECTED.
+    fail("target must end in $suffix: $t")       unless $t =~ /\Q$suffix\E\z/;
     # If it already exists it must be a plain regular file: never a symlink
     # (could point outside the template dirs) and never hard-linked (the same
     # inode would be reachable under another name).
@@ -190,6 +211,14 @@ elsif ($cmd eq 'revert') {
     check_target($target);
     my $bak = "$target.bak";
     fail("no backup to revert from: $bak")   unless -e $bak;
+    # Refuse a symlinked backup, exactly as 'delete' and 'rename' do for the
+    # same file, and as check_source() does for an install's source. We run as
+    # root: following a symlink here would copy whatever it points at into the
+    # template, which the web UI then renders and serves. The backup is always
+    # the sibling "<target>.bak" -- it is derived from the target, never passed
+    # in -- so a real one is never a symlink, and refusing costs nothing.
+    fail("backup is a symbolic link, refusing: $bak") if -l $bak;
+    fail("backup is not a plain file: $bak") unless -f $bak;
     fail("backup is not readable: $bak")     unless -r $bak;
     atomic_copy($bak, $target);
     print "$PROG: reverted $target from $bak\n";
@@ -221,6 +250,58 @@ elsif ($cmd eq 'rename') {
             or print STDERR "$PROG: warning: renamed template but could not move $obak: $!\n";
     }
     print "$PROG: renamed $old -> $new\n";
+    exit 0;
+}
+elsif ($cmd eq 'read-debug') {
+    # fetchconfig writes <repository>/<dev-id>.debug as root, mode 0600, so the
+    # web-server user cannot open it. Read it here and copy it to stdout.
+    #
+    # Output is BINARY: a debug log is raw device traffic, and a hex dump's
+    # ASCII gutter carries bytes 0x80-0xFF. Nothing is written to stdout but
+    # the file itself -- errors go to stderr -- so the caller can treat stdout
+    # as the file content verbatim.
+    my ($target, $offset, $length) = @ARGV;
+    fail("usage: $PROG read-debug <file.debug> [offset] [length]") unless defined $target;
+    check_target($target, '.debug');
+    fail("target does not exist: $target") unless -e $target;
+    # Optional byte window. The viewer shows a large log as its first chunk
+    # plus its last chunk, so it asks for two windows rather than the whole
+    # file -- without the length, reading the HEAD of a multi-gigabyte log
+    # would pull all of it through the pipe just to discard the rest.
+    if (defined $offset) {
+        fail("offset must be a non-negative integer: $offset") unless $offset =~ /^\d+\z/;
+    }
+    if (defined $length) {
+        fail("length must be a positive integer: $length")
+            unless $length =~ /^\d+\z/ && $length > 0;
+    }
+    open(my $fh, '<', $target) or fail("cannot read $target: $!");
+    binmode($fh);
+    binmode(STDOUT);
+    if ($offset) { seek($fh, $offset, 0) or fail("cannot seek $target: $!"); }
+    my $left = $length;                       # undef => to end of file
+    my $buf;
+    while (!defined $left || $left > 0) {
+        my $want = 65536;
+        $want = $left if defined $left && $left < $want;
+        my $n = sysread($fh, $buf, $want);
+        last if !defined $n || $n == 0;
+        print STDOUT $buf;
+        $left -= $n if defined $left;
+    }
+    close($fh);
+    exit 0;
+}
+elsif ($cmd eq 'delete-debug') {
+    # Same ownership problem as read-debug: unlink needs write permission on
+    # the REPOSITORY DIRECTORY, which is root-owned when fetchconfig runs from
+    # cron. No .bak handling -- a debug log has none.
+    my ($target) = @ARGV;
+    fail("usage: $PROG delete-debug <file.debug>") unless defined $target;
+    check_target($target, '.debug');
+    fail("target does not exist: $target") unless -e $target;
+    unless (unlink($target)) { fail("cannot delete $target: $!"); }
+    print "$PROG: deleted $target\n";
     exit 0;
 }
 else {

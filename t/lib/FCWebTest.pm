@@ -73,6 +73,10 @@ sub stub_libdir {
 package CGI;
 sub new { bless {}, shift }
 sub header { shift; return "Content-Type: text/html\n\n"; }
+# Mirrors CGI.pm: set by init() when the body is rejected (e.g. over
+# $CGI::POST_MAX); undef otherwise. Tests set $FCWebTest::CGI_ERROR.
+our $CGI_ERROR;
+sub cgi_error { return $CGI_ERROR; }
 sub param { return; }
 sub escapeHTML {
     my ($s, $t) = @_; $t = $s unless defined $t && $t ne 'CGI';

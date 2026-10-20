@@ -28,8 +28,7 @@ Contents
   - Step 4 -- Install the CGI and static files
   - Step 5 -- Directories and permissions
   - Step 6 -- Backup Now and sudo
-  - Step 7 -- Serve over HTTPS
-  - Step 7a -- Running under mod_fcgid (optional)
+  - Step 7 -- Web server configuration
   - Step 8 -- First login
 - Part 3 -- Upgrading
   - Upgrading the script
@@ -50,8 +49,8 @@ Part 1 -- Before you start
 What is in the package
 ----------------------
 
-The release archive fetchconfig-web-2.06.tar unpacks to a directory fetchconfig-
-web-1.50/ containing:
+The release archive fetchconfig-web-2.08.tar unpacks to a directory fetchconfig-
+web-2.08/ containing:
 
   File: fetchconfig-web.cgi
   Purpose: The application: one self-contained Perl script, run under FastCGI or
@@ -90,13 +89,17 @@ web-1.50/ containing:
            (users.download_full_config, the device_notes table; PostgreSQL
            8.2+).
 
+  File: fetchconfig-web-dbupdate-2.08.sql
+  Purpose: Idempotent SQL that upgrades an existing database to the 2.08 schema
+           (users.read_debug; PostgreSQL 8.2+).
+
   File: fetchconfig-web-clean-resets.pl
   Purpose: Standalone script to prune spent password-reset tokens and stale
            login-throttle rows (-h for help, -s to print the role SQL).
 
   File: fetchconfig-web-install-template.pl
   Purpose: Root-side helper, run via sudo, that installs, creates, reverts,
-           deletes or renames a template file (v1.2).
+           deletes or renames a template file (v1.3).
 
   File: imageconvert.pl, README.imageconvert.md (+ .html/README.imageconvert)
   Purpose: Optional helper for embedding a small image as a base64 Perl
@@ -163,8 +166,8 @@ Requirements
 - A web server that runs CGI scripts -- Apache with mod_cgi / ScriptAlias, or an
   equivalent. FastCGI (mod_fcgid) is the preferred way to run fetchconfig-web --
   the process is kept alive between requests, which is markedly faster; plain
-  CGI is the fallback and needs no extra modules (see Step 7a -- Running under
-  mod_fcgid).
+  CGI is the fallback and needs no extra modules (see Step 7 -- Web server
+  configuration).
 - Read access for the web-server user to the fetchconfig device table and
   repository, and execute access to fetchconfig.pl.
 - Optionally sudo, if you want the Backup Now button to run live backups (see
@@ -186,8 +189,27 @@ Requirements
     web server must not buffer the response, otherwise its own timeout applies.
     Under mod_fcgid, FcgidBusyTimeout (default 300 s) caps the total request
     time and so must also exceed BACKUP_TIMEOUT; FcgidIOTimeout is covered by
-    the keepalive. Closing the browser tab during a run terminates it (audited
-    as ABORTED).
+    the keepalive.
+
+    [IMPORTANT]
+    Under mod_fcgid you must also raise FcgidMaxRequestLen. Its default is
+    131072 bytes (128 KB), which is smaller than the uploads this application
+    accepts: a 100 KB logo or template arrives as roughly 137 KB once multipart
+    framing is added, and a HEX capture may be up to 1 MB. mod_fcgid rejects the
+    request before the script runs, so the browser gets a bare 500 Internal
+    Server Error -- the application cannot report anything, because it never
+    sees the request. The error log shows mod_fcgid: HTTP request length ... (so
+    far) exceeds MaxRequestLen (131072). Set FcgidMaxRequestLen 2097152 to match
+    $CGI::POST_MAX -- see Step 7.3 -- Request size limits, which lists every
+    limit in one place. Plain CGI (mod_cgi) is not affected.
+
+    The upload forms also refuse an over-sized file in the browser before the
+    request starts, so with FcgidMaxRequestLen set correctly an operator sees a
+    clear message rather than a server error. That check is a convenience only
+    -- the server enforces every cap regardless -- and it cannot help if
+    FcgidMaxRequestLen is left below the application's limits, because then even
+    an accepted file may exceed what mod_fcgid will carry. Closing the browser
+    tab during a run terminates it (audited as ABORTED).
 
 Perl modules
 ------------
@@ -612,7 +634,7 @@ A complete example with the defaults:
     HELP_BASE_URL           = /help
     # Overrides the version shown in the footer and About dialog. Omit it to show
     # the version the script ships as; the About dialog always shows that one too.
-    #APP_VERSION            = 2.06
+    #APP_VERSION            = 2.08
     COPYRIGHT               = 2026 (c) Your Organisation
 
 Protect it: it contains the database password.
@@ -721,21 +743,18 @@ editor):
     cp fetchconfig-web-install-template.pl /usr/local/fetchconfig/
     chmod 755 /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 
-The helper is v1.2 as of fetchconfig-web 2.05: besides install and revert it now
-supports install-new (used by template upload), delete (used by template delete)
-and rename (used by template rename). The single sudoers entry below (the script
+The helper is v1.3. The subcommand set arrived in v1.2 (fetchconfig-web 2.05):
+besides install and revert it supports install-new (used by template upload),
+delete (used by template delete) and rename (used by template rename). v1.3 adds
+no subcommand -- it refuses a .bak that is a symbolic link when reverting,
+matching what delete and rename already did, so redeploying it is recommended
+but a v1.2 helper remains functional. The single sudoers entry below (the script
 path) already covers every subcommand -- no sudoers change is needed, just
 redeploy the script.
 
-Make sure your web server executes .cgi files in that directory, e.g. for
-Apache:
-
-    ScriptAlias /cgi-bin/ "/www/cgi-bin/"
-    <Directory "/www/cgi-bin">
-        Options +ExecCGI
-        AddHandler cgi-script .cgi
-        Require all granted
-    </Directory>
+The web server must be configured to execute .cgi in that directory and to serve
+the static assets from WEB_DIR. That is Step 7, which gives the complete virtual
+host in one place -- including the FastCGI setup and the request size limits.
 
 Step 5 -- Directories and permissions
 -------------------------------------
@@ -848,179 +867,289 @@ If you do not want sudo at all, set USE_SUDO_FOR_BACKUP_NOW = 0; Backup Now then
 runs as the web user and needs the repository to be web-writable (see "Backup
 Now and repository write permissions" in README.md for that option).
 
-Step 7 -- Serve over HTTPS
---------------------------
+Step 7 -- Web server configuration
+----------------------------------
+
+This step covers TLS, the choice between FastCGI and plain CGI, the request size
+limits, and the virtual host that ties them together. The complete configuration
+appears once, written for Apache 2.4; the handful of lines that differ on Apache
+2.2 are listed straight after it.
+
+7.1 Serve over HTTPS
+....................
 
 Login sends a password and the session cookie is a bearer token; both should
-travel encrypted. Terminate TLS in the web server (Apache/nginx) in front of the
-CGI -- the script does not do TLS itself -- and redirect HTTP to HTTPS so the
-login form is never served in clear.
+travel encrypted. Terminate TLS in the web server in front of the CGI -- the
+script does not do TLS itself -- and redirect HTTP to HTTPS so the login form is
+never served in clear.
 
-Then set in the configuration:
+Then set in /etc/fetchconfig-web.cfg:
 
     HTTPS_ENABLED = 1
 
 This adds the Secure flag to the session cookie so the browser never sends it
-over plain HTTP. Leave it 0 on an HTTP-only deployment -- with Secure set, the
-browser would withhold the cookie and login would appear to fail. Consider also
-enabling HSTS in the web server once HTTPS is stable.
+over plain HTTP, and makes the application send a Strict-Transport-Security
+header. Leave it 0 on an HTTP-only deployment -- with Secure set the browser
+would withhold the cookie and login would appear to fail.
 
-Step 7a -- Running under mod_fcgid (optional)
----------------------------------------------
+7.2 FastCGI or plain CGI
+........................
 
-By default fetchconfig-web.cgi runs as a plain CGI: Apache compiles the
-~21,800-line script and opens fresh PostgreSQL connections on every request.
-Under FastCGI the process is kept alive between requests, so the script is
-compiled once per worker and connections are reused -- noticeably faster on a
-busy server, and especially on AIX where process start-up is costly.
+As a plain CGI, Apache compiles the ~21,800-line script and opens fresh
+PostgreSQL connections on every request. Under FastCGI the process is kept alive
+between requests, so the script is compiled once per worker and connections are
+reused -- noticeably faster on a busy server, and especially on AIX where
+process start-up is costly. FastCGI is the recommended deployment.
 
-The same script runs both ways with no code change. At start-up it does require
-FCGI; if the module is present and Apache started it through a FastCGI process
-manager, it runs a persistent accept loop, otherwise it serves one request and
-exits as a normal CGI. So installing FCGI and switching the handler is all that
-is needed; removing the handler reverts to plain CGI.
+The same script runs both ways with no code change: at start-up it does require
+FCGI, and if the module is present and Apache started it through a FastCGI
+process manager it runs a persistent accept loop, otherwise it serves one
+request and exits. Check which mode is live in Help -> About (Run mode).
 
-1. Install the modules (web-server Perl):
+For FastCGI you need two things beyond the vhost:
 
-    perl -MFCGI -e 'print "$FCGI::VERSION\n"'    # install libfcgi-perl / perl-FCGI if this fails
+1. The FCGI module (web-server Perl). CGI::Fast is not used:
 
-Only FCGI is required. CGI::Fast is not used.
+    perl -MFCGI -e 'print "$FCGI::VERSION\n"'   # install libfcgi-perl / perl-FCGI if this fails
 
-1. Create the mod_fcgid socket directory. mod_fcgid keeps a Unix-domain socket
-   per worker here. It must be on a local filesystem (never NFS -- sockets on
-   NFS fail) and owned by the user Apache runs its child processes as (the User
-   directive; often nobody, apache, www or daemon -- check with grep '^User'
-   <httpd.conf> or ps -ef | grep fetchconfig-web). On a persistent local
-   filesystem the directory survives reboot, so it does not need to be recreated
-   at boot (unlike a volatile path such as /var/run, which does not exist on AIX
-   in the Linux sense anyway):
+1. A socket directory. mod_fcgid keeps a Unix-domain socket per worker here. It
+   must be on a local filesystem (never NFS -- sockets on NFS fail) and owned by
+   the user Apache runs its children as (the User directive; often nobody,
+   apache, www or daemon -- check with grep '^User' <httpd.conf>). On a
+   persistent local filesystem it survives reboot, so it does not need
+   recreating at boot -- unlike a volatile path such as /var/run, which does not
+   exist on AIX in the Linux sense anyway:
 
     mkdir -p /www/mod_fcgid
     chown nobody /www/mod_fcgid      # the owner of the httpd child processes
     chmod 755  /www/mod_fcgid
 
-The sockets appear in this directory while a worker is alive (they are
-removed when the worker exits, so an idle server may show none).
+Sockets appear here while a worker is alive and are removed when it exits,    so
+an idle server may show none.
 
-1. Load mod_fcgid and point the one script at it. For Apache 2.2:
+7.3 Request size limits
+.......................
 
-    # Without this LoadModule the whole <IfModule mod_fcgid.c> block below is
-    # silently skipped -- that guard is why a missing module raises no error.
+Three limits apply to every POST, in this order. They must be set so the
+application's own limit is the smallest, otherwise a request is killed before
+the script runs and the browser gets a bare 500 Internal Server Error with no
+explanation -- the application never sees it and cannot report anything.
+
+  Limit: FcgidMaxRequestLen
+  Where: the vhost, in <IfModule mod_fcgid.c>
+  Set to: 2097152
+  Applies to: mod_fcgid only
+
+  Limit: LimitRequestBody
+  Where: Apache vhost or <Directory>
+  Set to: leave unset (optional)
+  Applies to: mod_cgi and mod_fcgid
+
+  Limit: $CGI::POST_MAX
+  Where: fetchconfig-web.cgi, near the top
+  Set to: 2  1024  1024 (shipped)
+  Applies to: always
+
+In practice only FcgidMaxRequestLen needs setting -- its default, 131072 (128
+KB), is below $CGI::POST_MAX. It is in the vhost below. LimitRequestBody's
+default is already far above (1 GiB on httpd 2.4.54+; unlimited -- the literal
+default 0 -- on 2.4.53 and on the whole 2.2 branch), so it never fires here; set
+it only if you want the web server to refuse earlier, and then keep it at or
+above $CGI::POST_MAX.
+
+It is not only uploads that need the headroom:
+
+Request                                    Typical size
+-----------------------------------------  ------------------------------
+Logo / template upload (100 KB cap)        ~137 KB with multipart framing
+HEX capture upload (1 MB cap)              ~1.05 MB
+Device-table save, 1000 devices collapsed  ~34 KB
+Device-table save, 1000 devices expanded   ~286 KB
+Device-table save, 5000 devices collapsed  ~178 KB
+
+The device-table figures assume 2.07 or newer, where the editor and bulk-edit
+forms are url-encoded. Before 2.07 they were multipart, roughly 4-6x larger, so
+a table of more than about 670 devices could not be saved at all under the 128
+KB default.
+
+    [NOTE]
+    The editor estimates the size of a device-table save in the browser and
+    refuses to send one that would exceed $CGI::POST_MAX, so an operator gets a
+    clear message instead of losing their edits. That check cannot help if
+    FcgidMaxRequestLen is left below $CGI::POST_MAX, because then mod_fcgid
+    rejects requests the application considers perfectly legal.
+
+7.4 The virtual host
+....................
+
+One complete vhost, Apache 2.4 syntax. It assumes the defaults used throughout
+this guide: WEB_DIR /www/virtual/fetchconfig/htdocs serving /css, /fonts,
+/images and /help, and the script at /cgi-bin/fetchconfig-fcgi/fetchconfig-
+web.cgi. Adjust paths, ServerName and certificate files.
+
+    # Without this LoadModule the whole <IfModule mod_fcgid.c> block is silently
+    # skipped -- that guard is why a missing module raises no error.
     LoadModule fcgid_module modules/mod_fcgid.so
 
-    <IfModule mod_fcgid.c>
-        # Socket directory from step 2 (local disk, owned by the httpd user).
-        FcgidIPCDir                /www/mod_fcgid
-        # Shared process table. Set this EXPLICITLY (a file inside the IPC dir is
-        # fine). On AIX especially, leaving it unset can make mod_fcgid fall back
-        # to a SysV-semaphore lock that the kernel rejects at startup with
-        # "(22)Invalid argument: mod_fcgid: can't lock process table" (APR on a
-        # 32-bit AIX build defaults to APR_USE_SYSVSEM_SERIALIZE); pointing it at
-        # a real file on local disk uses a file lock instead and avoids this.
-        FcgidProcessTableFile      /www/mod_fcgid/fcgid_shm
+    <VirtualHost *:80>
+        ServerName fetchconfig.example.com
+        Redirect permanent / https://fetchconfig.example.com/
+    </VirtualHost>
 
-        # Process pool. FcgidMaxProcessesPerClass MUST be >= MAX_PARALLEL_SCAN
-        # (see the note after this block): the browser-driven scan tools open up
-        # to MAX_PARALLEL_SCAN concurrent per-device requests, and if the worker
-        # class is smaller they queue behind busy workers and the progress bar
-        # appears stuck at 0. 8 covers the default MAX_PARALLEL_SCAN (<= 5) plus
-        # the browser's own per-host connection limit, with headroom.
-        FcgidMaxProcesses         32
-        FcgidMinProcessesPerClass  2
-        FcgidMaxProcessesPerClass  8
-        FcgidIdleTimeout         300
-        FcgidProcessLifeTime    3600
+    <VirtualHost *:443>
+        ServerName   fetchconfig.example.com
+        DocumentRoot "/www/virtual/fetchconfig/htdocs"
 
-        # Both MUST exceed BACKUP_TIMEOUT. FcgidBusyTimeout caps TOTAL request
-        # time, so a long Backup Now is killed if it is lower than
-        # BACKUP_TIMEOUT; FcgidIOTimeout is an inactivity timeout and is covered
-        # by the keepalive (every 10 s), but keep it above BACKUP_TIMEOUT too.
-        FcgidBusyTimeout         650
-        FcgidIOTimeout           650
+        SSLEngine on
+        SSLProtocol           -all +TLSv1.2 +TLSv1.3
+        SSLCertificateFile    /etc/ssl/certs/fetchconfig-fullchain.crt
+        SSLCertificateKeyFile /etc/ssl/private/fetchconfig.key
 
-        # If the modules are not in the httpd user's @INC, point Perl at them;
-        # not needed when FCGI/CGI/DBI/... are already installed system-wide.
-        # FcgidInitialEnv PERL5LIB /usr/local/perl_lib
-        # FcgidInitialEnv TZ       CET-1CEST,M3.5.0,M10.5.0/3
-    </IfModule>
+        # Static assets: css, fonts, images and the help tree live under WEB_DIR.
+        <Directory "/www/virtual/fetchconfig/htdocs">
+            Options -Indexes
+            AllowOverride None
+            Require all granted
+        </Directory>
 
-    # Map the URL to the CGI directory. Use Alias (not ScriptAlias): with Alias,
-    # nothing in the directory executes unless a <Files> block below says so, so
-    # a stray script is served static, not run. ScriptAlias would instead make
-    # EVERY file there a CGI.
-    Alias /cgi-bin/fetchconfig-fcgi/ "/www/cgi-bin/fetchconfig-fcgi/"
+        <IfModule mod_fcgid.c>
+            # Socket directory from 7.2 (local disk, owned by the httpd user).
+            FcgidIPCDir             /www/mod_fcgid
 
-    <Directory "/www/cgi-bin/fetchconfig-fcgi">
-        AllowOverride None
-        Options +ExecCGI
-        <Files "fetchconfig-web.cgi">
-            SetHandler fcgid-script
-        </Files>
-    </Directory>
+            # Shared process table. Set this EXPLICITLY (a file inside the IPC dir
+            # is fine). On AIX especially, leaving it unset can make mod_fcgid fall
+            # back to a SysV-semaphore lock the kernel rejects at startup with
+            # "(22)Invalid argument: mod_fcgid: can't lock process table" (APR on a
+            # 32-bit AIX build defaults to APR_USE_SYSVSEM_SERIALIZE); pointing it
+            # at a real file on local disk uses a file lock instead.
+            FcgidProcessTableFile   /www/mod_fcgid/fcgid_shm
+
+            # Process pool. FcgidMaxProcessesPerClass MUST be >= MAX_PARALLEL_SCAN:
+            # the scan tools open up to that many concurrent per-device requests,
+            # and if the worker class is smaller they queue behind busy workers and
+            # the progress bar appears stuck at 0. 8 covers the default
+            # MAX_PARALLEL_SCAN (<= 5) plus the browser's own per-host connection
+            # limit, with headroom.
+            FcgidMaxProcesses         32
+            FcgidMinProcessesPerClass  2
+            FcgidMaxProcessesPerClass  8
+            FcgidIdleTimeout         300
+            FcgidProcessLifeTime    3600
+
+            # Both MUST exceed BACKUP_TIMEOUT. FcgidBusyTimeout caps TOTAL request
+            # time, so a long Backup Now is killed if it is lower than
+            # BACKUP_TIMEOUT; FcgidIOTimeout is an inactivity timeout, covered by
+            # the keepalive (every 10 s), but keep it above BACKUP_TIMEOUT too.
+            FcgidBusyTimeout         650
+            FcgidIOTimeout           650
+
+            # REQUIRED -- the 131072 default is below what the application accepts
+            # (uploads AND large device-table saves); see 7.3.
+            FcgidMaxRequestLen   2097152
+
+            # Only if the Perl modules are not in the httpd user's @INC:
+            # FcgidInitialEnv PERL5LIB /usr/local/perl_lib
+            # FcgidInitialEnv TZ       CET-1CEST,M3.5.0,M10.5.0/3
+        </IfModule>
+
+        # Alias, not ScriptAlias: with Alias nothing in the directory executes
+        # unless the <Files> block says so, so a stray script is served static
+        # rather than run. ScriptAlias would make EVERY file there a CGI.
+        Alias /cgi-bin/fetchconfig-fcgi/ "/www/cgi-bin/fetchconfig-fcgi/"
+        <Directory "/www/cgi-bin/fetchconfig-fcgi">
+            AllowOverride None
+            Options +ExecCGI
+            Require all granted
+            <Files "fetchconfig-web.cgi">
+                SetHandler fcgid-script
+            </Files>
+        </Directory>
+
+        # Password-reset links carry a one-time token in the query string; keep it
+        # out of the access log (it would otherwise be readable by anyone who can
+        # read the log, for up to 30 minutes).
+        SetEnvIf Request_URI "action=reset_token" dontlog
+        ErrorLog  /var/log/apache2/fetchconfig_error.log
+        CustomLog /var/log/apache2/fetchconfig_access.log combined env=!dontlog
+    </VirtualHost>
 
 SetHandler fcgid-script makes only the named file run under FastCGI; add a
-further <Files "name.cgi"> block for each additional FastCGI responder.    Only
-a script that runs a FastCGI accept loop belongs in such a block -- a    plain
-CGI handed to fcgid-script hangs until FcgidBusyTimeout.    mod_fcgid creates
-and owns the socket, so the CGI::Fast    socket-permission behaviour does not
-apply here. Keep the CGI directory    outside DocumentRoot, and do not place the
-socket directory under    DocumentRoot either.
+further <Files "name.cgi"> block for each additional FastCGI responder. Only a
+script that runs a FastCGI accept loop belongs in such a block -- a plain CGI
+handed to fcgid-script hangs until FcgidBusyTimeout.
 
-Worker pool vs. scan concurrency. The browser-driven scan tools (Check
-devices for consistent backup suffixes, Devices without backups, Empty    Backup
-Cleanup, etc.) run one request per device and keep up to    MAX_PARALLEL_SCAN
-(config, default 1, max 5) of them in flight at    once. Each such request
-occupies one FastCGI worker for the duration of its    fetchconfig.pl call, so
-FcgidMaxProcessesPerClass must be at least    MAX_PARALLEL_SCAN -- with a little
-headroom for the browser's own    ~6-connections-per-host limit. If it is
-smaller (e.g. the mod_fcgid default    of a small class, or MAX_PARALLEL_SCAN
-raised above the class size), the    concurrent per-device requests queue behind
-busy workers and the scan's    progress bar sits at 0 of N with "N of N scan
-processes in use" until a    worker frees up. This is a pool-sizing issue, not a
-fault in the scan. With    the FcgidMaxProcessesPerClass 8 above and the default
-MAX_PARALLEL_SCAN    you have ample margin; if you raise MAX_PARALLEL_SCAN,
-raise the class to    match. (Under plain CGI this never arises -- every request
-is its own    process.)
-
-1. Restart Apache (apachectl configtest && apachectl restart) and confirm
-   persistence: load a page, reload it a few times, and check that the worker
-   process (ps -ef | grep fetchconfig-web.cgi) keeps the same PID across
-   requests. A changing PID means it is still running as plain CGI -- the
-   handler did not take effect.
-
-To revert to plain CGI, remove the <Files>/SetHandler block (or uninstall FCGI);
-no change to the script is needed.
-
-Reloading after an upgrade. Under FastCGI the workers are long-lived and hold
-the compiled script in memory, so after copying a new fetchconfig-web.cgi the
-running workers keep serving the OLD code until they are recycled. mod_fcgid
-does not watch the file's modification time, so touch-ing the script does
-nothing. Reload the new code with a graceful restart, which lets in-flight
-requests finish and replaces the workers:
-
-    apachectl graceful
-
-(apachectl restart works too but drops in-flight requests.) Confirm the new
-version is live via the footer or Help -> About (Run mode: FCGI), or by checking
-that the worker PIDs changed:
-
-    ps -ef | grep '[f]etchconfig-web.cgi'
-
-Plain CGI needs none of this -- every request is a fresh process, so a new
-script file takes effect on the next request.
-
-Hardening the web server. With HTTPS_ENABLED = 1 the application sends a Strict-
-Transport-Security header itself. Also:
+Two directives belong in the server configuration, outside any vhost:
 
     # Do not advertise exact component versions.
     ServerTokens Prod
     ServerSignature Off
 
-    # Password-reset links carry a one-time token in the query string; keep it out
-    # of the access log (it would otherwise be readable by anyone who can read the
-    # log, for up to 30 minutes).
-    SetEnvIf Request_URI "action=reset_token" dontlog
-    CustomLog logs/access_log combined env=!dontlog
+7.5 Apache 2.2: what changes
+............................
+
+Everything above is valid on Apache 2.2 except these lines. Nothing else differs
+-- do not keep a second copy of the vhost.
+
+  In the vhost: Access control, in both <Directory> blocks
+  Apache 2.4 (above): Require all granted
+  Apache 2.2 instead: Order allow,deny<br>Allow from all
+
+  In the vhost: TLS versions
+  Apache 2.4 (above): SSLProtocol -all +TLSv1.2 +TLSv1.3
+  Apache 2.2 instead: SSLProtocol all -SSLv2 -SSLv3
+
+  In the vhost: Certificate chain
+  Apache 2.4 (above): chain included in SSLCertificateFile
+  Apache 2.2 instead: add SSLCertificateChainFile
+                      /etc/ssl/certs/intermediate.crt
+
+Require all granted is 2.4-only: on 2.2 Apache refuses to start with Invalid
+command 'Require'. The 2.2 form still works on 2.4 only if mod_access_compat is
+loaded, and is deprecated there -- so use the form that matches your server
+rather than trying to write one that suits both.
+
+7.6 Plain CGI instead of FastCGI
+................................
+
+Drop the LoadModule, the <IfModule mod_fcgid.c> block and the <Files> block, and
+replace the Alias with a ScriptAlias:
+
+    ScriptAlias /cgi-bin/ "/www/cgi-bin/"
+    <Directory "/www/cgi-bin">
+        Options +ExecCGI
+        AddHandler cgi-script .cgi
+        Require all granted
+    </Directory>
+
+Nothing in the application changes -- it detects the mode at start-up. But
+FcgidMaxRequestLen no longer applies, so $CGI::POST_MAX becomes the only
+request-size limit, and the socket directory from 7.2 is not needed.
+
+7.7 Activate and verify
+.......................
+
+    apachectl configtest && apachectl restart
+
+Then load a page, reload it a few times, and confirm the worker keeps the same
+PID across requests:
+
+    ps -ef | grep '[f]etchconfig-web.cgi'
+
+A changing PID means it is still running as plain CGI -- the handler did not
+take effect. Help -> About shows Run mode: FCGI when FastCGI is live.
+
+Reloading after an upgrade. Under FastCGI the workers are long-lived and hold
+the compiled script in memory, so after copying a new fetchconfig-web.cgi the
+running workers keep serving the OLD code until they are recycled. mod_fcgid
+does not watch the file's modification time, so touch-ing the script does
+nothing. Reload with a graceful restart, which lets in-flight requests finish
+and replaces the workers:
+
+    apachectl graceful
+
+(apachectl restart works too but drops in-flight requests.) Plain CGI needs none
+of this -- every request is a fresh process, so a new script file takes effect
+on the next request.
 
 Step 8 -- First login
 ---------------------
@@ -1082,8 +1211,50 @@ usual reason a fix "does not appear".
 
 Running under FastCGI? Copying the new script is not enough -- the long-lived
 mod_fcgid workers keep running the old code until recycled, and touch does not
-trigger a reload. Run apachectl graceful after the copy (see Step 7a -- Running
-under mod_fcgid). Plain CGI needs no such step.
+trigger a reload. Run apachectl graceful after the copy (see Step 7 -- Web
+server configuration). Plain CGI needs no such step.
+
+Upgrading to 2.08
+-----------------
+
+    Order matters: run the database upgrade BEFORE copying the new fetchconfig-
+    web.cgi into place.
+
+    2.08 reads the new users.read_debug column by name in every user lookup,
+    including the one that authenticates a login. Deploy the .cgi against a
+    database that still lacks the column and no one can log in -- not even the
+    built-in admin account -- until the SQL is run. The reverse order is
+    harmless: the column is simply unused by 2.07, so the database may be
+    upgraded minutes or days ahead of the code.
+
+    The same applies to the other upgrade scripts: schema first, then the code.
+
+So, in order:
+
+1. Run the database upgrade (adds users.read_debug). Idempotent, PostgreSQL
+   8.2-compatible:
+
+    psql -U fetchconfig -d fetchconfig -f fetchconfig-web-dbupdate-2.08.sql
+
+1. Copy the new fetchconfig-web.cgi, fetchconfig-web.css and help.html into
+   place. Under FastCGI, follow with apachectl graceful as described at the top
+   of Part 3 -- Upgrading, and hard-reload the browser so the new CSS is picked
+   up.
+
+Then:
+
+- Redeploy the privileged helper (fetchconfig-web-install-template.pl, now
+  v1.5). It gains the read-debug and delete-debug subcommands, which is how the
+  viewer reaches a debug log that root created mode 0600. The sudoers rule is
+  unchanged -- the one you already have for the template editor covers it. Set
+  TEMPLATE_HELPER in fetchconfig-web.cfg if it is not set yet.
+- Grant the new View device debug logs right (User -> Users) only where it is
+  genuinely needed: a debug log is a full session transcript and can contain the
+  device password in clear text, so the right is closer in weight to handing out
+  device credentials than to a read-only view. Unlike the other per-user rights
+  it is not implied by being site-unrestricted -- it must be granted explicitly,
+  or the user must be an administrator. Downloading and deleting debug logs stay
+  administrator-only.
 
 Upgrading to 1.62
 -----------------
@@ -1215,7 +1386,11 @@ Work through this after a fresh install or an upgrade:
   ones to fix).
 - [ ] Backup Now on one device completes and the new backup appears in the
   repository.
-- [ ] The footer shows the expected version: fetchconfig-web v2.06 using
+- [ ] Under mod_fcgid: Tools -> Report logo accepts a logo close to the 100 KB
+  cap, and Templates -> Upload HEX capture accepts a capture of a few hundred
+  KB. A bare 500 with exceeds MaxRequestLen in the error log means
+  FcgidMaxRequestLen is still at its 128 KB default -- see Step 7.3.
+- [ ] The footer shows the expected version: fetchconfig-web v2.07 using
   fetchconfig v9.6x.
 
 Common problems

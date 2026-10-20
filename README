@@ -434,7 +434,7 @@ You can also create it by hand:
     SHOW_RENDER_TIME        = 0
     GENERIC_SYNTAX          = auto
     TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
-    APP_VERSION             = 2.06
+    APP_VERSION             = 2.08
     COPYRIGHT               = 2026 (c) Rainer Tammer
 
 Format and loading:
@@ -1127,11 +1127,30 @@ rather than as raw text:
 - Device-ID and Host get wider fields; on save the host is validated as an
   IPv4/IPv6 address or a hostname/FQDN, and Device-IDs must be present, valid,
   and unique.
+- Option values are re-checked on the server, against the same type the editor
+  used to pick the widget: a numeric option must be a whole number, and an
+  on/off or selector option must be one of its listed values (compared case-
+  insensitively). The browser-side widget is a convenience, not the control.
+  Only options the model actually declares are typed this way -- one flagged
+  "(unrecognized)" has no type to check and is preserved as-is. A table hand-
+  edited on the server to carry a value outside the documented set is therefore
+  refused on save, with an error naming the record, the option and the accepted
+  values.
 - Save changes (green) writes the table. Preview raw table shows the exact text
   Save would write (passwords masked) without touching the file; it is view-only
   -- use Back to editor to return and save (your edits are carried forward; only
   the devices you had expanded come back expanded). Reject all changes (red)
   reloads the editor from disk, discarding edits.
+- Request size. The save POSTs every field of every row you expanded, so a very
+  large table can approach the request limit ($CGI::POST_MAX, 2 MB; and under
+  mod_fcgid FcgidMaxRequestLen, which must not be lower -- see INSTALL.md Step
+  7.3). The form is url-encoded, which keeps it roughly 4-6x smaller than the
+  multipart encoding used before 2.07: about 34 KB for 1000 collapsed devices,
+  286 KB for 1000 expanded. Expanding a row is what costs -- clicking Edit makes
+  that row submit in full for the rest of the session, even after you collapse
+  it again (reload the page to reset). If a save would exceed the limit the
+  editor refuses it up front and says so, rather than letting the request be
+  discarded and your edits lost.
 
 Masked-secret write-back: secret fields show a fixed placeholder
 (\__unchanged__/) for an existing value, never the real password. On save, a
@@ -1484,11 +1503,11 @@ requirement server-side (not just menu hiding), since they're reachable directly
 by URL.
 
 The full set of entries is: Orphaned configuration cleanup, Empty directory
-cleanup, Empty backup cleanup, Restore device table, Devices without backups,
-Consistent backup suffixes, Check site assignment, Audit log, Login failures,
-Orphaned notes cleanup, Disk space, View last fetchconfig schedule log,
-Templates, Upload report logo, and Verify email setup. The sections below
-describe each in turn.
+cleanup, Empty backup cleanup, Restore device table, Device debug logs, Devices
+without backups, Consistent backup suffixes, Check site assignment, Audit log,
+Login failures, Orphaned notes cleanup, Disk space, View last fetchconfig
+schedule log, Templates, Upload report logo, and Verify email setup. The
+sections below describe each in turn.
 
 Orphaned Configuration Cleanup
 ..............................
@@ -1764,6 +1783,134 @@ useful across AIX/Linux. Free space comes from the optional Filesys::Df module,
 loaded lazily; if it is not installed the tool shows an install hint instead
 (the rest of the application is unaffected).
 
+Device debug logs
+.................
+
+When a device carries debug=on, fetchconfig writes a full session transcript to
+<repository>/<device-id>.debug (mode 0600, rewritten on every run). fetchconfig-
+web can show, download and delete those files.
+
+Permissions. Viewing needs the per-user read_debug right (View device debug logs
+in the user editor); administrators have it implicitly. Downloading and deleting
+are administrator-only. Unlike the other per-user rights, read_debug is not
+implied by being site-unrestricted: a debug log can contain the device password
+in clear text, so it has to be granted explicitly. A holder sees only the
+devices their site access already allows.
+
+Where the buttons are. The Device backup status page grows a Debug column --
+header Debug [admin] [view debug] -- shown to administrators and read_debug
+holders, with a View button per device, greyed out when the device has no debug
+log. Tools -> Device debug logs (administrators only) lists every device that
+currently has a log, with its size and timestamp, and offers View | Download |
+Delete per device plus Delete all debug logs. The viewer itself carries Download
+and Delete for administrators, and returns to whichever page it was opened from.
+
+The buttons key on the file being there, not on the debug option: a device
+switched back to debug=off keeps the log written while it was on, and that stale
+file is exactly the one worth looking at and removing.
+
+What the viewer shows. A .debug file holds ssh client stderr (debug1: ...) and a
+Net::Telnet dump_log hex dump:
+
+    < 0x00000: 0d 0d 0a 00  2a 2a 2a 2a  2a 2a 2a 2a  2a 2a 2a 2a  ....************
+    > 0x00000: ff fc 18                                            ÿü.
+
+< is read from the device, > is written to it. Since that single character is
+the thing you are actually looking for, the viewer carries it three ways: a SEND
+/ RECV badge at the start of the line, a background tint across the whole line,
+and a rule where the direction turns, so a request/response exchange reads as
+blocks rather than as a wall of hex. The offset is muted and the hex bytes are
+de-emphasised in favour of the ASCII gutter, which is what an operator reads;
+telnet IAC (ff) and CR/LF/NUL padding are tinted so protocol noise is separable
+from payload.
+
+Three view buttons:
+
+- Hex -- the dump as above, highlighted.
+- Hex, no highlighting -- the file as it is on disk.
+- Transcript -- the bytes reassembled per direction into a readable
+  conversation, with telnet negotiation dropped. This is usually the view you
+  want: some models type the login one character per write, and the dump log
+  records every write separately, so a five-character username becomes five
+  full-width hex lines carrying one byte each.
+
+SSH log hidden / SSH log shown controls the ssh client's own output (debug1: ...
+and the rest of its stderr, which fetchconfig points at the same file). It is
+hidden by default: on an ssh device it is the bulk of the file and none of it is
+device traffic.
+
+This is safe by construction rather than by pattern-matching ssh's wording. A
+.debug file can only contain three things: fetchconfig's # markers, the
+Net::Telnet dump_log hex lines, and the ssh client's stderr. Device bytes reach
+the file only as hex dump lines -- input_log is never attached -- so "ssh
+output" is defined as everything that is neither a hex line nor a # marker.
+Hiding it therefore cannot hide a byte of the session, whatever the OpenSSH
+version, log level or locale prints: Warning:, Authenticated to, Transferred:
+and Bytes per second: need no patterns of their own. The # markers always stay
+visible, so the structure of the session still reads with the ssh log off -- and
+# [secret sent - not logged] can never be hidden by a display control.
+
+Sent only / Received only filter the hex and transcript views in the browser,
+with no round trip. Copy returns the file as shown, with the original < and >
+intact -- the SEND/RECV badges are CSS generated content and are not part of the
+copied text. (Line endings are normalised to LF; a real .debug file is CRLF,
+because fetchconfig's ssh client writes its stderr through a pty.)
+
+Size limits. A log under 2 MB is displayed in full. Between 2 MB and 16 MB only
+the first 1 MB and the last 1 MB are shown, with
+
+    ----- content cut because of a 2 MB viewing size limit -----
+
+between them -- in bold red, and never hidden by any of the filters, so the fact
+that content is missing cannot be filtered away. Chunks are cut on line
+boundaries, so a half hex-dump line is never rendered (the parser is positional
+and would slice it at the wrong column). Over 16 MB the log is neither displayed
+nor downloaded; it can still be deleted. The viewer therefore never renders more
+than 2 MB of source whatever the file size.
+
+File permissions
+................
+
+fetchconfig runs as root from cron and creates <device-id>.debug mode 0600,
+owned by root -- correctly, since the file can contain device credentials. The
+web-server user therefore cannot open it, and cannot delete it either: unlink
+needs write permission on the root-owned repository directory, not on the file.
+stat still succeeds (it only needs +x on the directory), so without help the
+file is visible but unusable.
+
+Set TEMPLATE_HELPER in fetchconfig-web.cfg and the viewer reads and deletes
+through that helper instead. It is the same privileged helper the template
+editor already uses, so no new sudoers rule is required -- an existing
+installation only needs the helper itself redeployed (v1.4 or newer):
+
+    <webuser> ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig-web-install-template.pl
+
+The helper hardens the two new subcommands exactly like the template ones: the
+path must be absolute, must not contain .., must end in .debug, and must be a
+plain regular file -- never a symbolic or hard link. read-debug writes nothing
+but the file to stdout (errors go to stderr) and takes an optional byte offset,
+so a huge log is not pulled through the pipe in full just to show its tail.
+
+Without TEMPLATE_HELPER the buttons still appear -- the file is there -- but say
+what is wrong instead of failing generically. The alternative is to make the
+repository readable, and writable for deletion, by the web-server user.
+
+    These files can contain device credentials. A debug log is a complete
+    session transcript. fetchconfig keeps passwords out of it by suspending the
+    session log around password sends (Abstract::print_secret()), leaving #
+    [secret sent - not logged] behind; a model that does not do this writes the
+    password in clear text. fetchconfig-web cannot mask it: secret masking
+    matches key=value shapes, while a password in a hex dump exists both as hex
+    bytes and in the ASCII gutter, split across 16-byte boundaries. The controls
+    are the admin-only gate and fetchconfig doing the right thing in the model
+    -- and a fetchconfig-web admin is not necessarily someone entitled to device
+    credentials. Every view and every delete is audited.
+
+    Delete all debug logs is the remediation tool for this: a leaked log is only
+    overwritten on that device's next run, which for a decommissioned or failing
+    device may never come. After rotating a password that may appear in a log,
+    purge the logs.
+
 Upload report logo
 ..................
 
@@ -1845,7 +1992,7 @@ visudo:
 
     www ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 
-(replace www with your web-server user). The helper (v1.2) is invoked as install
+(replace www with your web-server user). The helper (v1.3) is invoked as install
 <tmpfile> <target.tmpl> (back up, then write), install-new <tmpfile>
 <target.tmpl> (create only if absent -- used by Upload), revert <target.tmpl>,
 or delete <target.tmpl>, and independently enforces that the target is an
@@ -2425,6 +2572,12 @@ Output and data exposure
   masked there too, and two different masked values would look identical in a
   diff. Restricting masking to the Backup Now transcript is a small follow-up
   change if that ever matters.
+- Masking cannot reach a hex dump. The device debug log viewer renders
+  Net::Telnet dump_log output, where a password exists as hex bytes and in the
+  ASCII gutter, split across 16-byte boundaries -- no key=value pattern matches
+  it. That viewer is therefore gated on admin instead of masked, is audited on
+  every view, and relies on fetchconfig suspending its session log around
+  password sends. See Device debug logs.
 - The config file holds the database password in clear text; it must be readable
   only by the web-server user (see Configuration).
 

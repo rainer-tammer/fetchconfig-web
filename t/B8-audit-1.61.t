@@ -113,7 +113,25 @@ my $src = do { open(my $fh, '<', cgi_path()) or die $!; local $/; <$fh> };
 }
 
 # --- version ----------------------------------------------------------------
-like($src, qr/use constant APP_VERSION => '2\.06';/, 'version bumped to 2.06');
+# Assert the two constants AGREE, not a literal. A pinned literal is what let
+# APP_VERSION sit at 2.07 through the whole 2.08 series: only
+# APP_VERSION_INTERNAL was bumped, this test stayed green, and because
+# page_head() cache-busts the stylesheet with APP_VERSION, every browser kept
+# serving the 2.07 CSS until the user pressed Ctrl-F5.
+#
+# A SITE may still override APP_VERSION via the config file -- that is the
+# point of the key -- but the two SHIPPED defaults must never diverge.
+{
+    my ($shown)    = $src =~ /use constant APP_VERSION\s*=>\s*'([^']+)'/;
+    my ($internal) = $src =~ /use constant APP_VERSION_INTERNAL\s*=>\s*'([^']+)'/;
+    ok(defined $shown && defined $internal, 'both version constants are present');
+    is($shown, $internal,
+       "APP_VERSION ($shown) matches APP_VERSION_INTERNAL ($internal)");
+
+    # The stylesheet cache-buster hangs off this, so a release that forgets the
+    # bump ships new CSS behind an unchanged URL.
+    like($src, qr/fetchconfig-web\.css\?v=/, 'the stylesheet is cache-busted');
+}
 
 
 # --- fetchconfig-web-dbsetup.pl's generated config covers every registered key -------------------
