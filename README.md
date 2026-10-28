@@ -363,6 +363,7 @@ HTTPS_ENABLED           = 0
 SHOW_RENDER_TIME        = 0
 GENERIC_SYNTAX          = auto
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
+#CRON_USER              = fetchconfig
 APP_VERSION             = 2.08
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
@@ -389,6 +390,14 @@ Format and loading:
   `0` for an HTTP-only deployment -- with `Secure` set on plain HTTP the browser
   would withhold the cookie and login would appear to fail. This replaces the
   old approach of editing the source to uncomment the cookie's `-secure` flag.
+- **`CRON_USER`** (optional, unset by default): the system user whose crontab
+  holds the scheduled `fetchconfig.pl` backup run. Set it to enable **Tools ->
+  Show schedule**, which lists that crontab (read-only) and offers a builder for
+  a new entry; it never writes the crontab. Reading another user's crontab is
+  done through the privileged helper (`TEMPLATE_HELPER` + sudo, the same grant as
+  the debug-log reader), because the cron spool directory is root-owned. The user
+  must exist (checked with `getpwnam`), and the fetchconfig cron entry belongs in
+  *this* user's crontab, not root's.
 - **`SHOW_RENDER_TIME`** (`0`|`1`, default `0`): the universal switch for the
   load/render-time displays. When `1`, the device list, status, log and
   template-list pages show their "... load time" line, and the device-table
@@ -1980,7 +1989,7 @@ and grant the web-server user permission to run just that helper, e.g. via
 www ALL=(root) NOPASSWD: /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 ```
 
-(replace `www` with your web-server user). The helper (v1.3) is invoked as
+(replace `www` with your web-server user). The helper (v1.7) is invoked as
 `install <tmpfile> <target.tmpl>` (back up, then write), `install-new <tmpfile>
 <target.tmpl>` (create only if absent -- used by Upload), `revert <target.tmpl>`,
 or `delete <target.tmpl>`, and independently enforces that the target is an

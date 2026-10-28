@@ -113,24 +113,31 @@ my $src = do { open(my $fh, '<', cgi_path()) or die $!; local $/; <$fh> };
 }
 
 # --- version ----------------------------------------------------------------
-# Assert the two constants AGREE, not a literal. A pinned literal is what let
-# APP_VERSION sit at 2.07 through the whole 2.08 series: only
-# APP_VERSION_INTERNAL was bumped, this test stayed green, and because
-# page_head() cache-busts the stylesheet with APP_VERSION, every browser kept
-# serving the 2.07 CSS until the user pressed Ctrl-F5.
+# Two independent invariants:
 #
-# A SITE may still override APP_VERSION via the config file -- that is the
-# point of the key -- but the two SHIPPED defaults must never diverge.
+# 1. The SHIPPED DEFAULTS agree: the built-in APP_VERSION must equal
+#    APP_VERSION_INTERNAL. A site may still OVERRIDE APP_VERSION via the config
+#    file -- that is the point of the key -- but the two defaults in source
+#    must never diverge, so a release reports one honest version by default.
+#
+# 2. The stylesheet cache-buster hangs off APP_VERSION_INTERNAL, NOT
+#    APP_VERSION. APP_VERSION is config-overridable to an arbitrary display
+#    string; tying the buster to it would let a site's relabel pin a stale CSS
+#    across a real upgrade. APP_VERSION_INTERNAL changes exactly when the
+#    shipped files (this CSS included) change.
+#    (History: early in 2.08 the buster used APP_VERSION while only
+#    APP_VERSION_INTERNAL was bumped, so browsers kept serving the old CSS.)
 {
     my ($shown)    = $src =~ /use constant APP_VERSION\s*=>\s*'([^']+)'/;
     my ($internal) = $src =~ /use constant APP_VERSION_INTERNAL\s*=>\s*'([^']+)'/;
     ok(defined $shown && defined $internal, 'both version constants are present');
     is($shown, $internal,
-       "APP_VERSION ($shown) matches APP_VERSION_INTERNAL ($internal)");
+       "APP_VERSION default ($shown) matches APP_VERSION_INTERNAL ($internal)");
 
-    # The stylesheet cache-buster hangs off this, so a release that forgets the
-    # bump ships new CSS behind an unchanged URL.
-    like($src, qr/fetchconfig-web\.css\?v=/, 'the stylesheet is cache-busted');
+    like($src, qr/fetchconfig-web\.css\?v="\s*\.\s*APP_VERSION_INTERNAL/,
+         'the stylesheet is cache-busted by APP_VERSION_INTERNAL');
+    unlike($src, qr/fetchconfig-web\.css\?v="\s*\.\s*APP_VERSION\b/,
+           'the stylesheet cache-buster is NOT tied to the overridable APP_VERSION');
 }
 
 
@@ -146,7 +153,9 @@ my $src = do { open(my $fh, '<', cgi_path()) or die $!; local $/; <$fh> };
     my $out = cfg_body('fc', 'fcu', 'pw', 'localhost');
     my %gen; $gen{$1} = 1 while $out =~ /^([A-Z_]+)\s*=/mg;
     my %reg; $reg{$1} = 1 while $src =~ /^\s*\[ '([A-Z_]+)',/mg;
-    my %optional = map { $_ => 1 } qw(SMTP_USER SMTP_PASS APP_VERSION);
+    # CRON_USER is optional (empty = the Show schedule tool is not configured),
+    # so it ships commented out in the generated config, like APP_VERSION.
+    my %optional = map { $_ => 1 } qw(SMTP_USER SMTP_PASS APP_VERSION CRON_USER);
     my @missing = grep { !$gen{$_} && !$optional{$_} } sort keys %reg;
     is_deeply(\@missing, [], 'fetchconfig-web-dbsetup.pl: every registered config key is in the generated config')
         or diag("missing: @missing");

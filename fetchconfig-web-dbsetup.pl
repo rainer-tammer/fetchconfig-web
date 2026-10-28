@@ -584,6 +584,11 @@ FETCHCONFIG_PATH        = /usr/local/fetchconfig
 FETCHCONFIG_BIN         = fetchconfig.pl
 # "Last scheduled run" log shown by Tools -> View last fetchconfig schedule log.
 FETCHCONFIG_LOG         = /usr/local/fetchconfig/fetchconfig.log
+# The system user whose crontab holds the fetchconfig backup job. Used ONLY by
+# Tools -> Show schedule (read-only). Uncomment and set to enable that tool; it
+# also needs TEMPLATE_HELPER + sudo (same grant as the debug-log reader). Put
+# the cron entry in this user's crontab, not root's.
+#CRON_USER              = fetchconfig
 LOG_MAX_DEVICES         = 1000
 MAX_PARALLEL_SCAN       = 1
 # Syntax highlighting for template-backed ("generic") devices whose template

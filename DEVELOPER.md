@@ -349,17 +349,28 @@ Security is layered; the important mechanisms:
   (`USE_SUDO_FOR_BACKUP_NOW`, `TEMPLATE_HELPER`) so the web user itself needs no
   write access to the repository/templates. The sudo command is built in one
   place per operation with fixed arguments.
-* The template helper `fetchconfig-web-install-template.pl` (**v1.2**) is the
-  single privileged file mutator. Its subcommands: `install` (save, keeps one
-  `.bak`), `install-new` (atomic create-if-absent, used by template upload and by
-  the HEX generator's final install), `revert`, `delete` (template + `.bak`), and
-  `rename` (atomic, refuse-if-exists, moves the `.bak`). Each is wrapped by a CGI
-  function (`save_template`, `install_new_template`, `delete_template_file`,
-  `rename_template_file`) that falls back to a direct filesystem op when no helper
-  is configured and the directory is web-writable. Helper-failure output is
-  condensed to one line by `helper_fail_msg` / `helper_error_summary` (so an
-  out-of-date helper's `--help` dump is never shown), with a redeploy hint when a
-  subcommand is unrecognised.
+* The template helper `fetchconfig-web-install-template.pl` (**v1.7**) is the
+  single privileged helper, run through `sudo`. Its subcommands:
+  * **Templates** (`.tmpl`): `install` (save, keeps one `.bak`), `install-new`
+    (atomic create-if-absent, used by template upload and by the HEX generator's
+    final install), `revert`, `delete` (template + `.bak`), and `rename` (atomic,
+    refuse-if-exists, moves the `.bak`). Each is wrapped by a CGI function
+    (`save_template`, `install_new_template`, `delete_template_file`,
+    `rename_template_file`) that falls back to a direct filesystem op when no helper
+    is configured and the directory is web-writable.
+  * **Debug logs** (`.debug`, v1.5): `read-debug <file> [offset] [length]` and
+    `delete-debug <file>` -- fetchconfig writes these as root, mode 0600, so the
+    viewer/delete go through the helper (`debug_log_window`, `do_delete_debug`).
+  * **Schedule** (v1.6): `list-cron <user>` -- a read-only `crontab -l` for
+    `CRON_USER`, used by `cron_list_raw` for Tools -> Show schedule, because the
+    cron spool directory is root-owned. The user is validated and must exist
+    (`getpwnam`); nothing is ever written. v1.7 forces `LC_ALL=C` (so
+    `cron_list_raw`'s "no crontab" match works on a non-English Linux host) and
+    resolves `crontab` by absolute path under a sane `PATH`.
+  Helper-failure output is condensed to one line by `helper_fail_msg` /
+  `helper_error_summary` (so an out-of-date helper's `--help` dump is never shown),
+  with a redeploy hint when a subcommand is unrecognised. A new subcommand needs
+  **no sudoers change** -- the grant is on the script path -- only a redeploy.
 * The HEX uploader runs `<FETCHCONFIG_PATH>/tools/generate_template.pl` **directly**
   (not via sudo) with `-f <hex> -o <out>`, reads the draft template from the `-o`
   file, stamps `syntax_style`, then installs it through the helper like any upload.
@@ -494,9 +505,10 @@ helpers (`db_*`) next to the related ones, parameterized.
 ## 9. Static assets, rendering, and the UI
 
 * **HTML** is generated in Perl (`print qq{...}`), not templated. `page_head()`
-  emits the `<head>` (linking the external stylesheet with a `?v=<version>`
-  cache-buster), the title bar, the menu, and any warning banners; `page_foot()`
-  closes the page.
+  emits the `<head>` (linking the external stylesheet with a
+  `?v=<APP_VERSION_INTERNAL>` cache-buster -- the true shipped version, so new
+  CSS is always picked up; never the config-overridable `APP_VERSION`), the
+  title bar, the menu, and any warning banners; `page_foot()` closes the page.
 * **CSS** is the external `fetchconfig-web.css` (served from `WEB_DIR`). The only
   inline CSS left in the CGI is the dynamic login backdrop (depends on login
   state) and `style="display:none"` toggle targets for JS; email HTML uses

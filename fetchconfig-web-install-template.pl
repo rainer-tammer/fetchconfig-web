@@ -33,7 +33,7 @@ use File::Basename ();
 use File::Temp qw(tempfile);
 
 my $PROG    = 'fetchconfig-web-install-template.pl';
-my $VERSION = '1.5';
+my $VERSION = '1.7';
 my $COPYRIGHT = 'Copyright (C) 2026 Rainer Tammer. GNU GPL v3 or later.';
 
 sub fail { print STDERR "$PROG: error: $_[0]\n"; exit 2; }
@@ -55,6 +55,7 @@ USAGE:
     $PROG rename      <old.tmpl> <new.tmpl>
     $PROG read-debug   <file.debug> [offset] [length]
     $PROG delete-debug <file.debug>
+    $PROG list-cron    <user>
 
 COMMANDS:
     install      Back up <target.tmpl> to <target.tmpl.bak> (overwriting any
@@ -72,6 +73,10 @@ COMMANDS:
                  just the head or the tail of a large log.
     delete-debug Remove a device debug log. Unlinking it needs write
                  permission on the root-owned repository directory.
+    list-cron    Print <user>'s crontab to stdout (read-only). Another user's
+                 crontab is not readable by the web-server user -- the spool
+                 directory is root-owned -- so "crontab -l" is run here. <user>
+                 must exist (checked with getpwnam). Nothing is ever written.
 
 The target must be an ABSOLUTE path, must NOT contain "..", must end in
 ".tmpl" (".debug" for the two debug commands), and must be a plain regular
@@ -303,6 +308,68 @@ elsif ($cmd eq 'delete-debug') {
     unless (unlink($target)) { fail("cannot delete $target: $!"); }
     print "$PROG: deleted $target\n";
     exit 0;
+}
+elsif ($cmd eq 'list-cron') {
+    # Print a user's crontab. The web-server user cannot read another user's
+    # crontab directly -- the spool directory (/var/spool/cron[/crontabs]) is
+    # root-owned and not world-traversable -- so "crontab -l" is run here as
+    # root. READ-ONLY: this command never installs, edits or removes a crontab.
+    #
+    # The user name is validated here independently of the caller and must
+    # resolve to a real account (getpwnam). crontab itself is invoked with an
+    # ARGUMENT VECTOR (no shell), so the user name is never interpreted.
+    my ($cuser) = @ARGV;
+    fail("usage: $PROG list-cron <user>") unless defined $cuser && $cuser ne '';
+    fail("invalid user name: $cuser")
+        unless $cuser =~ /^[A-Za-z_][A-Za-z0-9_.-]{0,31}\$?$/;
+    fail("no such user: $cuser") unless defined getpwnam($cuser);
+
+    # Force a predictable locale and PATH for the crontab call:
+    #  - LC_ALL/LANG = C so the "no crontab for <user>" message is ENGLISH. The
+    #    caller keys on that text to tell "empty crontab" from a real error; on a
+    #    non-English system (e.g. LANG=de_DE) cronie/cron would otherwise print a
+    #    translated message and an empty crontab would be misread as a failure.
+    #  - a sane PATH so crontab is found even under a restrictive sudo secure_path.
+    local $ENV{LC_ALL} = 'C';
+    local $ENV{LANG}   = 'C';
+    local $ENV{PATH}   = '/usr/bin:/bin:/usr/sbin:/sbin';
+
+    # Resolve crontab to an absolute path where we can, so a minimal inherited
+    # environment cannot hide it; fall back to a bare name (found via PATH above).
+    my $crontab = 'crontab';
+    for my $c (qw(/usr/bin/crontab /bin/crontab /usr/sbin/crontab)) {
+        if (-x $c) { $crontab = $c; last; }
+    }
+
+    # Platform difference: AIX lists another user's crontab with
+    # "crontab -l <user>"; Vixie/cronie (Linux: RHEL, SLES, Debian) and the BSDs
+    # use "crontab -u <user> -l".
+    my @cmd = ($^O eq 'aix')
+        ? ($crontab, '-l', $cuser)
+        : ($crontab, '-u', $cuser, '-l');
+
+    # List-form open: fork/exec with no shell. The child's STDERR is inherited
+    # (so "no crontab for <user>" and real errors reach the caller's stderr),
+    # and we read its STDOUT. Output is capped so a pathological crontab cannot
+    # stream without bound through the pipe.
+    my $CAP = 262144;                                # 256 KiB is far more than any crontab
+    my $pid = open(my $fh, '-|', @cmd);
+    fail("cannot run crontab: $!") unless defined $pid;
+    binmode($fh);
+    binmode(STDOUT);
+    my ($buf, $total) = ('', 0);
+    while (sysread($fh, $buf, 65536)) {
+        $total += length $buf;
+        if ($total > $CAP) {
+            # Emit up to the cap, then stop; the viewer only needs the
+            # fetchconfig lines, which are near the top of any sane crontab.
+            print STDOUT substr($buf, 0, length($buf) - ($total - $CAP));
+            last;
+        }
+        print STDOUT $buf;
+    }
+    close($fh);                                      # sets $? from crontab's exit
+    exit($? >> 8);                                   # forward crontab's status
 }
 else {
     print STDERR "$PROG: error: unknown or missing command"

@@ -82,7 +82,11 @@ use Algorithm::Diff qw(sdiff);
 #
 # APP_VERSION is the version this file ships as. The config file's
 # APP_VERSION key, if present, OVERRIDES it (see read_config); otherwise
-# this constant is what the footer shows. Bump it here on each release.
+# this constant is what the footer shows. Bump it here on each release --
+# its shipped default must match APP_VERSION_INTERNAL below.
+# It is DISPLAY ONLY and does NOT drive the stylesheet cache-buster (that
+# uses APP_VERSION_INTERNAL -- see page_head), so a SITE may override it via
+# config to any string without affecting the CSS.
 
 ################################################################################
 # SECTION 2: CONSTANTS
@@ -217,6 +221,7 @@ my ($DEVICE_TABLE,
     $APP_VERSION,
     $COPYRIGHT,
     $FETCHCONFIG_LOG,
+    $CRON_USER,
     $LOG_MAX_DEVICES,
     $MAX_PARALLEL_SCAN,
     $BACKUP_TIMEOUT,
@@ -286,6 +291,7 @@ my @CFG_KEYS = (
     [ 'FETCHCONFIG_PATH',       'path',      '(required)',                             'absolute path' ],
     [ 'FETCHCONFIG_BIN',        'file',      '(required)',                             'file name in FETCHCONFIG_PATH' ],
     [ 'FETCHCONFIG_LOG',        'path_opt',  '(empty: log viewer not configured)',     'absolute path' ],
+    [ 'CRON_USER',              'cronuser',  '(empty: schedule tool not configured)',  'system user name' ],
     [ 'LOG_MAX_DEVICES',        'int',       '1000',                                   'integer >= 0',                 0, undef ],
     [ 'MAX_PARALLEL_SCAN',      'int',       '1',                                      'integer 1..5',                 1, 5 ],
     [ 'BACKUP_DEVICE_TABLE',    'path',      '/usr/local/fetchconfig/backup',          'absolute path' ],
@@ -377,6 +383,15 @@ sub cfg_value_problem {
     elsif ($type eq 'url')  {
         return "must be an $range of letters, digits, '.', '_', '~', '-', '/'"
             unless $v =~ m{^/[A-Za-z0-9._~/-]*$};
+    }
+    elsif ($type eq 'cronuser') {
+        # A system user name: conservative, portable charset (letters, digits,
+        # '_', '-', '.'), first char a letter or '_', at most 32 chars. The
+        # user's real existence is checked at use time with getpwnam; this only
+        # rejects obviously malformed values. An optional trailing '$' is
+        # allowed (Samba-style machine accounts).
+        return 'must be a valid system user name'
+            unless $v =~ /^[A-Za-z_][A-Za-z0-9_.-]{0,31}\$?$/;
     }
     return undef;
 }
@@ -623,6 +638,12 @@ sub read_config {
     # the Tools "fetchconfig log" box). Empty/unset = feature shows "not
     # configured". LOG_MAX_DEVICES caps how many sections are rendered.
     $FETCHCONFIG_LOG     = defined $kv->{FETCHCONFIG_LOG}    ? $kv->{FETCHCONFIG_LOG}    : '';
+    # Optional: the system user whose crontab holds the fetchconfig backup job.
+    # Used ONLY by the Tools "Show schedule" viewer, read-only, through the
+    # privileged helper's list-cron subcommand. Empty/unset = the schedule tool
+    # shows "not configured". Format is validated above (cronuser); the user's
+    # existence is checked with getpwnam when the tool runs.
+    $CRON_USER           = defined $kv->{CRON_USER}          ? $kv->{CRON_USER}          : '';
     $LOG_MAX_DEVICES     = $cfg_int->('LOG_MAX_DEVICES', 1000, 0, undef);
     # Number of device scans the Tools scan tools run concurrently in the
     # browser. Missing -> 1 (serial); if present, an integer 1..5.
@@ -1565,6 +1586,8 @@ sub main {
                            scalar($cgi->param('msg')));
         } elsif ($action eq 'tool_diskspace') {
             show_tool_diskspace($user);
+        } elsif ($action eq 'tool_schedule') {
+            show_tool_schedule($user);
         } elsif ($action eq 'tool_show_cfg') {
             show_tool_show_cfg($user);
         } elsif ($action eq 'tool_audit') {
@@ -3909,7 +3932,7 @@ sub csrf_field {
 # tricked into performing an action nor used as an open redirect.
 my %LOGIN_LANDING = map { $_ => 1 } qw(
     devices status report setup tools user help
-    view_templates view_template view_log view_report
+    view_templates view_template view_log view_report tool_schedule
 );
 
 ################################################################################
@@ -9633,6 +9656,356 @@ sub show_tool_show_cfg {
     }
     print qq{</tbody></table></div>\n};
     print qq{</div>\n};
+    print page_foot();
+}
+
+################################################################################
+# cron_list_raw
+#
+# Fetch CRON_USER's crontab through the privileged helper (read-only), using the
+# SAME helper and sudo grant as the debug-log reader. Returns ($text, $err,
+# $empty); $empty is true when the user simply has no crontab yet (crontab's
+# "no crontab for <user>" message), which is a normal state, not an error.
+#
+# The web-server user cannot read another user's crontab directly -- the spool
+# directory is root-owned and not world-traversable -- so the helper runs
+# "crontab -l" as root. CRON_USER comes only from the config file.
+#
+# Parameters: none (reads $CRON_USER)
+################################################################################
+sub cron_list_raw {
+    unless (debug_helper_available()) {
+        return (undef, 'reading the crontab needs TEMPLATE_HELPER and sudo '
+                       . '(USE_SUDO_FOR_BACKUP_NOW=1) -- see INSTALL.', 0);
+    }
+    my ($out, $err, $status, $fork_err) =
+        run_privileged($SUDO_BIN, '-n', $TEMPLATE_HELPER, 'list-cron', $CRON_USER);
+    return (undef, $fork_err, 0) if $fork_err;
+    if ($status != 0) {
+        $err = '' unless defined $err;
+        # crontab prints "no crontab for <user>" to stderr and exits non-zero
+        # when the user has no crontab -- treat that as "no entries".
+        return (undef, undef, 1) if $err =~ /no\s+crontab/i;
+        $err =~ s/\s+\z//;
+        return (undef, 'crontab listing failed'
+                       . ($err ne '' ? ": $err" : " (exit $status)"), 0);
+    }
+    return (defined $out ? $out : '', undef, 0);
+}
+
+################################################################################
+# cron_describe
+#
+# A plain-language summary of a five-field cron schedule, for the common cases
+# (daily / weekly / monthly at a fixed time). Anything it does not recognise is
+# reported as "custom schedule" rather than guessed. HH:MM is only shown when
+# minute and hour are both plain integers. Day-of-week 0 and 7 are both Sunday.
+#
+# Parameters:
+#   $mi $ho $dom $mon $dow
+################################################################################
+sub cron_describe {
+    my ($mi, $ho, $dom, $mon, $dow) = @_;
+    my $isnum = sub { defined $_[0] && $_[0] =~ /^\d+$/ };
+    my $star  = sub { defined $_[0] && $_[0] eq '*' };
+    my @days  = qw(Sunday Monday Tuesday Wednesday Thursday Friday Saturday);
+    # Only describe schedules that fire at a single concrete minute:hour. A list,
+    # range or step in the minute or hour field (e.g. "*/15 * * * *") is NOT a
+    # daily run, so it is reported as "custom" rather than mislabelled.
+    return 'custom schedule' unless $isnum->($mi) && $isnum->($ho);
+    my $hm = sprintf('%02d:%02d', $ho, $mi);
+    if ($star->($dom) && $star->($mon) && $star->($dow)) {
+        return "daily at $hm";
+    }
+    if ($star->($dom) && $star->($mon) && $isnum->($dow)) {
+        my $name = $days[$dow % 7] // "weekday $dow";
+        return "weekly on $name at $hm";
+    }
+    if ($isnum->($dom) && $star->($mon) && $star->($dow)) {
+        return "monthly on day $dom at $hm";
+    }
+    return 'custom schedule';
+}
+
+################################################################################
+# cron_parse_schedule / cron_split_redirect
+#
+# cron_parse_schedule splits one crontab line (already stripped of a leading
+# '#') into its five time fields and the command, or returns undef if it is not
+# a five-field entry (an env line, an @reboot shortcut, etc.). Each time field
+# must look like a cron field (digits, '*', and , - /).
+#
+# cron_split_redirect separates the command from its stdout redirect target so
+# the log file can be shown in its own column. It keys on the FIRST '>' / '>>'
+# / '1>' (not '2>'), matching "... 1>/path/log 2>&1".
+################################################################################
+sub cron_parse_schedule {
+    my ($body) = @_;
+    my @p = split /\s+/, $body, 6;
+    return undef unless @p >= 6;
+    for my $i (0 .. 4) { return undef unless $p[$i] =~ m{^[0-9*/,\-]+$}; }
+    return { min => $p[0], hour => $p[1], dom => $p[2], mon => $p[3],
+             dow => $p[4], cmd => $p[5] };
+}
+sub cron_split_redirect {
+    my ($cmd) = @_;
+    my ($disp, $log) = ($cmd, '');
+    if ($cmd =~ /^(.*?)\s+1?>>?\s*(\S+)/) { $disp = $1; $log = $2; }
+    return ($disp, $log);
+}
+
+################################################################################
+# cron_match_entries
+#
+# Parse a crontab, keeping only the lines that run fetchconfig -- matched on the
+# full FETCHCONFIG_PATH/FETCHCONFIG_BIN path, which also keeps other jobs'
+# command lines (and any secrets on them) out of the view. Commented-out
+# fetchconfig lines are kept too, flagged, so a disabled schedule is visible.
+#
+# Parameters:
+#   $text   raw crontab
+################################################################################
+sub cron_match_entries {
+    my ($text) = @_;
+    my @rows;
+    for my $line (split /\n/, (defined $text ? $text : '')) {
+        next if $line =~ /^\s*$/;
+        my $commented = ($line =~ /^\s*#/) ? 1 : 0;
+        (my $body = $line) =~ s/^\s*#+\s?//;
+        next unless index($body, $FETCHCONFIG_BIN_FULL) >= 0;
+        if (my $p = cron_parse_schedule($body)) {
+            my ($disp, $log) = cron_split_redirect($p->{cmd});
+            push @rows, {
+                commented => $commented,
+                schedule  => "$p->{min} $p->{hour} $p->{dom} $p->{mon} $p->{dow}",
+                when      => cron_describe($p->{min}, $p->{hour}, $p->{dom}, $p->{mon}, $p->{dow}),
+                cmd       => $disp,
+                log       => $log,
+            };
+        } else {
+            # A fetchconfig line we could not split into five fields (e.g. an
+            # @daily shortcut): show it verbatim rather than drop it.
+            push @rows, { commented => $commented, schedule => $body,
+                          when => 'custom schedule', cmd => '', log => '' };
+        }
+    }
+    return \@rows;
+}
+
+################################################################################
+# show_tool_schedule  (?action=tool_schedule, admin only, read-only)
+#
+# Tools -> Show schedule. Two panels:
+#   1. Current schedule -- lists CRON_USER's crontab (via the privileged
+#      helper) and shows the fetchconfig lines, parsed.
+#   2. Build a crontab entry -- compose a line from field selectors and copy it
+#      (the tool never writes the crontab).
+#
+# Requires CRON_USER, FETCHCONFIG_PATH, FETCHCONFIG_BIN and FETCHCONFIG_LOG; if
+# any is unset the page shows which are missing and nothing else.
+#
+# Parameters:
+#   $user
+################################################################################
+sub show_tool_schedule {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You are not allowed to use Tools.</p>\n};
+        print page_foot();
+        return;
+    }
+    # 'full' width: the current-schedule table has five columns including a full
+    # command line and a log path, so it needs the room the status/debug pages use.
+    print page_head('Show schedule', $user, 'full');
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Show schedule</h2>\n};
+
+    # Config gate: all four settings must be present.
+    my @missing;
+    push @missing, ['CRON_USER',
+        'the user whose crontab holds the fetchconfig job; must exist in /etc/passwd']
+        if $CRON_USER eq '';
+    push @missing, ['FETCHCONFIG_PATH', 'directory holding fetchconfig.pl']
+        if !defined $FETCHCONFIG_PATH || $FETCHCONFIG_PATH eq '';
+    push @missing, ['FETCHCONFIG_BIN', 'fetchconfig executable file name']
+        if !defined $FETCHCONFIG_BIN || $FETCHCONFIG_BIN eq '';
+    push @missing, ['FETCHCONFIG_LOG',
+        'absolute path of the backup log, used in the built crontab line']
+        if !defined $FETCHCONFIG_LOG || $FETCHCONFIG_LOG eq '';
+    if (@missing) {
+        print qq{<p class="error" style="border:2px solid #b00020;padding:0.7em 1em;border-radius:4px">}
+            . qq{<strong>The schedule tool is not fully configured.</strong><br>}
+            . qq{Set the following in <code>} . esc($CONFIG_FILE) . qq{</code>, then reload this page:</p>\n};
+        print qq{<ul>\n};
+        print qq{<li><code>} . esc($_->[0]) . qq{</code> &mdash; not set (} . esc($_->[1]) . qq{)</li>\n}
+            for @missing;
+        print qq{</ul>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    # ---- Panel 1: current schedule --------------------------------------
+    print qq{<h3 style="margin-top:0.2em">Current schedule</h3>\n};
+    print qq{<p class="muted">Read-only. Lists the crontab of <code>CRON_USER</code> = <code>}
+        . esc($CRON_USER) . qq{</code> and shows the lines running <code>}
+        . esc($FETCHCONFIG_BIN_FULL) . qq{</code>. Times are in the cron host's local time.</p>\n};
+
+    if (!defined getpwnam($CRON_USER)) {
+        print qq{<p class="error">No such user <code>} . esc($CRON_USER)
+            . qq{</code> on this host. Check <code>CRON_USER</code> in <code>}
+            . esc($CONFIG_FILE) . qq{</code>.</p>\n};
+    } else {
+        my ($raw, $err, $empty) = cron_list_raw();
+        if ($err) {
+            print qq{<p class="error">} . esc($err) . qq{</p>\n};
+        } elsif ($empty) {
+            print qq{<p class="muted">No crontab found for <code>} . esc($CRON_USER)
+                . qq{</code>. Use the builder below and add the line with }
+                . qq{<code>crontab -e</code>.</p>\n};
+        } else {
+            my $rows = cron_match_entries($raw);
+            if (!@$rows) {
+                print qq{<p class="muted">No fetchconfig lines found in <code>}
+                    . esc($CRON_USER) . qq{</code>'s crontab.</p>\n};
+            } else {
+                print qq{<table class="list" style="margin-bottom:1.6em">\n};
+                print qq{<tr><th>State</th><th>Schedule</th><th>When</th>}
+                    . qq{<th>Command</th><th>Log</th></tr>\n};
+                for my $r (@$rows) {
+                    my $state = $r->{commented}
+                        ? qq{<span class="muted">disabled</span>}
+                        : qq{<span style="color:#1a7f37;font-weight:600">active</span>};
+                    print qq{<tr><td>$state</td>}
+                        . qq{<td><code>} . esc($r->{schedule}) . qq{</code></td>}
+                        . qq{<td>} . esc($r->{when}) . qq{</td>}
+                        . qq{<td><code>} . esc($r->{cmd}) . qq{</code></td>}
+                        . qq{<td><code>} . esc($r->{log}) . qq{</code></td></tr>\n};
+                }
+                print qq{</table>\n};
+            }
+        }
+    }
+
+    # ---- Panel 2: build a crontab entry ---------------------------------
+    my $devarg = _basename(defined $DEVICE_TABLE ? $DEVICE_TABLE : '');
+    my $args_default = "-devices=$devarg -P 1";
+
+    my $mk_sel = sub {
+        my ($id, $opts, $sel) = @_;
+        my $o = join('', map {
+            my ($v, $l) = @$_;
+            qq{<option value="} . esc($v) . qq{"} . ($v eq $sel ? ' selected' : '')
+                . qq{>} . esc($l) . qq{</option>}
+        } @$opts);
+        return qq{<select id="$id" style="height:2.4em;padding:0.3em 0.5em;border:1px solid #ccc;}
+             . qq{border-radius:4px;font-size:0.95em;box-sizing:border-box">$o</select>};
+    };
+    my @min_o  = map { [ $_, sprintf('%02d', $_) ] } 0 .. 59;
+    my @hour_o = map { [ $_, sprintf('%02d', $_) ] } 0 .. 23;
+    my @dom_o  = ( ['*', 'every (*)'], map { [ $_, $_ ] } 1 .. 31 );
+    my @mon_nm = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+    my @mon_o  = ( ['*', 'every (*)'], map { [ $_ + 1, $mon_nm[$_] ] } 0 .. 11 );
+    my @dow_nm = qw(Sun Mon Tue Wed Thu Fri Sat);
+    my @dow_o  = ( ['*', 'every (*)'], map { [ $_, $dow_nm[$_] ] } 0 .. 6 );
+
+    my $field = sub {
+        my ($label, $html) = @_;
+        return qq{<label style="display:flex;flex-direction:column;gap:0.3em;font-size:0.9em">}
+             . qq{<span style="font-weight:600;color:#333">} . esc($label) . qq{</span>$html</label>};
+    };
+
+    print qq{<h3>Build a crontab entry</h3>\n};
+    print qq{<p class="muted">Compose a schedule and copy the complete line into <code>}
+        . esc($CRON_USER) . qq{</code>'s crontab (<code>crontab -e</code>). }
+        . qq{This tool does not write the crontab.</p>\n};
+    print qq{<div style="display:flex;align-items:flex-end;gap:1.1em;flex-wrap:wrap;margin:0.4em 0 0">}
+        . $field->('Minute',       $mk_sel->('cron-min',  \@min_o,  '0'))
+        . $field->('Hour',         $mk_sel->('cron-hour', \@hour_o, '0'))
+        . $field->('Day of month', $mk_sel->('cron-dom',  \@dom_o,  '*'))
+        . $field->('Month',        $mk_sel->('cron-mon',  \@mon_o,  '*'))
+        . $field->('Weekday',      $mk_sel->('cron-dow',  \@dow_o,  '*'))
+        . $field->('Arguments',
+            qq{<input type="text" id="cron-args" value="} . esc($args_default)
+            . qq{" style="height:2.4em;padding:0.3em 0.5em;border:1px solid #ccc;border-radius:4px;}
+            . qq{font-size:0.95em;box-sizing:border-box;width:18em">})
+        . qq{</div>\n};
+
+    print qq{<div class="config-wrap" style="margin-top:1em;margin-bottom:1em">\n};
+    print qq{<button type="button" class="copy-btn" id="cron-copy" title="Copy to clipboard" }
+        . qq{aria-label="Copy to clipboard"><svg viewBox="0 0 24 24" aria-hidden="true"><path }
+        . qq{d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11}
+        . qq{a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>}
+        . qq{<span id="cron-copy-label">Copy</span></button>\n};
+    print qq{<pre class="config" id="cron-line" style="white-space:pre-wrap;word-break:break-all;padding-right:6em"></pre>\n};
+    print qq{</div>\n};
+    print qq{<p class="muted"><span id="cron-desc"></span> Command from }
+        . qq{<code>FETCHCONFIG_PATH/FETCHCONFIG_BIN</code>, log from <code>FETCHCONFIG_LOG</code>.</p>\n};
+
+    # Builder script: compose the line live and copy it. The command's fixed
+    # parts (binary path, log path) are injected as JSON so no value is ever
+    # interpolated into HTML or JS unescaped.
+    my $bin_js = json_string($FETCHCONFIG_BIN_FULL);
+    my $log_js = json_string($FETCHCONFIG_LOG);
+    print <<"JS";
+<script>
+(function () {
+    var BIN = $bin_js, LOG = $log_js;
+    var ids = ['cron-min','cron-hour','cron-dom','cron-mon','cron-dow'];
+    var pre = document.getElementById('cron-line');
+    var desc = document.getElementById('cron-desc');
+    var argsEl = document.getElementById('cron-args');
+    var btn = document.getElementById('cron-copy');
+    var lbl = document.getElementById('cron-copy-label');
+    if (!pre || !argsEl || !btn) return;
+    function isnum(x) { return /^[0-9]+\$/.test(x); }
+    function describe(v) {
+        var mi=v[0], ho=v[1], dom=v[2], mon=v[3], dow=v[4];
+        if (!isnum(mi) || !isnum(ho)) return 'Custom schedule.';
+        var hm = ('0'+ho).slice(-2)+':'+('0'+mi).slice(-2);
+        var days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+        if (dom==='*'&&mon==='*'&&dow==='*') return 'Runs daily at '+hm+'.';
+        if (dom==='*'&&mon==='*'&&isnum(dow)) { var d=days[(+dow)%7]||('weekday '+dow); return 'Runs weekly on '+d+' at '+hm+'.'; }
+        if (isnum(dom)&&mon==='*'&&dow==='*') return 'Runs monthly on day '+dom+' at '+hm+'.';
+        return 'Custom schedule.';
+    }
+    function compose() {
+        var v = ids.map(function (id) { return document.getElementById(id).value; });
+        var a = (argsEl.value || '').replace(/\\s+/g,' ').replace(/^ | \$/g,'');
+        var cmd = BIN + (a ? (' '+a) : '') + ' 1>' + LOG + ' 2>&1';
+        var line = v.join(' ') + ' ' + cmd;
+        pre.textContent = line;
+        if (desc) desc.textContent = describe(v);
+        return line;
+    }
+    ids.forEach(function (id) { document.getElementById(id).addEventListener('change', compose); });
+    argsEl.addEventListener('input', compose);
+
+    function done(ok) { lbl.textContent = ok ? 'Copied!' : 'Copy failed'; setTimeout(function () { lbl.textContent = 'Copy'; }, 1500); }
+    function fallbackCopy(text) {
+        var handler = function (e) { if (e.clipboardData) { e.clipboardData.setData('text/plain', text); e.preventDefault(); } };
+        document.addEventListener('copy', handler);
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.setAttribute('readonly','');
+        ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0';
+        document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+        var ok=false; try { ok=document.execCommand('copy'); } catch (e) { ok=false; }
+        document.removeEventListener('copy', handler); document.body.removeChild(ta); done(ok);
+    }
+    btn.addEventListener('click', function () {
+        var text = compose();
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () { done(true); }, function () { fallbackCopy(text); });
+        } else { fallbackCopy(text); }
+    });
+    compose();
+})();
+</script>
+JS
+
+    print qq{</div>\n};   # .tool-section
     print page_foot();
 }
 
@@ -22552,11 +22925,15 @@ sub page_head {
         ? qq{ class="} . esc($main_class) . qq{"} : '';
 
     # External stylesheet: BASE_URL + CSS_BASE_URL + the file, cache-busted by
-    # the running version so each release is picked up without a hard reload.
+    # APP_VERSION_INTERNAL -- the TRUE shipped version, which changes exactly
+    # when the shipped files (including this CSS) change. APP_VERSION is NOT
+    # used here: it is config-overridable and may be set to an arbitrary
+    # display string, so tying the cache-buster to it would either pin a stale
+    # CSS across a real upgrade or churn it needlessly on a cosmetic change.
     # BASE_URL/CSS_BASE_URL are validated URL paths (read_config) with trailing
     # slashes stripped, so joining with '/' yields a clean absolute URL path
     # that the browser merges with the site FQDN.
-    my $css_href = esc("$BASE_URL$CSS_BASE_URL/fetchconfig-web.css?v=" . APP_VERSION);
+    my $css_href = esc("$BASE_URL$CSS_BASE_URL/fetchconfig-web.css?v=" . APP_VERSION_INTERNAL);
 
     # The menu and user/logout controls only make sense once logged in;
     # show_login_form() calls page_head() with no $user, so the title bar
@@ -22642,6 +23019,7 @@ sub page_head {
                 $su->('Orphaned notes cleanup',                       '?action=tool_notes_orphans'),
                 $su->('Restore device table',                         '?action=tool_restore'),
                 $su->('Show fetchconfig-web.cfg',                     '?action=tool_show_cfg'),
+                $su->('Show schedule',                                '?action=tool_schedule'),
                 $su->('Verify email setup',                          '?action=tool_verify_email'),
                 $su->('Templates',                                    '?action=view_templates'),
                 $su->('Upload report logo',                           '?action=tool_logo'),

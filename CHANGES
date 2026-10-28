@@ -6,7 +6,33 @@ Release history for fetchconfig-web, newest version first.
 2.08
 ====
 
-Requires fetchconfig 9.72. Adds a viewer for device debug logs.
+Requires fetchconfig 9.72. Adds a viewer for device debug logs and a read-only
+schedule tool.
+
+Show schedule (Tools)
+---------------------
+
+- New Tools -> Show schedule (admin only). Two panels:
+  - Current schedule -- lists CRON_USER's crontab (read-only) and shows the
+    lines running FETCHCONFIG_PATH/FETCHCONFIG_BIN, parsed into schedule, a
+    plain-language "when", the command and its log file. Commented-out
+    fetchconfig lines are shown too, flagged disabled. Other jobs on the crontab
+    (and any secrets on their command lines) are not shown.
+  - Build a crontab entry -- pick minute / hour / day-of-month / month / weekday
+    and copy the complete line (command from FETCHCONFIG_PATH/FETCHCONFIG_BIN,
+    log from FETCHCONFIG_LOG). The tool never writes the crontab; you add the
+    line yourself with crontab -e.
+- New optional config key CRON_USER -- the user whose crontab holds the job. The
+  page shows which settings are missing if any of CRON_USER, FETCHCONFIG_PATH,
+  FETCHCONFIG_BIN or FETCHCONFIG_LOG is unset.
+- Reading another user's crontab goes through the existing privileged helper
+  (TEMPLATE_HELPER + sudo) -- a new read-only list-cron subcommand -- because
+  the cron spool directory is root-owned. No new sudoers rule is needed; the
+  helper is redeployed. The target user comes only from the config and must
+  exist (getpwnam).
+- Helper v1.7: list-cron forces LC_ALL=C and an absolute crontab path, so the
+  viewer works on a non-English Linux host (RHEL/SLES/Debian) where cron's "no
+  crontab for <user>" message would otherwise be localized and misread.
 
 Device debug logs
 -----------------
@@ -54,8 +80,9 @@ Other
 - The user editor's permission boxes are wider, so no permission label wraps.
 - The Device backup status filter row uses the same control sizes as the Devices
   page.
-- Fixed: APP_VERSION was left at 2.07. It is what the footer shows and what
-  cache-busts the stylesheet, so browsers kept the old CSS.
+- Fixed: the stylesheet is now cache-busted by APP_VERSION_INTERNAL (the true
+  shipped version), not by APP_VERSION. APP_VERSION is display-only and config-
+  overridable, so it may be any string without affecting the CSS.
 - Per page on Device backup status now offers All/10/20/40/80/160, defaulting to
   40, as the device list does.
 

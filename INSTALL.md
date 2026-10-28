@@ -61,7 +61,7 @@ The release archive `fetchconfig-web-2.08.tar` unpacks to a directory
 | `fetchconfig-web-dbupdate-1.62.sql` | Idempotent SQL that upgrades an existing database to the 1.62 schema (`users.download_full_config`, the `device_notes` table; PostgreSQL 8.2+). |
 | `fetchconfig-web-dbupdate-2.08.sql` | Idempotent SQL that upgrades an existing database to the 2.08 schema (`users.read_debug`; PostgreSQL 8.2+). |
 | `fetchconfig-web-clean-resets.pl` | Standalone script to prune spent password-reset tokens and stale login-throttle rows (`-h` for help, `-s` to print the role SQL). |
-| `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`, that installs, creates, reverts, deletes or renames a template file (v1.3). |
+| `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`: installs, creates, reverts, deletes or renames a template file; reads/deletes a device debug log; and lists `CRON_USER`'s crontab for the schedule viewer (v1.7). |
 | `imageconvert.pl`, `README.imageconvert.md` (+ `.html`/`README.imageconvert`) | Optional helper for embedding a small image as a base64 Perl constant; its manual (Markdown master, with generated HTML and plain-text). |
 | `images/back.jpg` | Login-page backdrop image. |
 | `favicon.ico` | Browser tab/bookmark icon. Optional; copy to the web server's document root (see Step 4) when the application runs on its own vhost or dedicated server. |
@@ -434,6 +434,10 @@ BACKUP_TIMEOUT          = 120
 # Cap on how many per-device sections the run-log viewer renders (0 = no cap)
 LOG_MAX_DEVICES         = 1000
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
+# The user whose crontab holds the scheduled fetchconfig run. Set it to enable
+# Tools -> Show schedule (read-only). Put the cron entry in THIS user's crontab,
+# not root's; the viewer reads it through TEMPLATE_HELPER + sudo (below).
+#CRON_USER              = fetchconfig
 
 # --- accounts ---
 PROTECTED_USER          = admin
@@ -611,14 +615,16 @@ cp fetchconfig-web-install-template.pl /usr/local/fetchconfig/
 chmod 755 /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 ```
 
-The helper is **v1.3**. The subcommand set arrived in v1.2 (fetchconfig-web
-2.05): besides `install` and `revert` it supports `install-new` (used by
-template upload), `delete` (used by template delete) and `rename` (used by
-template rename). v1.3 adds no subcommand -- it refuses a `.bak` that is a
-symbolic link when reverting, matching what `delete` and `rename` already did,
-so redeploying it is recommended but a v1.2 helper remains functional. The
-single sudoers entry below (the script path) already covers every subcommand --
-no sudoers change is needed, just redeploy the script.
+The helper is **v1.7**. Besides `install` and `revert` (v1.1) it supports
+`install-new`, `delete` and `rename` for templates (v1.2), `read-debug` and
+`delete-debug` for the device-debug-log viewer (v1.5, fetchconfig-web 2.08),
+and `list-cron` for the **Show schedule** viewer (v1.6, 2.08) -- a read-only
+`crontab -l` for `CRON_USER`, needed because the cron spool directory is
+root-owned. v1.7 makes `list-cron` robust on Linux regardless of the host
+locale: it forces `LC_ALL=C` (so the "no crontab" message is recognised on a
+German/other-locale host) and resolves `crontab` by absolute path. The single
+sudoers entry below (the script path) already covers every subcommand -- **no
+sudoers change is needed for any of these, just redeploy the script.**
 
 The web server must be configured to execute `.cgi` in that directory and to
 serve the static assets from `WEB_DIR`. That is **Step 7**, which gives the
@@ -719,6 +725,21 @@ is a **narrow sudo rule** that lets only the web-server user run only
 > about Backup Now: setting it to `0` **also disables the template helper**, after
 > which template writes only work if the template directories are writable by the
 > web user directly.
+
+> [!NOTE]
+> **SELinux / AppArmor (RHEL, SLES, Debian).** The sudo rules above grant the
+> privilege, but a mandatory-access-control policy can still block the web server
+> from *using* it. On RHEL/SLES with SELinux enforcing, the `httpd_t` domain is
+> not normally allowed to execute `sudo`, the helper, `fetchconfig.pl` or
+> `crontab`; symptoms are "Permission denied" despite correct sudoers, with the
+> real cause in the audit log. Check with `ausearch -m avc -ts recent` (or
+> `sealert`) and, if you accept the exposure, allow it with a local policy module
+> rather than disabling SELinux. (A common lever is the `httpd_execmem` /
+> `httpd_unified`-style booleans plus a module for the sudo/crontab transitions;
+> the audit entry names what to allow.) On Debian/Ubuntu, the stock `apache2`
+> AppArmor profile is usually permissive enough; if you confined it, extend the
+> profile similarly. The schedule viewer's `list-cron` is the newest path that
+> needs this, since it runs `crontab` as root via the helper.
 
 and keep `USE_SUDO_FOR_BACKUP_NOW = 1` (the default). Backup Now then runs
 `sudo -n /usr/local/fetchconfig/fetchconfig.pl -devices=<tempfile>`; `-n`

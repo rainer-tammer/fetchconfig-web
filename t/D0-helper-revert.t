@@ -63,7 +63,7 @@ sub run_helper {
 {
     my ($rc, $out) = run_helper('--version');
     is($rc, 0, 'helper --version exits 0');
-    like($out, qr/\b1\.5\b/, 'helper reports v1.5');
+    like($out, qr/\b1\.7\b/, 'helper reports v1.7');
 }
 
 # --- 1.4: read-debug / delete-debug ----------------------------------------

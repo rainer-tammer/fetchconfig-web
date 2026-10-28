@@ -39,19 +39,32 @@ ok(-e "$td/solo2.tmpl" && !-e "$td/solo.tmpl", 'moved, no .bak needed');
 
 # --- the privileged helper's "rename" subcommand ---
 my $helper = "$FindBin::Bin/../fetchconfig-web-install-template.pl";
+
+# Run the helper with its STDERR discarded. The refuse-* cases below deliberately
+# trigger the helper's own error messages (fail() -> STDERR) and we assert only on
+# the exit status; without this those messages leak into the test-harness output
+# and look like warnings. /dev/null is the null device on Linux and AIX alike.
+sub sys_quiet {
+    open(my $save, '>&', \*STDERR) or return system(@_);
+    unless (open(STDERR, '>', '/dev/null')) { return system(@_); }
+    my $rc = system(@_);
+    open(STDERR, '>&', $save);
+    return $rc;
+}
+
 SKIP: {
     skip "helper not found", 4 unless -f $helper;
     put("$td/h1.tmpl",     "hb\n");
     put("$td/h1.tmpl.bak", "hbak\n");
-    my $rc = system($^X, $helper, 'rename', "$td/h1.tmpl", "$td/h2.tmpl");
+    my $rc = sys_quiet($^X, $helper, 'rename', "$td/h1.tmpl", "$td/h2.tmpl");
     is($rc, 0, 'helper rename exits 0');
     ok(-e "$td/h2.tmpl" && -e "$td/h2.tmpl.bak", 'helper moved template and .bak');
-    # refuse existing target
+    # refuse existing target (helper prints an error to STDERR -- discarded)
     put("$td/h3.tmpl", "x\n");
-    my $rc2 = system($^X, $helper, 'rename', "$td/h2.tmpl", "$td/h3.tmpl");
+    my $rc2 = sys_quiet($^X, $helper, 'rename', "$td/h2.tmpl", "$td/h3.tmpl");
     isnt($rc2, 0, 'helper refuses existing target');
-    # refuse non-.tmpl target
-    my $rc3 = system($^X, $helper, 'rename', "$td/h2.tmpl", "$td/h2.txt");
+    # refuse non-.tmpl target (ditto)
+    my $rc3 = sys_quiet($^X, $helper, 'rename', "$td/h2.tmpl", "$td/h2.txt");
     isnt($rc3, 0, 'helper refuses non-.tmpl target');
 }
 
