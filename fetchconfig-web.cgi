@@ -231,6 +231,7 @@ my ($DEVICE_TABLE,
     $HELP_BASE_URL,
     $TEMPLATE_HELPER,
     $BASE_URL,
+    $JS_BASE_URL,
     $HTTPS_ENABLED,
     $SHOW_RENDER_TIME,
     $EMAIL,
@@ -323,6 +324,7 @@ my @CFG_KEYS = (
     [ 'CSS_BASE_URL',           'url',       '/css',                                   'absolute URL path' ],
     [ 'FONT_BASE_URL',          'url',       '/fonts',                                 'absolute URL path' ],
     [ 'IMAGE_BASE_URL',         'url',       '/images',                                'absolute URL path' ],
+    [ 'JS_BASE_URL',            'url',       '/js',                                     'absolute URL path' ],
     [ 'HELP_BASE_URL',          'url',       '/help',                                  'absolute URL path' ],
     [ 'APP_VERSION',            'str',       APP_VERSION,                              'string (overrides the shown version)' ],
     [ 'COPYRIGHT',              'str',       DEFAULT_COPYRIGHT,                        'string' ],
@@ -690,10 +692,11 @@ sub read_config {
         CSS_BASE_URL   => '/css',
         FONT_BASE_URL  => '/fonts',
         IMAGE_BASE_URL => '/images',
+        JS_BASE_URL    => '/js',
         HELP_BASE_URL  => '/help',
     );
     my %url_val;
-    for my $k (qw(BASE_URL CSS_BASE_URL FONT_BASE_URL IMAGE_BASE_URL HELP_BASE_URL)) {
+    for my $k (qw(BASE_URL CSS_BASE_URL FONT_BASE_URL IMAGE_BASE_URL JS_BASE_URL HELP_BASE_URL)) {
         my $v = (defined $kv->{$k} && $kv->{$k} ne '') ? $kv->{$k} : $url_default{$k};
         unless ($v =~ m{^/[A-Za-z0-9._~/-]*$}) {
             return "$CONFIG_FILE: $k must be an absolute URL path containing only "
@@ -711,6 +714,7 @@ sub read_config {
     $CSS_BASE_URL   = $url_val{CSS_BASE_URL};
     $FONT_BASE_URL  = $url_val{FONT_BASE_URL};
     $IMAGE_BASE_URL = $url_val{IMAGE_BASE_URL};
+    $JS_BASE_URL    = $url_val{JS_BASE_URL};
     $HELP_BASE_URL  = $url_val{HELP_BASE_URL};
 
     # Full path to the privileged template-install helper
@@ -6347,6 +6351,18 @@ sub hl {
 sub highlight_config {
     my ($model, $content, $dev, $scheme_out) = @_;
     return undef unless defined $model;
+
+    # Mask credential VALUES up front, before any per-model highlighter runs.
+    # esc() masks too, but several highlighters deliberately isolate a credential
+    # blob into its own fragment (so it is NOT syntax-coloured as an IP/number/
+    # word) and then call esc() on that fragment ALONE -- and mask_secrets() keys
+    # on multi-token context such as "password encrypted <hash>" (Zyxel),
+    # "password cipher <hash>" (Comware) or "... ciphertext <blob>" (Aruba CX),
+    # which a lone fragment no longer carries, so the blob would slip through.
+    # Masking the whole config here redacts the value whatever the highlighter
+    # then does with it; mask_secrets is idempotent, so the per-fragment esc()
+    # masking downstream is a harmless no-op on the already-masked text.
+    $content = mask_secrets($content) if defined $content;
 
     # Direct hit: a built-in model with its own registered highlighter. The
     # scheme reported is the model name itself (that is the key used).
@@ -12265,7 +12281,8 @@ sub show_view_templates {
                          . CGI::escape($f->{path}));
             my $used = template_is_used($f->{path});
             my $used_cell = $f->{problem} eq ''
-                ? ($used ? qq{Yes} : qq{No})
+                ? ($used ? qq{<span style="color:#1a7f37;font-weight:600">Yes</span>}
+                         : qq{<span style="color:#b00020;font-weight:600">No</span>})
                 : qq{<span class="muted">&mdash;</span>};
             my $actions;
             if ($f->{problem} ne '') {
@@ -12338,6 +12355,134 @@ sub show_view_templates {
 }
 
 ################################################################################
+# Template state-machine diagram (Mermaid source generation)
+#
+# The engine's own template parser, fetchconfig::model::GenericTemplateParser,
+# turns a template into pure structure (states, steps, transitions) with no I/O.
+# We load it by absolute path from FETCHCONFIG_PATH -- exactly as
+# fetchconfig_installed_version() loads Constants.pm -- and never die: an older
+# fetchconfig without this module simply yields no diagram (a note is shown).
+#
+# The gloss/diagram subs below are ported verbatim from the fetchconfig tool
+# tools/gen-template-docs.pl (action_gloss, trigger_gloss, edge_label, mm_label,
+# target_of, mermaid) so the web viewer draws the same stateDiagram-v2 the
+# shipped template HTML docs use. mm_label strips the Mermaid metacharacters
+# ("#;{}| and ':') from edge labels; the whole source is additionally
+# HTML-escaped before it reaches the page, so a template cannot inject markup.
+################################################################################
+
+# Absolute path to the parser module, or undef if FETCHCONFIG_PATH is unset or
+# the file is missing/unreadable (older fetchconfig).
+sub template_diagram_module {
+    return undef unless defined $FETCHCONFIG_PATH && $FETCHCONFIG_PATH ne '';
+    my $mod = "$FETCHCONFIG_PATH/fetchconfig/model/GenericTemplateParser.pm";
+    return (-f $mod && -r $mod) ? $mod : undef;
+}
+
+# ---- gloss helpers (ported from gen-template-docs.pl) ----------------------
+sub tdiag_action_gloss {
+    my ($a) = @_;
+    return 'nop'           if $a->{op} eq 'nop';
+    return 'capture_start' if $a->{op} eq 'capture_start';
+    return 'capture_stop'  if $a->{op} eq 'capture_stop';
+    return 'send_match'    if $a->{op} eq 'send_match';
+    if ($a->{kind} && $a->{kind} eq 'option') {
+        my $n = $a->{name};
+        return 'send user'         if $n eq 'user';
+        return 'send password'     if $n eq 'pass';
+        return ($a->{op} eq 'send_secret' ? 'send enable secret' : 'send enable') if $n eq 'enable';
+        return 'send show command' if $n eq 'show_cmd';
+    }
+    if ($a->{kind} && $a->{kind} eq 'literal') {
+        my $txt = $a->{text};
+        return 'send key' if $txt =~ /^\s*$/;
+        $txt =~ s/"//g;
+        return "send $txt";
+    }
+    return $a->{op};
+}
+sub tdiag_trigger_gloss {
+    my ($p) = @_;
+    return 'at prompt' if $p->{kind} eq 'prompt';
+    my $r = lc $p->{regex};
+    return 'username'  if $r =~ /user/;
+    return 'password'  if $r =~ /pass/;
+    return 'login'     if $r =~ /login/;
+    return 'menu'      if $r =~ /command line|\(cli\)|\bmenu\b/;
+    return 'press key' if $r =~ /press any key/;
+    return 'pager'     if $r =~ /more--|--more/;
+    return 'at prompt' if $r =~ /[>#]\s*\$?$|\)\s*\\?\s*[>#]/;
+    return '';
+}
+sub tdiag_edge_label { my ($trig, $act) = @_; $trig ne '' ? "$trig, $act" : $act; }
+sub tdiag_mm_label {
+    my ($s) = @_;
+    $s =~ s/["#;{}|]//g;
+    $s =~ s/:/ -/g;
+    $s =~ s/\s+/ /g; $s =~ s/^\s+|\s+$//g;
+    return $s;
+}
+sub tdiag_target_of {
+    my ($step, $state) = @_;
+    my $nk = $step->{next_kind} || 'stay';
+    return '[*]'           if $nk eq 'done';
+    return $step->{next}   if $nk eq 'goto';
+    return $state->{name};
+}
+sub tdiag_mermaid {
+    my ($t) = @_;
+    my @m = ('stateDiagram-v2');
+    for my $tr (@{$t->{transports}}) {
+        my $entry = $tr eq 'ssh' ? 'state_login_ssh' : 'state_login_telnet';
+        push @m, "    [*] --> $entry: transport $tr" if $t->{state_by}{$entry};
+    }
+    for my $st (@{$t->{states}}) {
+        for my $step (@{$st->{steps}}) {
+            next if $step->{op} eq 'capture_start';
+            next unless $step->{op} eq 'expect' || $step->{op} eq 'send_now';
+            my $tgt = tdiag_target_of($step, $st);
+            my $label = $step->{op} eq 'expect'
+                      ? tdiag_edge_label(tdiag_trigger_gloss($step->{pattern}),
+                                         tdiag_action_gloss($step->{action}))
+                      : tdiag_action_gloss($step->{action});
+            push @m, "    $st->{name} --> $tgt: " . tdiag_mm_label($label);
+        }
+    }
+    return \@m;
+}
+
+################################################################################
+# template_mermaid_source
+#
+# Given a template's text, return ($source, $reason):
+#   $source  the Mermaid "stateDiagram-v2" text (one or more edges), or undef
+#   $reason  undef on success, else why there is no diagram:
+#              'no_parser'   -- GenericTemplateParser absent/unloadable
+#              'parse_error' -- the template did not parse cleanly
+#              'empty'       -- parsed, but no transitions to draw
+# Never dies: the require is eval-guarded, like fetchconfig_installed_version.
+################################################################################
+sub template_mermaid_source {
+    my ($text) = @_;
+    my $mod = template_diagram_module();
+    return (undef, 'no_parser') unless defined $mod;
+    # Idempotent require (no delete-from-%INC): the parser is pure and stable,
+    # so loading it once per process is enough and avoids "Subroutine redefined"
+    # warnings in the error log on every template view.
+    my $t = eval {
+        require $mod;
+        fetchconfig::model::GenericTemplateParser->can('parse')
+            ? fetchconfig::model::GenericTemplateParser->parse($text)
+            : undef;
+    };
+    return (undef, 'no_parser')   if $@ || !ref $t;
+    return (undef, 'parse_error') if $t->{errors} && @{ $t->{errors} };
+    my $lines = tdiag_mermaid($t);
+    return (undef, 'empty') unless $lines && @$lines > 1;   # header line only
+    return (join("\n", @$lines), undef);
+}
+
+################################################################################
 # show_view_template
 #
 # Single-template view (?action=view_template&path=..., admin only, read-only).
@@ -12404,6 +12549,100 @@ sub show_view_template {
     print qq{</div>\n};
     print copy_button_script();
     print qq{</div>\n};   # .tool-section (Template view)
+
+    # ---- Template state-machine diagram (Mermaid, rendered in the browser) --
+    # The server generates the stateDiagram-v2 source from the engine's own
+    # parser (template_mermaid_source); the browser renders it with the
+    # self-hosted js/mermaid.min.js. Both the renderer and the IBM Plex Sans
+    # webfont are referenced ONLY on this page. If the parser, the renderer, or
+    # the font is missing, a note is shown rather than a stale diagram.
+    {
+        my ($mm_src, $reason) = template_mermaid_source($content);
+
+        my $have_webdir = (defined $WEB_DIR && $WEB_DIR ne '');
+        my $js_ok   = ($have_webdir && -f "$WEB_DIR$JS_BASE_URL/mermaid.min.js") ? 1 : 0;
+        my $font_ok = ($have_webdir
+                       && -f "$WEB_DIR$FONT_BASE_URL/IBMPlexSans-Regular.woff2") ? 1 : 0;
+        my $can_render = (defined $mm_src && $js_ok) ? 1 : 0;
+
+        my @notes;
+        if (!defined $mm_src) {
+            push @notes,
+                  $reason eq 'no_parser'
+                ? 'No state-machine diagram: the fetchconfig template parser '
+                  . '(fetchconfig::model::GenericTemplateParser) was not found under '
+                  . 'FETCHCONFIG_PATH. Upgrade fetchconfig to a version that ships it.'
+                : $reason eq 'parse_error'
+                ? 'No state-machine diagram: this template did not parse cleanly.'
+                : 'No state-machine diagram: this template defines no state transitions to draw.';
+        }
+        elsif (!$js_ok) {
+            push @notes, $have_webdir
+                ? 'The state-machine diagram cannot be shown: the diagram renderer is not '
+                  . 'installed. Copy the js/ directory from the release into WEB_DIR '
+                  . '(expected: WEB_DIR/js/mermaid.min.js). See INSTALL.'
+                : 'The state-machine diagram cannot be shown: WEB_DIR is not configured, so '
+                  . 'the diagram renderer (js/mermaid.min.js) cannot be located.';
+        }
+        if ($can_render && !$font_ok) {
+            push @notes, 'Note: the IBM Plex Sans font is not installed in WEB_DIR/fonts, so '
+                . 'diagram labels may not fit correctly. Copy the fonts/ directory from the '
+                . 'release into WEB_DIR.';
+        }
+
+        print qq{<div class="tool-section" id="template-diagram-section">\n};
+        print qq{<h2 class="tool-section-title">State machine</h2>\n};
+
+        # Scoped styling + webfont, inline so the feature adds no cache-busted
+        # shared CSS and loads only on this page.
+        print <<"CSS";
+<style>
+\@font-face { font-family: 'IBM Plex Sans'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('$BASE_URL$FONT_BASE_URL/IBMPlexSans-Regular.woff2') format('woff2'); }
+\@font-face { font-family: 'IBM Plex Sans'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('$BASE_URL$FONT_BASE_URL/IBMPlexSans-SemiBold.woff2') format('woff2'); }
+#template-diagram-section .mermaid { font-family: 'IBM Plex Sans', sans-serif; overflow-x: auto; }
+/* Edge labels sit on the section's green panel, not on a white rectangle. */
+#template-diagram-section .mermaid .edgeLabel,
+#template-diagram-section .mermaid .edgeLabel p { background-color: #e8faf1; }
+#template-diagram-section .mermaid .edgeLabel rect { fill: #e8faf1; }
+#template-diagram-section .diagram-note { margin: 0.5em 0; padding: 0.6em 0.8em;
+  border: 1px solid #d0d7de; border-left: 4px solid #d29922; background: #fff8e6;
+  border-radius: 4px; color: #4a4a4a; font-size: 0.92em; }
+</style>
+CSS
+
+        for my $n (@notes) {
+            print qq{<div class="diagram-note">} . esc($n) . qq{</div>\n};
+        }
+
+        if ($can_render) {
+            # mm_src is engine-generated structure (not config); HTML-escape it
+            # (no secret-masking needed) before it reaches the <pre>.
+            print qq{<pre class="mermaid">} . CGI::escapeHTML($mm_src) . qq{</pre>\n};
+            print qq{<div id="template-diagram-fallback" class="diagram-note" }
+                . qq{style="display:none">The diagram could not be rendered in your }
+                . qq{browser.</div>\n};
+            print qq{<script src="$BASE_URL$JS_BASE_URL/mermaid.min.js"></script>\n};
+            print <<'JS';
+<script>
+(function(){
+  function fail(){ var n=document.getElementById('template-diagram-fallback'); if(n){n.style.display='';} }
+  try {
+    mermaid.initialize({ startOnLoad:false, securityLevel:'strict', theme:'neutral',
+      themeVariables:{ fontFamily:"'IBM Plex Sans', sans-serif", fontSize:'14px',
+                       edgeLabelBackground:'#e8faf1' } });
+    var p = mermaid.run({ querySelector:'#template-diagram-section pre.mermaid' });
+    if (p && p.catch) { p.catch(fail); }
+  } catch(e) { fail(); }
+})();
+</script>
+JS
+        }
+
+        print qq{</div>\n};   # .tool-section (Template diagram)
+    }
+
     print top_bottom_nav();
     print page_foot();
 }
@@ -22719,24 +22958,41 @@ sub mask_secrets {
     $text =~ s/\b(enable\w*=)[^\s,;]+/$1?***?/gi;
     # SNMP community, device-table option form "community=".
     $text =~ s/\b(community=)[^\s,;]+/$1?***?/gi;
-    # SNMP community in a switch config, space form. The community string is the
-    # token after "community", optionally quoted, and may be followed by an
-    # access level (operator/manager/unrestricted/ro/rw). Mask only the string,
-    # keeping the keyword and any trailing access level. Covers e.g.
-    #   snmp-server community "public" operator      (ProCurve)
-    #   snmp-server community private RW             (Cisco/Comware)
-    #   set snmp community public                    (other CLIs)
-    # Scope to an "snmp-server community ..." (or "set snmp community ...")
-    # COMMAND, not the word "community" appearing in a description/name/comment.
-    $text =~ s/^(\s*(?:snmp-server|set\s+snmp)\s+community\s+)"[^"]*"/$1"***"/gim;      # quoted
-    $text =~ s/^(\s*(?:snmp-server|set\s+snmp)\s+community\s+)(?!")(\S+)/$1?***?/gim;   # bare
+    # SNMP community in a switch config (space form). Two grammars differ in
+    # WHERE the community sits, so masking handles both without needing to know
+    # the device type:
+    #   snmp-server community "public" operator              (ProCurve: quoted, first)
+    #   snmp-server community private RW                      (Cisco/Comware: bare, first)
+    #   set snmp community public                             (other CLIs: bare, first)
+    #   snmp-server community ipaddr 0.0.0.0 "secret"         (Hirschmann: quoted, LAST,
+    #   snmp-server community ro "secret"                      after ipaddr/ipmask/ro/rw)
+    # Scope to the "snmp-server community ..." / "set snmp community ..." COMMAND,
+    # not the word "community" in a description/name/comment.
+    #
+    # Rule 1 -- a QUOTED community anywhere on the line. The positional keywords
+    # (ipaddr/ipmask/ro/rw/operator/...) are never quoted, so the quoted token is
+    # always the community, whether it is first (ProCurve) or last (Hirschmann).
+    $text =~ s/^(\s*(?:snmp-server|set\s+snmp)\s+community\b.*?)"[^"]*"/$1"***"/gim;
+    # Rule 2 -- a BARE first-token community (Cisco/Comware), but ONLY when the
+    # line has no quoted community (the lookahead: no '"' remains on the line).
+    # Otherwise the bare tokens are Hirschmann keywords, not the secret, and the
+    # real community -- the quoted one -- was already masked by Rule 1.
+    $text =~ s/^(\s*(?:snmp-server|set\s+snmp)\s+community\s+)(?!")(\S+)(?=[^"\n]*$)/$1?***?/gim;
     # RADIUS/TACACS shared secret: the "key <value>" token, but ONLY on a
     # radius-/tacacs-server line (so "crypto key generate", "ip ssh host-key"
-    # etc. are not touched). Mask the key value (quoted or bare), keeping "key".
-    #   radius-server host 1.2.3.4 key "secret"       (ProCurve, quoted)
-    #   tacacs-server host 1.2.3.4 key secret          (bare)
-    $text =~ s/^((?:radius|tacacs)[-\w]*server\b.*?\bkey\s+)"[^"]*"/$1"***"/gim;
-    $text =~ s/^((?:radius|tacacs)[-\w]*server\b.*?\bkey\s+)(?!")([^\s,;]+)/$1?***?/gim;
+    # etc. are not touched). A key TYPE may sit between "key" and the value --
+    # either a numeric encoding digit (Cisco Nexus "key 7 \"secret\"") or an
+    # Aruba CX encoding keyword (ciphertext/plaintext/cipher/encrypted). The type
+    # is kept; only the value after it is masked. Mask the value, quoted or bare.
+    #   radius-server host 1.2.3.4 key "secret"                 (ProCurve, quoted)
+    #   tacacs-server host 1.2.3.4 key secret                    (bare)
+    #   tacacs-server host 1.2.3.4 key 7 "secret" timeout 2      (Cisco Nexus)
+    #   radius-server host 1.2.3.4 key ciphertext AQB...==       (Aruba CX)
+    $text =~ s/^((?:radius|tacacs)[-\w]*server\b.*?\bkey\s+(?:(?:\d+|ciphertext|plaintext|cipher|encrypted)\s+)?)"[^"]*"/$1"***"/gim;
+    # Bare value: the lookahead (no '"' left on the line) stops this from
+    # re-masking a numeric type that precedes an already-masked QUOTED secret
+    # (e.g. after the rule above turns "key 7 \"secret\"" into "key 7 \"***\"").
+    $text =~ s/^((?:radius|tacacs)[-\w]*server\b.*?\bkey\s+(?:(?:\d+|ciphertext|plaintext|cipher|encrypted)\s+)?)(?!")([^\s,;]+)(?=[^"\n]*$)/$1?***?/gim;
     # WPA/WPA2 pre-shared key (Aruba CX etc.): "wpa-passphrase <value>" (the
     # value may be a long hex/ASCII string with no quotes).
     $text =~ s/\b(wpa-passphrase\s+)(\S+)/$1?***?/gi;
@@ -22747,9 +23003,10 @@ sub mask_secrets {
     #     key <secret>
     # block. The generic RADIUS/TACACS rule above only matches "...server ... key"
     # on one line, so handle this leading-whitespace "key <value>" line too.
-    # Scoped to a line whose only content is "key <value>" to avoid touching
-    # other "key ..." commands.
-    $text =~ s/^(\s+key\s+)(\S+)\s*$/$1?***?/gim;
+    # Scoped to a line whose only content is "key [<encoding>] <value>" to avoid
+    # touching other "key ..." commands. An Aruba CX encoding keyword
+    # (ciphertext/plaintext/cipher/encrypted) is kept; only the value is masked.
+    $text =~ s/^(\s+key\s+(?:(?:\d+|ciphertext|plaintext|cipher|encrypted)\s+)?)(\S+)\s*$/$1?***?/gim;
     # Cisco IOS hashed secrets: "secret <type> <hash>" / "password <type> <hash>"
     # where <type> is a single encoding digit (0 plaintext, 5 MD5, 7 Vigenere,
     # 8 PBKDF2, 9 scrypt, ...). Covers "enable secret 9 ...", "username X secret
@@ -22757,6 +23014,23 @@ sub mask_secrets {
     # the hash is masked. \b before the keyword avoids hyphenated words
     # (password-policy, secret-key) and the digit requirement avoids prose.
     $text =~ s/\b(secret|password)\s+(\d)\s+(\S+)/$1 $2 ?***?/gi;
+    # Keyword-typed encrypted passwords (no numeric type): Zyxel
+    # "username X privilege 15 password encrypted <hash>", HPE Comware
+    # "password cipher <hash>", Huawei "password irreversible-cipher <hash>",
+    # Aruba CX "user X group Y password ciphertext <blob>" (and "plaintext"),
+    # and "password hash <hash>". An optional "=" between the keyword and the
+    # value is tolerated. The keyword stays visible; only the hash is masked.
+    # Longest alternative first so "irreversible-cipher"/"ciphertext" are not
+    # shadowed by "cipher".
+    # "cipher"; \s+ after the keyword avoids masking a run-on word.
+    $text =~ s/\b(secret|password)\s+(irreversible-cipher|ciphertext|plaintext|encrypted|cipher|hash)\s+=?\s*(\S+)/$1 $2 ?***?/gi;
+    # Hirschmann (hardware model 'hirschmann' and generic devices driven by the
+    # hirschmann template): the password hash is a ":v<N>:<hash>:" blob on a
+    #   users passwd <user> :v1:<hash>:
+    # line. Keep "users passwd <user>", the ":vN:" scheme tag and the closing
+    # ":"; mask only the hash -- the same shape fetchconfig redacts to
+    # ":v1:****:". The hash carries no ':' so [^:\s]+ stops at the closing colon.
+    $text =~ s/\b(users\s+passwd\s+\S+\s+:v\d+:)[^:\s]+(:)/$1?***?$2/gi;
     return $text;
 }
 

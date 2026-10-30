@@ -157,4 +157,32 @@ is(main::detect_syntax_scheme("!\ncrypto pki certificate chain X\n certificate c
     unlink $f;
 }
 
+# Credential blobs must be masked even in the HIGHLIGHTED view. Several
+# highlighters isolate the encrypted blob into its own fragment so it is not
+# syntax-coloured, then esc() it alone -- which defeats mask_secrets' multi-token
+# context. highlight_config() masks the whole config up front to cover this.
+{
+    my %leaky = (
+        'zyxel'       => ['username admin privilege 15 password encrypted 9f8c7b6a5e4d3c2b',
+                          '9f8c7b6a5e4d3c2b'],
+        'comware-ssh' => ['local-user admin password cipher $c$3$Hq8ZabcDEF123',
+                          'Hq8ZabcDEF123'],
+        'hirschmann'  => ['users passwd admin :v1:a2bbccddeecf7c563746c5037b1dad:',
+                          'a2bbccddee'],
+        'aruba-cx-ssh' => ['user admin group administrators password ciphertext AQBapSFxQZ123blob',
+                           'AQBapSFxQZ123blob'],
+        'nexus-ssh'    => ['tacacs-server host 172.24.180.101 key 7 "nexussecret" timeout 2',
+                           'nexussecret'],
+    );
+    for my $model (sort keys %leaky) {
+        my ($line, $secret) = @{ $leaky{$model} };
+        my $hl = main::highlight_config($model, "$line\n");
+        # Every masked form contains "***" (bare ?***?, or "***" whose quotes are
+        # HTML-escaped to &quot; in the highlighted output). The unlike() below is
+        # what proves the real secret is gone.
+        like($hl, qr/\*\*\*/, "highlight_config($model): credential blob is masked");
+        unlike($hl, qr/\Q$secret\E/, "highlight_config($model): secret value is gone");
+    }
+}
+
 done_testing();

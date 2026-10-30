@@ -326,6 +326,7 @@ BASE_URL                = /
 CSS_BASE_URL            = /css
 FONT_BASE_URL           = /fonts
 IMAGE_BASE_URL          = /images
+JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 FETCHCONFIG_PATH        = /usr/local/fetchconfig
 FETCHCONFIG_BIN         = fetchconfig.pl
@@ -711,13 +712,17 @@ help/documentation pages -- from one web-served directory. `WEB_DIR` is the
 **filesystem** path of that directory (used only for on-disk presence checks);
 `BASE_URL` is the **URL** base under which the web server serves it (the browser
 merges it with the site's host name). `CSS_BASE_URL` (default `/css`),
-`FONT_BASE_URL` (default `/fonts`) and `IMAGE_BASE_URL` (default `/images`) are
-the sub-paths -- both the URL sub-path and the on-disk sub-directory under
-`WEB_DIR`. `HELP_BASE_URL` (default `/help`) is the sub-path of the help tree:
-`help.html` lives directly in it, and the two "additional help" menus are
-scanned from its `fetchconfig-web/` and `fetchconfig/` sub-directories (see
-*Help menu* below). `BASE_URL`, `CSS_BASE_URL`, `FONT_BASE_URL`,
-`IMAGE_BASE_URL` and `HELP_BASE_URL` are validated at startup: they must be
+`FONT_BASE_URL` (default `/fonts`), `IMAGE_BASE_URL` (default `/images`) and
+`JS_BASE_URL` (default `/js`) are the sub-paths -- both the URL sub-path and the
+on-disk sub-directory under `WEB_DIR`. `HELP_BASE_URL` (default `/help`) is the
+sub-path of the help tree: `help.html` lives directly in it, and the two
+"additional help" menus are scanned from its `fetchconfig-web/` and
+`fetchconfig/` sub-directories (see *Help menu* below). `JS_BASE_URL` holds
+`mermaid.min.js`, used by the Template viewer to draw each template's
+login/collect state machine; that diagram also needs the IBM Plex Sans webfont
+under `FONT_BASE_URL` (both ship in this package's `js/` and `fonts/`
+directories -- see INSTALL). `BASE_URL`, `CSS_BASE_URL`, `FONT_BASE_URL`,
+`IMAGE_BASE_URL`, `JS_BASE_URL` and `HELP_BASE_URL` are validated at startup: they must be
 absolute URL paths made only of letters, digits and `. _ ~ - /` -- no scheme,
 quotes, spaces or parentheses -- because they are emitted into links; an
 invalid value is reported as a configuration error on the login page.
@@ -1944,6 +1949,17 @@ and the `->` arrow; `expect` is green, `send`/`done` red, `goto` purple). The `p
 template list -- it must contain no `..` and must exactly match a scanned
 template path -- so the viewer can never read files outside the template
 directories.
+
+Below the template, the viewer draws its **state-machine diagram** -- the same
+`stateDiagram-v2` the shipped template HTML docs use. The server parses the
+template with fetchconfig's own `fetchconfig::model::GenericTemplateParser`
+(loaded by absolute path from `FETCHCONFIG_PATH`, never copied) and emits the
+diagram source; the browser renders it with the self-hosted
+`<JS_BASE_URL>/mermaid.min.js`, loaded only on this page. The renderer and the
+IBM Plex Sans webfont (under `FONT_BASE_URL`, needed so labels fit) ship in the
+package's `js/` and `fonts/` directories. If the parser, the renderer, or the
+font is missing -- or the template does not parse -- a short note is shown
+instead of a diagram (never a stale one).
 
 #### Template editor
 

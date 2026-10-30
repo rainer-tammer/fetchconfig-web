@@ -614,10 +614,13 @@ TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-templat
 # (fetchconfig-web.css, fonts, images and the help tree). It is used only for
 # on-disk presence checks. BASE_URL is the URL base under which that same
 # directory is served by the web server; the browser merges it with the site's
-# host name. CSS_BASE_URL / FONT_BASE_URL / IMAGE_BASE_URL / HELP_BASE_URL are
-# the (URL and on-disk) sub-paths under those roots. The stylesheet must exist
+# host name. CSS_BASE_URL / FONT_BASE_URL / IMAGE_BASE_URL / JS_BASE_URL /
+# HELP_BASE_URL are the (URL and on-disk) sub-paths under those roots. The stylesheet must exist
 # at WEB_DIR + CSS_BASE_URL + /fetchconfig-web.css or every page is unstyled and
 # a red "directories not configured" banner is shown.
+# JS_BASE_URL holds js/mermaid.min.js (the Template viewer's state-machine
+# diagram); the IBM Plex Sans webfont it needs lives under FONT_BASE_URL. Copy
+# the release's js/ and fonts/ directories into WEB_DIR to enable the diagram.
 # HELP_BASE_URL is the help tree: help.html lives directly in it, and the two
 # "additional help" menus are scanned from its fetchconfig-web/ and fetchconfig/
 # subdirectories (copy whichever *.html documents you want exposed into those).
@@ -626,6 +629,7 @@ BASE_URL                = /
 CSS_BASE_URL            = /css
 FONT_BASE_URL           = /fonts
 IMAGE_BASE_URL          = /images
+JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 
 # --- sessions ---

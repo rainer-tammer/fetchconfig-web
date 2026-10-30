@@ -238,12 +238,31 @@ default; only use `(required)` for things with no reasonable default.
 
 `WEB_DIR` (filesystem root for static assets, presence-checks only), `BASE_URL`
 (URL root the browser uses), and the sub-paths `CSS_BASE_URL` / `FONT_BASE_URL`
-/ `IMAGE_BASE_URL` / `HELP_BASE_URL`. The stylesheet must exist at
+/ `IMAGE_BASE_URL` / `JS_BASE_URL` / `HELP_BASE_URL`. The stylesheet must exist at
 `<WEB_DIR><CSS_BASE_URL>/fetchconfig-web.css` or every page shows a red
 "directories not configured" banner. `HELP_BASE_URL` (2.03+, default `/help`) is
 the help tree: `help.html` plus the `fetchconfig-web/` and `fetchconfig/`
 sub-directories that `help_scan_dir()` scans to build the two "additional help"
 menus (label from each file's `<title>`, capped at `HELP_MAX_FILES`).
+
+`JS_BASE_URL` (2.08+, default `/js`) holds `mermaid.min.js`, the self-contained
+Mermaid renderer bundled in the release's `js/` directory. It powers the
+**Template viewer state-machine diagram** (`show_view_template`), which is a
+server/client split: `template_mermaid_source()` loads fetchconfig's own
+`fetchconfig::model::GenericTemplateParser` by absolute path from
+`FETCHCONFIG_PATH` -- eval-guarded and `require`-idempotent, exactly like
+`fetchconfig_installed_version()` loads `Constants.pm`, and never copied into the
+app -- then the gloss/`mermaid` subs ported verbatim from the engine tool
+`gen-template-docs.pl` (`tdiag_action_gloss` / `tdiag_trigger_gloss` /
+`tdiag_edge_label` / `tdiag_mm_label` / `tdiag_target_of` / `tdiag_mermaid`)
+emit the `stateDiagram-v2` source. The browser renders it with
+`<JS_BASE_URL>/mermaid.min.js`, pulled in only on that page, using the IBM Plex
+Sans webfont (`FONT_BASE_URL`, needed so labels fit) via an inline scoped
+`@font-face` -- no shared CSS change, so no cache-bust. The source is
+HTML-escaped into `<pre class="mermaid">` (and `tdiag_mm_label` strips Mermaid
+metacharacters), so a template cannot inject markup. Missing parser, missing
+`mermaid.min.js`, a missing font, or a template that does not parse each yield a
+short note rather than a (possibly stale) diagram.
 
 ---
 

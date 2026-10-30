@@ -16,6 +16,19 @@ unlike(main::mask_secrets('snmp-server community "private" unrestricted'),
        qr/private/, 'quoted community value gone');
 like(main::mask_secrets('snmp-server community private RW'),
      qr/community \?\*\*\*\? RW/, 'bare community masked, RW kept');
+# Hirschmann: the community is the QUOTED token, which comes AFTER positional
+# keywords (ipaddr/ipmask/ro/rw [+ address]). Mask the quoted string, keep the
+# keywords/address; never mask the keyword as if it were the community.
+for my $pair (
+    ['snmp-server community "__c1__"',                   'community "\*\*\*"'],
+    ['snmp-server community ipaddr 0.0.0.0 "__c1__"',    'community ipaddr 0\.0\.0\.0 "\*\*\*"'],
+    ['snmp-server community ipmask 0.0.0.0 "__c1__"',    'community ipmask 0\.0\.0\.0 "\*\*\*"'],
+    ['snmp-server community ro "__c1__"',                'community ro "\*\*\*"'],
+    ['snmp-server community rw "__c2__"',                'community rw "\*\*\*"'],
+) {
+    like(main::mask_secrets($pair->[0]), qr/$pair->[1]/, "Hirschmann snmp: $pair->[0]");
+    unlike(main::mask_secrets($pair->[0]), qr/__c\d__/, "Hirschmann snmp community value gone: $pair->[0]");
+}
 # RADIUS/TACACS shared key on a server line (ProCurve etc.), scoped so other
 # "key" keywords are not touched.
 like(main::mask_secrets('radius-server host 1.2.3.4 key "secret"'),
@@ -25,6 +38,29 @@ like(main::mask_secrets('tacacs-server host 1.2.3.4 key plainkey'),
      qr/key \?\*\*\*\?/, 'tacacs key masked (bare)');
 is(main::mask_secrets('crypto key generate rsa'), 'crypto key generate rsa', 'crypto key generate not masked');
 is(main::mask_secrets('ip ssh host-key'), 'ip ssh host-key', 'host-key not masked');
+# Aruba CX: an encoding keyword (ciphertext/plaintext) sits between "key" and the
+# value -- keep the keyword, mask the value (not the keyword).
+like(main::mask_secrets('radius-server host 172.31.1.126 key ciphertext AQxZZqiBI14l91PE=='),
+     qr/key ciphertext \?\*\*\*\?/, 'Aruba CX radius "key ciphertext <blob>" masks the blob');
+unlike(main::mask_secrets('radius-server host 172.31.1.126 key ciphertext AQxZZqiBI14l91PE=='),
+       qr/AQxZZ/, 'Aruba CX radius ciphertext blob value gone');
+like(main::mask_secrets(' key ciphertext AQBxyzIndentedBlob=='),
+     qr/^ key ciphertext \?\*\*\*\?/m, 'indented "key ciphertext <blob>" masks the blob');
+# Cisco Nexus: a numeric key TYPE sits before the quoted secret -- keep the
+# type, mask the secret (not the type digit).
+like(main::mask_secrets('tacacs-server host 172.24.180.101 key 7 "secret" timeout 2'),
+     qr/key 7 "\*\*\*" timeout 2/, 'Nexus "key 7 <quoted>" keeps type 7, masks secret');
+unlike(main::mask_secrets('tacacs-server host 172.24.180.101 key 7 "secret" timeout 2'),
+       qr/"secret"/, 'Nexus tacacs secret value gone');
+like(main::mask_secrets('radius-server host 1.2.3.4 key 0 "cleartext"'),
+     qr/key 0 "\*\*\*"/, 'Nexus "key 0 <quoted>" keeps type 0, masks secret');
+# Aruba CX user password: "password ciphertext <blob>".
+like(main::mask_secrets('user admin group administrators password ciphertext AQBapSFxQZ123MA'),
+     qr/password ciphertext \?\*\*\*\?/, 'Aruba CX "password ciphertext <blob>" masked');
+unlike(main::mask_secrets('user admin group administrators password ciphertext AQBapSFxQZ123MA'),
+       qr/AQBapSFx/, 'Aruba CX password ciphertext blob value gone');
+like(main::mask_secrets('user admin group administrators password ciphertext AQBapSFxQZ123MA'),
+     qr/^user admin group administrators /, 'Aruba CX user/group kept, only blob masked');
 # WPA pre-shared key (Aruba CX etc.).
 like(main::mask_secrets('wpa-passphrase 0861d33aXXXX303f'),
      qr/wpa-passphrase \?\*\*\*\?/, 'wpa-passphrase masked');
@@ -45,6 +81,35 @@ like(main::mask_secrets('enable password 7 070C285F4D06'),
      qr/password 7 \?\*\*\*\?/, 'enable password 7 hash masked');
 like(main::mask_secrets('username admin secret 5 $1$abc$def'),
      qr/secret 5 \?\*\*\*\?/, 'secret 5 (MD5) hash masked');
+# Keyword-typed encrypted passwords (no numeric type): Zyxel / HPE Comware /
+# Huawei. The keyword stays; the hash is masked; the username stays visible.
+like(main::mask_secrets('username admin privilege 15 password encrypted 9f8c7b6a5e4d3c2b'),
+     qr/password encrypted \?\*\*\*\?/, 'Zyxel "password encrypted <hash>" masked');
+like(main::mask_secrets('username admin privilege 15 password encrypted 9f8c7b6a5e4d3c2b'),
+     qr/^username admin privilege 15 /, 'the username line is kept, only the hash masked');
+unlike(main::mask_secrets('username admin privilege 15 password encrypted 9f8c7b6a5e4d3c2b'),
+       qr/9f8c7b6a/, 'Zyxel password hash value gone');
+like(main::mask_secrets('local-user admin password cipher $c$3$Hq8Zabc'),
+     qr/password cipher \?\*\*\*\?/, 'HPE Comware "password cipher <hash>" masked');
+like(main::mask_secrets('password irreversible-cipher $1a$Abc123'),
+     qr/password irreversible-cipher \?\*\*\*\?/, 'Huawei "password irreversible-cipher <hash>" masked');
+like(main::mask_secrets('password hash 1A2B3C4D5E'),
+     qr/password hash \?\*\*\*\?/, '"password hash <hash>" masked');
+# Must NOT over-mask: "password encryption/complexity ..." are commands, not secrets.
+is(main::mask_secrets('password encryption aes'),
+   'password encryption aes', '"password encryption aes" (command) not masked');
+is(main::mask_secrets('password complexity enable'),
+   'password complexity enable', '"password complexity" (command) not masked');
+# Hirschmann ":v<N>:<hash>:" password blob (hirschmann model + generic/hirschmann
+# template). Keep "users passwd <user>", the ":vN:" tag and the closing ":".
+like(main::mask_secrets('users passwd admin :v1:a2bbccddeecf7c563746c5037b1dad:'),
+     qr/users passwd admin :v1:\?\*\*\*\?:/, 'Hirschmann :v1: hash masked, tag and colons kept');
+unlike(main::mask_secrets('users passwd admin :v1:a2bbccddeecf7c563746c5037b1dad:'),
+       qr/a2bbccddee/, 'Hirschmann hash value gone');
+like(main::mask_secrets('users passwd operator :v2:deadbeefcafebabe:'),
+     qr/:v2:\?\*\*\*\?:/, 'Hirschmann :v2: variant masked');
+is(main::mask_secrets('users access admin readwrite'),
+   'users access admin readwrite', '"users access ..." (not a passwd line) not masked');
 # Must NOT over-mask: hyphenated keywords and prose without a type digit.
 is(main::mask_secrets('password-policy minimum-length 8'),
    'password-policy minimum-length 8', 'password-policy not masked');

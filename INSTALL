@@ -143,6 +143,16 @@ web-2.08/ containing:
            <WEB_DIR><CSS_BASE_URL>/fetchconfig-web.css (Step 4) or every page is
            unstyled and a red banner is shown.
 
+  File: js/mermaid.min.js
+  Purpose: Bundled Mermaid renderer (UMD, self-contained, offline). Draws the
+           Template viewer's state-machine diagram. Copy the js/ directory into
+           WEB_DIR (Step 4); served at <WEB_DIR><JS_BASE_URL>/mermaid.min.js.
+
+  File: fonts/IBMPlexSans-Regular.woff2, fonts/IBMPlexSans-SemiBold.woff2
+  Purpose: IBM Plex Sans webfont the diagram needs so its labels fit. Copy the
+           fonts/ directory into WEB_DIR (Step 4); served under
+           <WEB_DIR><FONT_BASE_URL>.
+
   File: LICENSE, LICENSE.md, LICENSE.html
   Purpose: GPL-3.0-or-later licence (the plain-text master plus the generated
            Markdown and HTML).
@@ -481,11 +491,15 @@ Step 3. The defaults match a typical fetchconfig install.
   What it is: Filesystem directory holding the static assets (css, fonts,
               images, help tree); used for on-disk presence checks.
 
-  Setting: BASE_URL, CSS_BASE_URL, FONT_BASE_URL, IMAGE_BASE_URL, HELP_BASE_URL
-  Default: /, /css, /fonts, /images, /help
+  Setting: BASE_URL, CSS_BASE_URL, FONT_BASE_URL, IMAGE_BASE_URL, JS_BASE_URL,
+           HELP_BASE_URL
+  Default: /, /css, /fonts, /images, /js, /help
   What it is: URL paths under which the web server serves WEB_DIR and its sub-
-              directories. HELP_BASE_URL is the help tree (help.html plus the
-              scanned fetchconfig-web/ and fetchconfig/ menus).
+              directories. JS_BASE_URL holds mermaid.min.js for the Template
+              viewer's state-machine diagram (which also uses the IBM Plex Sans
+              webfont under FONT_BASE_URL). HELP_BASE_URL is the help tree
+              (help.html plus the scanned fetchconfig-web/ and fetchconfig/
+              menus).
 
 You also need the identity of the web-server user (Apache's User directive, or
 ps -ef while a request is running). On the reference deployment it is nobody; on
@@ -636,6 +650,7 @@ A complete example with the defaults:
     CSS_BASE_URL            = /css
     IMAGE_BASE_URL          = /images
     FONT_BASE_URL           = /fonts
+    JS_BASE_URL             = /js
     HELP_BASE_URL           = /help
     # Overrides the version shown in the footer and About dialog. Omit it to show
     # the version the script ships as; the About dialog always shows that one too.
@@ -673,9 +688,24 @@ serves at BASE_URL). The stylesheet is required -- it must exist at
 "directories not configured" banner is shown:
 
     WEB=/www/virtual/fetchconfig/htdocs
-    mkdir -p $WEB/css $WEB/images
+    mkdir -p $WEB/css $WEB/images $WEB/js $WEB/fonts
     cp fetchconfig-web.css $WEB/css/           # REQUIRED stylesheet
     cp images/back.jpg     $WEB/images/        # optional login backdrop
+    cp js/mermaid.min.js   $WEB/js/            # Template viewer state-machine diagram
+    cp fonts/*.woff2       $WEB/fonts/         # IBM Plex Sans (needed by that diagram)
+
+    Template viewer diagram (optional but recommended). The release ships a js/
+    directory (mermaid.min.js, the self-contained Mermaid renderer) and a fonts/
+    directory (IBM Plex Sans .woff2). Copy both directories into WEB_DIR as
+    shown above -- they install to <WEB_DIR><JS_BASE_URL> (default
+    .../htdocs/js) and <WEB_DIR><FONT_BASE_URL> (default .../htdocs/fonts). With
+    both in place, the Template viewer draws each template's login/collect state
+    machine below the template text. If js/ is missing the viewer shows a short
+    note instead of the diagram; if the IBM Plex Sans font is missing the
+    diagram still renders but its labels may not fit. mermaid.min.js is ~5 MB,
+    so enabling mod_deflate/gzip for *.js (it compresses to ~1 MB) is
+    worthwhile. Any existing fonts already in <WEB_DIR><FONT_BASE_URL> are left
+    untouched -- the copy only adds the IBM Plex Sans files.
 
 The help tree. The Help menu is served from the help tree,
 <WEB_DIR><HELP_BASE_URL> (default .../htdocs/help). It holds help.html (the Help
@@ -1428,8 +1458,8 @@ HTTPS_ENABLED = 1 is set on an HTTP-only site (the browser then discards the
 Secure cookie). Check SESSION_DIR permissions and the HTTPS_ENABLED value.
 
 "Configuration error" on the login page. One of the URL-path keys (BASE_URL,
-CSS_BASE_URL, FONT_BASE_URL, IMAGE_BASE_URL, HELP_BASE_URL) is not an absolute
-URL path, or a required key is missing. The message names the key.
+CSS_BASE_URL, FONT_BASE_URL, IMAGE_BASE_URL, JS_BASE_URL, HELP_BASE_URL) is not
+an absolute URL path, or a required key is missing. The message names the key.
 
 The editor opens but Save fails with "could not open ... for writing". The
 device table file is not writable by the web user (Step 5). Only the file needs
