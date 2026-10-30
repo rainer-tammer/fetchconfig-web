@@ -45,8 +45,8 @@ repository.
 
 ### What is in the package
 
-The release archive `fetchconfig-web-2.08.tar` unpacks to a directory
-`fetchconfig-web-2.08/` containing:
+The release archive `fetchconfig-web-2.09.tar` unpacks to a directory
+`fetchconfig-web-2.09/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -491,7 +491,7 @@ JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 # Overrides the version shown in the footer and About dialog. Omit it to show
 # the version the script ships as; the About dialog always shows that one too.
-#APP_VERSION            = 2.08
+#APP_VERSION            = 2.09
 COPYRIGHT               = 2026 (c) Your Organisation
 ```
 
@@ -1122,6 +1122,22 @@ usual reason a fix "does not appear".
 long-lived `mod_fcgid` workers keep running the old code until recycled, and
 `touch` does not trigger a reload. Run `apachectl graceful` after the copy
 (see *Step 7 -- Web server configuration*). Plain CGI needs no such step.
+
+### Upgrading to 2.09
+
+> **No database change in 2.09.** Upgrading from 2.08 is code and static assets
+> only.
+
+1. Copy the new `fetchconfig-web.cgi` (and `fetchconfig-web.css`, `help.html` if
+   changed) into place. Under FastCGI, follow with `apachectl graceful`; hard-reload
+   the browser so the new CSS is picked up.
+2. **Copy the new `js/` and `fonts/` directories into `WEB_DIR`** to enable the
+   Template viewer's state-machine diagram (`js/mermaid.min.js` and the IBM Plex
+   Sans webfont). See *Step 4 -- Static files*. Without them the viewer shows a
+   short note instead of the diagram; the rest of the application is unaffected.
+
+Upgrading from 2.07 or earlier: do the 2.08 database upgrade below first, then the
+steps above.
 
 ### Upgrading to 2.08
 

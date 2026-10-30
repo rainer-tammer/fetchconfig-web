@@ -365,7 +365,7 @@ SHOW_RENDER_TIME        = 0
 GENERIC_SYNTAX          = auto
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 #CRON_USER              = fetchconfig
-APP_VERSION             = 2.08
+APP_VERSION             = 2.09
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 

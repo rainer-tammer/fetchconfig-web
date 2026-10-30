@@ -4,7 +4,7 @@ fetchconfig-web -- Technical / Developer Documentation
 Audience: engineers extending or maintaining fetchconfig-web. Scope:
 architecture, request lifecycle, data structures, the PostgreSQL schema, the
 security model, and step-by-step recipes for adding functionality. Version: this
-document tracks fetchconfig-web 2.08 (requires fetchconfig 9.72+).
+document tracks fetchconfig-web 2.09 (requires fetchconfig 9.72+).
 
 --------------------------------------------------------------------------------
 
@@ -233,7 +233,7 @@ help tree: help.html plus the fetchconfig-web/ and fetchconfig/ sub-directories
 that help_scan_dir() scans to build the two "additional help" menus (label from
 each file's <title>, capped at HELP_MAX_FILES).
 
-JS_BASE_URL (2.08+, default /js) holds mermaid.min.js, the self-contained
+JS_BASE_URL (2.09+, default /js) holds mermaid.min.js, the self-contained
 Mermaid renderer bundled in the release's js/ directory. It powers the Template
 viewer state-machine diagram (show_view_template), which is a server/client
 split: template_mermaid_source() loads fetchconfig's own

@@ -91,12 +91,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.08';
+use constant APP_VERSION => '2.09';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.08';
+use constant APP_VERSION_INTERNAL => '2.09';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.

@@ -2,22 +2,74 @@
 
 Release history for fetchconfig-web, newest version first.
 
-## 2.08
+## 2.09
 
-Requires fetchconfig 9.72. Adds a viewer for device debug logs, a read-only
-schedule tool, and a state-machine diagram in the template viewer.
+Requires fetchconfig 9.72. Adds a state-machine diagram to the template viewer,
+colour-codes the template **Used** column, and closes several credential-masking
+gaps in the config and template views. No database change.
 
 ### Template state-machine diagram
 
-* The **Template viewer** now draws the template's login/collect state machine
-  (Mermaid `stateDiagram-v2`) below the text. The source is built server-side
-  from fetchconfig's own `GenericTemplateParser` (loaded from `FETCHCONFIG_PATH`,
-  not copied); the browser renders it with the bundled, self-hosted
-  `js/mermaid.min.js` -- fully offline, loaded only on this page.
-* New config key **`JS_BASE_URL`** (default `/js`). Copy the release's `js/` and
-  `fonts/` (IBM Plex Sans) directories into `WEB_DIR`. A short note replaces the
-  diagram if the renderer, the font, or the parser is missing, or the template
-  fails to parse -- a stale diagram is never shown.
+* The **Template viewer** (`view_template`) now draws the template's
+  login/collect state machine (Mermaid `stateDiagram-v2`) below the text -- the
+  same diagram the shipped template HTML docs use. The source is built
+  server-side from fetchconfig's own
+  `fetchconfig::model::GenericTemplateParser` (loaded by absolute path from
+  `FETCHCONFIG_PATH`, never copied); the browser renders it with the bundled,
+  self-hosted `js/mermaid.min.js` -- fully offline, loaded only on this page.
+  Edge labels sit on the panel background, not on white boxes.
+* New config key **`JS_BASE_URL`** (default `/js`). The release now ships `js/`
+  (`mermaid.min.js`) and `fonts/` (IBM Plex Sans, needed so labels fit); copy
+  both directories into `WEB_DIR`. A short note replaces the diagram if the
+  renderer, the font, or the parser is missing, or the template fails to parse --
+  a stale diagram is never shown.
+
+### Templates overview
+
+* On Tools -> *Templates* (`view_templates`), the **Used** column is now
+  colour-coded: **Yes** green, **No** red.
+
+### Credential masking (config / template views)
+
+* **Fixed:** encrypted password hashes in a viewed config could be shown
+  unmasked. Two gaps: `mask_secrets` only redacted a numeric-type password
+  (`password 7 <hash>`), missing the keyword-typed forms -- Zyxel
+  `password encrypted <hash>`, HPE Comware `password cipher <hash>`, Huawei
+  `password irreversible-cipher <hash>`, `password hash <hash>`; and the syntax
+  highlighters isolate the encrypted blob into its own fragment and escape it
+  alone, so the multi-token `password encrypted <hash>` context never reached the
+  masker. `highlight_config` now masks the whole config up front, so the value is
+  redacted regardless of how a highlighter splits the line.
+* **Fixed:** Hirschmann password hashes were shown unmasked. The hash is a
+  `:v<N>:<hash>:` blob on a `users passwd <user> :v1:<hash>:` line (hirschmann
+  model, and generic devices driven by the hirschmann template); masking now
+  keeps `users passwd <user>`, the `:vN:` tag and the closing `:`, and redacts
+  only the hash.
+* **Fixed:** SNMP community masking leaked on Hirschmann configs, where the
+  community is a quoted string placed AFTER positional keywords
+  (`snmp-server community ipaddr 0.0.0.0 "secret"`, `... ro "secret"`). The old
+  rule masked the first token (the keyword) and left the quoted community
+  exposed. Masking now redacts the quoted community wherever it sits on the line,
+  and only falls back to masking a bare first-token community (Cisco/Comware)
+  when the line has no quoted community -- no device-type detection needed.
+* **Fixed:** Aruba CX (aruba-cx-ssh) secrets using the `ciphertext` encoding
+  keyword were mishandled. `user ... password ciphertext <blob>` was not masked
+  at all, and `radius-server host ... key ciphertext <blob>` masked the keyword
+  `ciphertext` instead of the blob. Masking now recognises the encoding keywords
+  (`ciphertext`/`plaintext`/`cipher`/`encrypted`) after `password` and after
+  `key`, keeps the keyword, and redacts the value -- on server lines and on the
+  indented `key` form alike.
+* **Fixed:** Cisco Nexus (nexus-ssh) `tacacs-server`/`radius-server` lines use a
+  numeric key TYPE before the secret (`key 7 "secret"`); masking redacted the
+  type digit `7` instead of the secret. The `key` rule now treats a leading
+  numeric type (as well as the Aruba CX encoding keywords) as the type, keeps it,
+  and masks the value -- a lookahead prevents it from re-masking the visible type
+  when the secret is the quoted token.
+
+## 2.08
+
+Requires fetchconfig 9.72. Adds a viewer for device debug logs and a
+read-only schedule tool.
 
 ### Show schedule (Tools)
 
@@ -86,8 +138,6 @@ schedule tool, and a state-machine diagram in the template viewer.
 * **Fixed:** sorting a column on *Device backup status* reordered only the
   rows on the current page. It now sorts the whole table, as the device list
   already did.
-* On Tools -> *Templates* (`view_templates`), the **Used** column is colour-coded:
-  **Yes** green, **No** red.
 * The user editor's permission boxes are wider, so no permission label wraps.
 * The *Device backup status* filter row uses the same control sizes as the
   Devices page.
@@ -131,40 +181,6 @@ helper.
 * The delete path takes a **device id only**. The file path is re-derived from
   the device table, symlinks are refused, and a missing file is not an error.
 * Read errors show generic text; the reason goes to the audit log.
-* **Fixed:** encrypted password hashes in a viewed config could be shown
-  unmasked. Two gaps: `mask_secrets` only redacted a numeric-type password
-  (`password 7 <hash>`), missing the keyword-typed forms -- Zyxel
-  `password encrypted <hash>`, HPE Comware `password cipher <hash>`, Huawei
-  `password irreversible-cipher <hash>`, `password hash <hash>`; and the
-  syntax highlighters isolate the encrypted blob into its own fragment and
-  escape it alone, so the multi-token `password encrypted <hash>` context never
-  reached the masker. `highlight_config` now masks the whole config up front, so
-  the value is redacted regardless of how a highlighter splits the line.
-* **Fixed:** Hirschmann password hashes were shown unmasked. The hash is a
-  `:v<N>:<hash>:` blob on a `users passwd <user> :v1:<hash>:` line (hirschmann
-  model, and generic devices driven by the hirschmann template); masking now
-  keeps `users passwd <user>`, the `:vN:` tag and the closing `:`, and redacts
-  only the hash.
-* **Fixed:** SNMP community masking leaked on Hirschmann configs, where the
-  community is a quoted string placed AFTER positional keywords
-  (`snmp-server community ipaddr 0.0.0.0 "secret"`, `... ro "secret"`). The old
-  rule masked the first token (the keyword) and left the quoted community
-  exposed. Masking now redacts the quoted community wherever it sits on the line,
-  and only falls back to masking a bare first-token community (Cisco/Comware)
-  when the line has no quoted community -- no device-type detection needed.
-* **Fixed:** Aruba CX (aruba-cx-ssh) secrets using the `ciphertext` encoding
-  keyword were mishandled. `user ... password ciphertext <blob>` was not masked
-  at all, and `radius-server host ... key ciphertext <blob>` masked the keyword
-  `ciphertext` instead of the blob. Masking now recognises the encoding keywords
-  (`ciphertext`/`plaintext`/`cipher`/`encrypted`) after `password` and after
-  `key`, keeps the keyword, and redacts the value -- on server lines and on the
-  indented `key` form alike.
-* **Fixed:** Cisco Nexus (nexus-ssh) `tacacs-server`/`radius-server` lines use a
-  numeric key TYPE before the secret (`key 7 "secret"`); masking redacted the
-  type digit `7` instead of the secret. The `key` rule now treats a leading
-  numeric type (as well as the Aruba CX encoding keywords) as the type, keeps it,
-  and masks the value -- a lookahead prevents it from re-masking the visible type
-  when the secret is the quoted token.
 
 ## 2.07
 
