@@ -11,7 +11,7 @@ my $src = do { open(my $fh, '<', cgi_path()) or die $!; local $/; <$fh> };
     my ($b) = $src =~ /sub std_header \{(.*?)\n\}/s;
     like($b, qr/'-Cache_Control'\s*=>\s*'no-store, no-cache, must-revalidate'/, 'V7: Cache-Control no-store');
     like($b, qr/'-Pragma'\s*=>\s*'no-cache'/,                                   'V7: Pragma no-cache');
-    like($b, qr/\$HTTPS_ENABLED \? \('-Strict_Transport_Security'/,           'V6: HSTS gated on HTTPS_ENABLED');
+    like($b, qr/effective_https\(\) \? \('-Strict_Transport_Security'/,        'V6: HSTS gated on effective_https()');
     like($b, qr/\@args,\s*# caller's args win/,                                 'std_header: caller can override a default');
 }
 

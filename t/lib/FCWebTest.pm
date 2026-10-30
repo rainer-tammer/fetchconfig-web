@@ -149,6 +149,14 @@ sub make_config {
         DBinst           => 'fc', DBuser => 'fc', DBhost => 'localhost',
         WEB_DIR          => $web,
         CSS_BASE_URL     => '/css',
+        # Secure-by-default shipped settings turned OFF for the test harness so
+        # the suite is deterministic and runs on a box without Crypt::Bcrypt
+        # (mirrors the AIX dev stack): HTTPS_ENABLED=0 -> no Secure/HSTS unless a
+        # test sets it; REQUIRE_BCRYPT=0 -> the $apr1$ fallback is allowed so
+        # password/login tests work without the module. Tests that exercise the
+        # secure path pass these explicitly via %over.
+        HTTPS_ENABLED    => 0,
+        REQUIRE_BCRYPT   => 0,
         %over,
     );
     my $path = File::Spec->catfile($dir, 'fetchconfig-web.cfg');

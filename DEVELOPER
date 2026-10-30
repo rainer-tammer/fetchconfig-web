@@ -4,7 +4,7 @@ fetchconfig-web -- Technical / Developer Documentation
 Audience: engineers extending or maintaining fetchconfig-web. Scope:
 architecture, request lifecycle, data structures, the PostgreSQL schema, the
 security model, and step-by-step recipes for adding functionality. Version: this
-document tracks fetchconfig-web 2.09 (requires fetchconfig 9.72+).
+document tracks fetchconfig-web 2.10 (requires fetchconfig 9.72+).
 
 --------------------------------------------------------------------------------
 
@@ -320,8 +320,15 @@ Security is layered; the important mechanisms:
 7.1 Authentication and password storage
 ---------------------------------------
 
-- Passwords are hashed with bcrypt (Crypt::Bcrypt, cost BCRYPT_COST=12) when
-  available; bcrypt_available() probes the build at runtime (AIX-safe).
+- Passwords are hashed with bcrypt (Crypt::Bcrypt, cost BCRYPT_COST=12);
+  bcrypt_available() probes the build at runtime (AIX-safe). With
+  REQUIRE_BCRYPT=1 (default, 2.10+) password_hash() never falls back to the
+  legacy Apache MD5 ($apr1$) -- it dies instead -- and do_login() refuses to log
+  anyone in (with a login-screen notice) when the module is unavailable, so a
+  broken crypto stack fails closed rather than silently weakening hashes.
+  verify_password() still reads legacy $apr1$ hashes so they can upgrade to
+  bcrypt on the owner's next login. Set REQUIRE_BCRYPT=0 to re-enable the
+  fallback on a stack without Crypt::Bcrypt.
 - The per-password salt comes from secure_random_bytes() which reads
   /dev/urandom, loops on short reads, and dies rather than falling back to
   rand() (fail-closed). Session IDs and reset tokens use the same source.
@@ -342,7 +349,12 @@ Security is layered; the important mechanisms:
   shape before touching disk.
 - Two expiries: idle SESSION_TTL (slides) and absolute SESSION_MAX_LIFETIME
   (hard cap from login). Password change/reset invalidates sessions.
-- Cookie: HttpOnly; Secure is added when HTTPS_ENABLED=1; SameSite set.
+- Cookie: HttpOnly; SameSite=Lax; Secure is added (and HSTS emitted) when
+  effective_https() is true. That is HTTPS_ENABLED (default 1, 2.10+) OR a TLS
+  request detected from the server env (HTTPS=on / REQUEST_SCHEME=https) OR,
+  only when TRUST_FORWARDED_PROTO=1, a reverse proxy's X-Forwarded-Proto. An
+  HTTP-only deployment must set HTTPS_ENABLED=0 or the Secure cookie is never
+  returned over plain HTTP and login cannot complete.
 
 7.3 CSRF protection
 -------------------
@@ -438,6 +450,30 @@ Security is layered; the important mechanisms:
   page / editor open.
 - Audit-write failure raises an operational (amber) warning rather than silently
   losing the event.
+
+7.9 Subprocess resource limits
+------------------------------
+
+- Every subprocess capture (run_fetchconfig, run_command_capture,
+  run_privileged) reads stdout+stderr concurrently via IO::Select/select to
+  avoid the classic open3 pipe-fill deadlock, and bounds the captured bytes by
+  CAPTURE_MAX_BYTES (default 50 MiB; 0 disables). On overflow the child is
+  killed and reaped: the parsed paths (run_fetchconfig, run_privileged) discard
+  and return a controlled error, while run_command_capture (the Backup Now
+  transcript) keeps the partial output and reports the error, exactly as it does
+  on a BACKUP_TIMEOUT.
+
+7.10 Dependencies and scanning
+------------------------------
+
+- Runtime deps are pinned in cpanfile / Makefile.PL; install them into the CGI's
+  own Perl with cpanm --installdeps . (or the distro packages listed in
+  INSTALL). Crypt::Bcrypt is required by default (REQUIRE_BCRYPT=1).
+- The archive does not pin OS/package versions, so scan the deployed stack for
+  known advisories: the installed Perl modules (e.g. OSV-Scanner against the
+  cpanfile, or cpan-outdated), and the OS packages for Perl, the web server and
+  PostgreSQL. Treat a clean scan of the deployed versions -- not the source --
+  as the release gate.
 
 --------------------------------------------------------------------------------
 

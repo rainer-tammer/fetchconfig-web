@@ -45,8 +45,8 @@ repository.
 
 ### What is in the package
 
-The release archive `fetchconfig-web-2.09.tar` unpacks to a directory
-`fetchconfig-web-2.09/` containing:
+The release archive `fetchconfig-web-2.10.tar` unpacks to a directory
+`fetchconfig-web-2.10/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -74,7 +74,8 @@ The release archive `fetchconfig-web-2.09.tar` unpacks to a directory
 | `fetchconfig-web.css` | **Required** stylesheet. Must be installed at `<WEB_DIR><CSS_BASE_URL>/fetchconfig-web.css` (Step 4) or every page is unstyled and a red banner is shown. |
 | `js/mermaid.min.js` | Bundled Mermaid renderer (UMD, self-contained, offline). Draws the Template viewer's state-machine diagram. Copy the `js/` directory into `WEB_DIR` (Step 4); served at `<WEB_DIR><JS_BASE_URL>/mermaid.min.js`. |
 | `fonts/IBMPlexSans-Regular.woff2`, `fonts/IBMPlexSans-SemiBold.woff2` | IBM Plex Sans webfont the diagram needs so its labels fit. Copy the `fonts/` directory into `WEB_DIR` (Step 4); served under `<WEB_DIR><FONT_BASE_URL>`. |
-| `LICENSE`, `LICENSE.md`, `LICENSE.html` | GPL-3.0-or-later licence (the plain-text master plus the generated Markdown and HTML). |
+| `LICENSE`, `LICENSE.md`, `LICENSE.html` | GPL-3.0-or-later licence (the plain-text master plus the generated Markdown and HTML). Build the `.md`/`.html` with `render-doc.py LICENSE` -- the **plain** master, not `LICENSE.md`. |
+| `COPYING.md`, `COPYING.html`, `COPYING` | Third-party licences for the bundled components: Mermaid (MIT) and IBM Plex Sans (SIL OFL 1.1). Markdown master, with generated HTML and plain text. |
 | `Makefile.PL`, `cpanfile` | A `prove`-based test harness, and the Perl dependency manifest used by `cpanm --installdeps .`. |
 | `t/` | The regression test suite. |
 
@@ -169,7 +170,7 @@ if you nevertheless need a newer build.
 | `Algorithm::Diff` | any | Side-by-side and unified config diffs. | `libalgorithm-diff-perl` (main) | `perl-Algorithm-Diff` (AppStream) | `perl-Algorithm-Diff` (SLE base) | `cpan Algorithm::Diff` |
 | `Filesys::Df` | any | **Optional** -- only for the *Tools -> Disk space* page (free-space figures). Loaded lazily; without it the app runs normally and that one tool shows an install hint. | `libfilesys-df-perl` (main) | `perl-Filesys-Df` (**EPEL 9 only**) | `perl-Filesys-Df` (**PackageHub**) | `cpan Filesys::Df` |
 | `FCGI` | 0.67 (tested 0.82) | **Optional** -- only to run under FastCGI / mod_fcgid (see *Running under mod_fcgid*). Loaded lazily; without it the script runs as plain CGI. `CGI::Fast` is **not** used and must not be installed in its place. | `libfcgi-perl` (main) | `perl-FCGI` (AppStream) | **not packaged** -- use `cpan FCGI` | `cpan FCGI` |
-| `Crypt::Bcrypt` | any | **Optional but security-relevant** -- enables bcrypt (`$2b$`) password hashing. When present, new and changed passwords are stored as bcrypt and legacy `$apr1$` hashes are upgraded to bcrypt on the owner's next login. **Without it, passwords fall back to the legacy `$apr1$` format.** | `libcrypt-bcrypt-perl` (**universe**) | **not packaged** -- use CPAN | **not packaged** -- use CPAN | `cpan Crypt::Bcrypt` |
+| `Crypt::Bcrypt` | any | **Required by default** (`REQUIRE_BCRYPT=1`) -- bcrypt (`$2b$`) password hashing; new/changed passwords are stored as bcrypt and legacy `$apr1$` hashes upgrade on the owner's next login. **If it is missing, login is disabled** with a notice; set `REQUIRE_BCRYPT=0` to allow the legacy `$apr1$` fallback on a stack without it. | `libcrypt-bcrypt-perl` (**universe**) | **not packaged** -- use CPAN | **not packaged** -- use CPAN | `cpan Crypt::Bcrypt` |
 | `IO::Socket::SSL` | any | **Optional** -- gives `Net::SMTP` (core) STARTTLS/SSL for the password-reset email (`EMAIL = 1`). Without `EMAIL = 1` nothing here is loaded, and the "Forgot password?" page just tells users to contact the admin. **`Net::SMTP::SSL` is not used** -- do not install it in place of this. | `libio-socket-ssl-perl` (main) | `perl-IO-Socket-SSL` (AppStream) | `perl-IO-Socket-SSL` (SLE base) | `cpan IO::Socket::SSL` |
 
 > [!IMPORTANT]
@@ -432,6 +433,8 @@ USE_SUDO_FOR_BACKUP_NOW = 1
 SUDO_BIN                = /usr/bin/sudo
 # BACKUP_TIMEOUT must exceed the longest backup run of any device
 BACKUP_TIMEOUT          = 120
+# Cap on combined stdout+stderr captured from one subprocess (50 MiB; 0 = none)
+CAPTURE_MAX_BYTES       = 52428800
 
 # Cap on how many per-device sections the run-log viewer renders (0 = no cap)
 LOG_MAX_DEVICES         = 1000
@@ -475,8 +478,13 @@ EMAIL_FROM              = fetchconfig-web@example.com
 # so without SITE_URL no reset email is sent.
 SITE_URL                = https://fetchconfig.example.com
 
+# --- security ---
+# Secure by default. Set HTTPS_ENABLED=0 ONLY for an HTTP-only deployment.
+HTTPS_ENABLED           = 1
+TRUST_FORWARDED_PROTO   = 0
+REQUIRE_BCRYPT          = 1
+
 # --- misc ---
-HTTPS_ENABLED           = 0
 SHOW_RENDER_TIME        = 0
 # Syntax highlighting for template-backed ("generic") devices whose template
 # does not declare a syntax_style. auto = detect from content (default);
@@ -491,7 +499,7 @@ JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 # Overrides the version shown in the footer and About dialog. Omit it to show
 # the version the script ships as; the About dialog always shows that one too.
-#APP_VERSION            = 2.09
+#APP_VERSION            = 2.10
 COPYRIGHT               = 2026 (c) Your Organisation
 ```
 
@@ -563,7 +571,7 @@ cp help.html $WEB/help/                     # the Help page
 
 # "fetchconfig-web - additional help": copy whichever documents you want listed.
 cp fetchconfig-web-documentation.html INSTALL.html CHANGES.html DEVELOPER.html \
-   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html \
+   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html COPYING.html \
    $WEB/help/fetchconfig-web/
 
 # "fetchconfig - additional help": the fetchconfig (CLI) manuals, if you have
@@ -1095,7 +1103,7 @@ cp fetchconfig-web.css /www/pub/fetchconfig-web/css/     # refresh the styleshee
 cp help.html /www/pub/fetchconfig-web/help/
 # Refresh the Help-menu documentation pages as well (see Step 4):
 cp fetchconfig-web-documentation.html DEVELOPER.html CHANGES.html INSTALL.html \
-   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html \
+   LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html COPYING.html \
    /www/pub/fetchconfig-web/help/fetchconfig-web/
 ```
 
@@ -1122,6 +1130,28 @@ usual reason a fix "does not appear".
 long-lived `mod_fcgid` workers keep running the old code until recycled, and
 `touch` does not trigger a reload. Run `apachectl graceful` after the copy
 (see *Step 7 -- Web server configuration*). Plain CGI needs no such step.
+
+### Upgrading to 2.10
+
+> **No database change in 2.10.** It is a security-hardening release; upgrading
+> from 2.09 is the new `fetchconfig-web.cgi` plus two **secure-by-default**
+> changes you must be aware of.
+
+1. **`HTTPS_ENABLED` now defaults to `1`.** If you serve over HTTPS, nothing to
+   do (the session cookie gains `Secure` and HSTS). **If you run HTTP-only, add
+   `HTTPS_ENABLED=0` to the config before deploying** -- otherwise the browser
+   withholds the `Secure` cookie over plain HTTP and login appears to fail.
+   Behind a TLS-terminating reverse proxy, keep `HTTPS_ENABLED=1` (or set
+   `TRUST_FORWARDED_PROTO=1`).
+2. **`REQUIRE_BCRYPT` now defaults to `1`.** Ensure `Crypt::Bcrypt` is installed
+   in the CGI's Perl (`perl -MCrypt::Bcrypt -e1`). If it is missing, login is
+   disabled with a notice; set `REQUIRE_BCRYPT=0` only on a stack without it.
+3. Copy the new `fetchconfig-web.cgi` into place. Under FastCGI, follow with
+   `apachectl graceful`; hard-reload the browser for the new CSS.
+4. Optional: `CAPTURE_MAX_BYTES` (default 50 MiB) now bounds subprocess output;
+   raise it if a legitimate backup transcript is larger.
+
+Then review the new **Security hardening checklist** in Part 4.
 
 ### Upgrading to 2.09
 
@@ -1292,7 +1322,10 @@ Both are optional and default off; add them if you want the behaviour:
 
 | Key | Default | Effect |
 |-----|---------|--------|
-| `HTTPS_ENABLED` | `0` | `1` adds the `Secure` flag to the session cookie. Set it once you serve over HTTPS (Step 7). |
+| `HTTPS_ENABLED` | `1` | Secure by default: `1` adds the `Secure` cookie flag + HSTS (also auto-detected from the server's TLS env). **Set `0` for an HTTP-only site**, or the browser withholds the cookie and login fails. |
+| `TRUST_FORWARDED_PROTO` | `0` | `1` trusts a reverse proxy's `X-Forwarded-Proto` when deciding HTTPS. Enable only behind a proxy you control; not needed when `HTTPS_ENABLED=1`. |
+| `REQUIRE_BCRYPT` | `1` | `1` requires `Crypt::Bcrypt`: never store the weaker `$apr1$` hash, and disable login with a notice if the module is missing. Set `0` only on a stack without it (e.g. AIX dev). |
+| `CAPTURE_MAX_BYTES` | `52428800` | Max combined stdout+stderr bytes captured from one subprocess (50 MiB; `0` = no limit). Guards worker memory against a runaway child. |
 | `SHOW_RENDER_TIME` | `0` | `1` shows the page load/render-time lines (device list, status, log, template list, editor render and per-card AJAX times). A diagnostic aid. |
 
 ## Part 4 -- Verification and troubleshooting
@@ -1321,6 +1354,43 @@ Work through this after a fresh install or an upgrade:
       still at its 128 KB default -- see Step 7.3.
 - [ ] The footer shows the expected version: *fetchconfig-web v2.07 using
       fetchconfig v9.6x*.
+
+### Security hardening checklist
+
+Beyond the functional checklist above, confirm the deployment is locked down.
+Most of these are operating-system and web-server settings, not application
+config:
+
+- [ ] **The CGI does not run as root.** It runs as the web-server user (or a
+      dedicated service account), never `root`.
+- [ ] **HTTPS is enforced.** Serve only over TLS, redirect HTTP->HTTPS at the
+      web server, and keep `HTTPS_ENABLED=1` (the default). Behind a
+      TLS-terminating proxy, either keep `HTTPS_ENABLED=1` or set
+      `TRUST_FORWARDED_PROTO=1`. Confirm `Set-Cookie` carries `Secure`,
+      `HttpOnly` and `SameSite=Lax`, and that the HSTS header is present.
+- [ ] **bcrypt is in force.** `perl -MCrypt::Bcrypt -e1` succeeds in the CGI's
+      Perl, and `REQUIRE_BCRYPT=1` (the default). The login page shows no
+      "Crypt::Bcrypt is not installed" notice.
+- [ ] **Config file permissions.** `fetchconfig-web.cfg` is readable only by the
+      web/service account (e.g. `0640 root:www`) -- it holds `DBpass` and may
+      hold `SMTP_PASS`.
+- [ ] **Session directory.** `SESSION_DIR` (and `BACKUP_TMP_DIR`) are private to
+      the web user and not under a web-served document root.
+- [ ] **Web root is not writable by the app** and contains no world-readable
+      secrets; writable directories (`SESSION_DIR`, backup temp) are outside any
+      executable/served path.
+- [ ] **sudo is scoped.** The sudoers grant is limited to the two helpers
+      (`fetchconfig-web-install-template.pl` and, if used, `fetchconfig.pl` for
+      *Backup Now*), with `NOPASSWD` only for those exact commands -- never a
+      blanket grant.
+- [ ] **Backup repository and device table permissions** are narrow: the device
+      table and `BACKUP_DEVICE_TABLE` can carry credentials, so restrict them to
+      the accounts that need them.
+- [ ] **`SITE_URL` is `https://`** when `EMAIL=1`, so reset tokens are never
+      sent over cleartext.
+- [ ] **Dependencies are patched.** Scan the deployed Perl modules and the OS
+      packages (Perl, web server, PostgreSQL) for known advisories; see
+      *DEVELOPER.md -> Dependencies and scanning*.
 
 ### Common problems
 

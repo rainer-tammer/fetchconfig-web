@@ -2,6 +2,50 @@
 
 Release history for fetchconfig-web, newest version first.
 
+## 2.10
+
+Security-hardening release (no database change). Addresses an external source
+review: mandatory bcrypt, secure-by-default HTTPS, and a subprocess output cap,
+plus authorization and documentation hardening.
+
+### Security
+
+* **Require bcrypt by default (`REQUIRE_BCRYPT`, default 1).** New and changed
+  passwords are never written as the weaker Apache MD5 (`$apr1$`); if
+  `Crypt::Bcrypt` cannot be loaded the login screen says so and **login is
+  disabled**, rather than silently using a weak hash. Legacy `$apr1$` hashes
+  still verify and upgrade to bcrypt on the owner's next login. Set
+  `REQUIRE_BCRYPT=0` to allow the fallback on a stack without the module (e.g. an
+  AIX dev box). [F-01]
+* **Secure by default -- `HTTPS_ENABLED` now defaults to 1.** The `Secure` cookie
+  flag and HSTS are on unless you opt out. A new `effective_https()` also
+  auto-detects TLS from the web-server environment (`HTTPS` / `REQUEST_SCHEME`)
+  and, with the new **`TRUST_FORWARDED_PROTO`** (default 0), from a reverse
+  proxy's `X-Forwarded-Proto`. **HTTP-only deployments must now set
+  `HTTPS_ENABLED=0`** (see *Upgrading to 2.10*). [F-02]
+* **Subprocess output cap -- `CAPTURE_MAX_BYTES` (default 50 MiB, 0 = off).**
+  Every captured subprocess (fetchconfig runs, *Backup Now*, the privileged
+  helper) is bounded so a runaway child cannot exhaust worker memory; on overflow
+  the child is terminated and a controlled error is returned (*Backup Now* keeps
+  the partial transcript). [F-04]
+* **Password-reset transport documented.** `SITE_URL` may be `http://` so the app
+  can run HTTP-only, but that sends the reset token over cleartext -- use
+  `https://` in production. (Reset tokens are already SHA-256-hashed at rest,
+  single-use and TTL-bound, and are never derived from the `Host` header.) [F-03]
+
+### Hardening and documentation
+
+* **Authorization regression guard** (`t/E0-authz-matrix.t`): asserts every
+  privileged handler keeps an authorization check -- an in-body predicate, the
+  dispatcher's central device-scope guard, or delegation to one that checks. [A-01]
+* **Output-encoding regression tests** for the central `esc()` HTML encoder. [A-02]
+* **Security hardening checklist** added to INSTALL (non-root CGI; config, session
+  and backup-repo permissions; scoped sudo; enforced HTTPS/HSTS). [A-03]
+* **Dependency-scanning guidance** added to DEVELOPER (scan the deployed Perl
+  modules and OS packages, not just the source). [A-04]
+* New tests `t/E1`..`t/E4` cover require-bcrypt, `effective_https()`, the capture
+  cap, and output encoding.
+
 ## 2.09
 
 Requires fetchconfig 9.72. Adds a state-machine diagram to the template viewer,

@@ -310,11 +310,12 @@ is missing the app won't start, so install them before deploying:
   Install (CPAN): cpan Filesys::Df
 
   Module: Crypt::Bcrypt
-  Minimum version: any (optional)
+  Minimum version: any
   Used by: fetchconfig-web.cgi
-  Purpose: Optional but security-relevant -- enables bcrypt ($2b$) password
-           hashing at cost 12. Without it new passwords fall back to the legacy
-           $apr1$ format
+  Purpose: Required by default (REQUIRE_BCRYPT=1): bcrypt ($2b$) password
+           hashing at cost 12. If it is missing, login is disabled with a
+           notice. Set REQUIRE_BCRYPT=0 to allow the legacy $apr1$ fallback on a
+           stack without it
   Install (Debian/Ubuntu): libcrypt-bcrypt-perl
   Install (RHEL): (CPAN)
   Install (SLES): (CPAN)
@@ -405,6 +406,7 @@ You can also create it by hand:
     USE_SUDO_FOR_BACKUP_NOW = 1
     SUDO_BIN                = /usr/bin/sudo
     BACKUP_TIMEOUT          = 120
+    CAPTURE_MAX_BYTES       = 52428800
     SESSION_DIR             = /www/fetchconfig-web/sessions
     BACKUP_TMP_DIR          = /www/fetchconfig-web/sessions
     SESSION_TTL             = 28800
@@ -431,12 +433,14 @@ You can also create it by hand:
     #SMTP_PASS              = secret
     EMAIL_FROM              = fetchconfig-web@example.com
     SITE_URL                = https://fetchconfig.example.com
-    HTTPS_ENABLED           = 0
+    HTTPS_ENABLED           = 1
+    TRUST_FORWARDED_PROTO   = 0
+    REQUIRE_BCRYPT          = 1
     SHOW_RENDER_TIME        = 0
     GENERIC_SYNTAX          = auto
     TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
     #CRON_USER              = fetchconfig
-    APP_VERSION             = 2.09
+    APP_VERSION             = 2.10
     COPYRIGHT               = 2026 (c) Rainer Tammer
 
 Format and loading:
@@ -454,12 +458,34 @@ Format and loading:
   the file is missing or a required key is absent, the app serves a clear
   configuration-error page instead of failing obscurely.
 - The config is read once per request, before anything else runs.
-- HTTPS_ENABLED (0|1, default 0) controls the Secure flag on the session cookie.
-  Set it to 1 when fetchconfig-web is served over HTTPS: the browser then only
-  ever sends the cookie over an encrypted connection. Leave it 0 for an HTTP-
-  only deployment -- with Secure set on plain HTTP the browser would withhold
-  the cookie and login would appear to fail. This replaces the old approach of
-  editing the source to uncomment the cookie's -secure flag.
+- HTTPS_ENABLED (0|1, default 1) controls the Secure flag on the session cookie
+  and the HSTS header. Secure by default: 1 asserts the site is served over
+  HTTPS (directly or via a TLS-terminating reverse proxy). The app also auto-
+  detects a TLS request from the web-server environment (HTTPS=on or
+  REQUEST_SCHEME=https), and -- when TRUST_FORWARDED_PROTO=1 -- from a reverse
+  proxy's X-Forwarded-Proto. For an HTTP-only deployment you must set
+  HTTPS_ENABLED=0, otherwise Secure is set on plain HTTP, the browser withholds
+  the cookie, and login appears to fail.
+- TRUST_FORWARDED_PROTO (0|1, default 0): trust the X-Forwarded-Proto request
+  header when deciding whether the request is HTTPS. Off by default because a
+  client can forge that header on a direct connection; enable it only behind a
+  reverse proxy you control. With HTTPS_ENABLED=1 it is not needed (Secure is
+  already forced); it matters when you run HTTPS_ENABLED=0 behind an HTTPS-
+  terminating proxy.
+- REQUIRE_BCRYPT (0|1, default 1): require Crypt::Bcrypt. With 1, passwords are
+  never written as the weaker Apache MD5 ($apr1$), and if the module cannot be
+  loaded the login screen shows a notice and login is disabled (rather than
+  silently using a weak hash). Set 0 only on a stack without Crypt::Bcrypt (e.g.
+  an AIX dev box), which re-enables the $apr1$ fallback. Legacy $apr1$ hashes
+  still verify and upgrade to bcrypt on the owner's next login regardless.
+- CAPTURE_MAX_BYTES (bytes, default 52428800 = 50 MiB, 0 = no limit): upper
+  bound on the combined stdout+stderr captured from a single subprocess
+  (fetchconfig runs, Backup Now, privileged helper), so a runaway child cannot
+  exhaust worker memory. On overflow the child is terminated and a controlled
+  error is returned (Backup Now keeps the partial transcript).
+- Reset links use SITE_URL. An http:// SITE_URL is accepted so the app can run
+  HTTP-only, but it sends the (hashed, single-use, short-lived) reset token over
+  cleartext -- use an https:// SITE_URL in production.
 - CRON_USER (optional, unset by default): the system user whose crontab holds
   the scheduled fetchconfig.pl backup run. Set it to enable Tools -> Show
   schedule, which lists that crontab (read-only) and offers a builder for a new

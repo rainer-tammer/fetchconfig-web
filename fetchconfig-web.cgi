@@ -91,12 +91,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.09';
+use constant APP_VERSION => '2.10';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.09';
+use constant APP_VERSION_INTERNAL => '2.10';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -233,6 +233,9 @@ my ($DEVICE_TABLE,
     $BASE_URL,
     $JS_BASE_URL,
     $HTTPS_ENABLED,
+    $TRUST_FORWARDED_PROTO,
+    $REQUIRE_BCRYPT,
+    $CAPTURE_MAX_BYTES,
     $SHOW_RENDER_TIME,
     $EMAIL,
     $SMTP_HOST,
@@ -299,6 +302,7 @@ my @CFG_KEYS = (
     [ 'USE_SUDO_FOR_BACKUP_NOW','bool',      '1',                                      '0 | 1' ],
     [ 'SUDO_BIN',               'path',      '/usr/bin/sudo',                          'absolute path' ],
     [ 'BACKUP_TIMEOUT',         'int',       '120',                                    'integer >= 0 seconds (0 = no limit)', 0, undef ],
+    [ 'CAPTURE_MAX_BYTES',      'int',       '52428800',                               'integer >= 0 bytes (0 = no limit)',   0, undef ],
     [ 'TEMPLATE_HELPER',        'path_opt',  '(empty: template editor writes directly)', 'absolute path' ],
     [ 'SESSION_DIR',            'path',      '(required)',                             'absolute path' ],
     [ 'BACKUP_TMP_DIR',         'path',      '= SESSION_DIR',                          'absolute path' ],
@@ -317,7 +321,9 @@ my @CFG_KEYS = (
     [ 'PASSWORD_MIN_SPECIAL',   'int',       '0',                                      'integer >= 0 (0 = off)',       0, undef ],
     [ 'PASSWORD_MIN_CLASSES',   'int',       '0',                                      'integer 0..4 (0 = off)',       0, 4 ],
     [ 'DEFAULT_PASSWORD',       'str',       'fetchconfig',                            'string' ],
-    [ 'HTTPS_ENABLED',          'bool',      '0',                                      '0 | 1' ],
+    [ 'REQUIRE_BCRYPT',         'bool',      '1',                                      '0 | 1 (require Crypt::Bcrypt; disable login if missing)' ],
+    [ 'HTTPS_ENABLED',          'bool',      '1',                                      '0 | 1 (Secure cookie + HSTS; set 0 for HTTP-only)' ],
+    [ 'TRUST_FORWARDED_PROTO',  'bool',      '0',                                      '0 | 1 (trust X-Forwarded-Proto from a reverse proxy)' ],
     [ 'SHOW_RENDER_TIME',       'bool',      '0',                                      '0 | 1' ],
     [ 'WEB_DIR',                'path_opt',  '/www/virtual/fetchconfig/htdocs',        'absolute filesystem path' ],
     [ 'BASE_URL',               'url',       '/',                                      'absolute URL path' ],
@@ -572,11 +578,27 @@ sub read_config {
     # to the default instead of causing runtime warnings or odd behaviour.
     $USE_SUDO_FOR_BACKUP_NOW = (defined $kv->{USE_SUDO_FOR_BACKUP_NOW} && $kv->{USE_SUDO_FOR_BACKUP_NOW} =~ /^[01]$/)
                                ? $kv->{USE_SUDO_FOR_BACKUP_NOW} : 1;
-    # When served over HTTPS, set HTTPS_ENABLED=1 so the session cookie carries
-    # the Secure flag (the browser then never sends it over plain HTTP). Default
-    # 0 so an HTTP-only deployment still works out of the box.
+    # Secure by default: HTTPS_ENABLED=1 forces the Secure cookie flag + HSTS.
+    # effective_https() also auto-detects a TLS request from the web-server env
+    # (and, when TRUST_FORWARDED_PROTO=1, from X-Forwarded-Proto behind a
+    # reverse proxy), so both direct-TLS and proxied-TLS deployments are covered
+    # without extra config. An HTTP-only deployment MUST set HTTPS_ENABLED=0,
+    # otherwise the Secure cookie is never returned over plain HTTP and login
+    # cannot complete.
     $HTTPS_ENABLED = (defined $kv->{HTTPS_ENABLED} && $kv->{HTTPS_ENABLED} =~ /^[01]$/)
-                     ? $kv->{HTTPS_ENABLED} : 0;
+                     ? $kv->{HTTPS_ENABLED} : 1;
+    # Trust the X-Forwarded-Proto request header (set by a reverse proxy that
+    # terminates TLS). Off by default because a client can forge that header
+    # when the app is reached directly; enable it only behind a trusted proxy.
+    $TRUST_FORWARDED_PROTO = (defined $kv->{TRUST_FORWARDED_PROTO} && $kv->{TRUST_FORWARDED_PROTO} =~ /^[01]$/)
+                     ? $kv->{TRUST_FORWARDED_PROTO} : 0;
+    # Require bcrypt (Crypt::Bcrypt) for password hashing. Default 1: new hashes
+    # are never written as the weaker Apache MD5 ($apr1$), and login is disabled
+    # with a clear notice if the module is unavailable. Set 0 only on a stack
+    # without Crypt::Bcrypt (e.g. an AIX dev box), which re-enables the $apr1$
+    # fallback.
+    $REQUIRE_BCRYPT = (defined $kv->{REQUIRE_BCRYPT} && $kv->{REQUIRE_BCRYPT} =~ /^[01]$/)
+                     ? $kv->{REQUIRE_BCRYPT} : 1;
     # When 1, load/render-time lines are shown across the UI (device list, status,
     # log and template-list "load time" lines, and the device-table editor's
     # render time, gray at the bottom-right). Default 0.
@@ -608,6 +630,9 @@ sub read_config {
     $SESSION_TTL         = $cfg_int->('SESSION_TTL', 8 * 3600, 1, undef);
     # Wall-clock limit for a single Backup Now run; 0 disables. Default 120s.
     $BACKUP_TIMEOUT      = $cfg_int->('BACKUP_TIMEOUT', 120, 0, undef);
+    # Upper bound on the combined (stdout+stderr) bytes captured from a single
+    # subprocess, to protect worker memory against a runaway child. 0 disables.
+    $CAPTURE_MAX_BYTES   = $cfg_int->('CAPTURE_MAX_BYTES', 52428800, 0, undef);
     # Absolute session lifetime: a session is force-expired this many seconds
     # after LOGIN regardless of activity (the idle TTL slides, this does not).
     # 0 disables the cap (idle timeout only). Min 0; default 24h.
@@ -3447,6 +3472,11 @@ sub password_hash {
         my $salt = secure_random_bytes(16);
         return Crypt::Bcrypt::bcrypt($password, '2b', BCRYPT_COST, $salt);
     }
+    # REQUIRE_BCRYPT=1: never silently write the weaker Apache MD5 ($apr1$) hash.
+    # Password-setting runs in an admin context; dying surfaces the broken crypto
+    # setup instead of storing a weak hash. Login is separately refused up front
+    # (do_login), so this is a backstop for the set/change/add paths.
+    die "REQUIRE_BCRYPT is set but Crypt::Bcrypt is not available\n" if $REQUIRE_BCRYPT;
     return apr1_hash($password);
 }
 
@@ -3797,8 +3827,32 @@ sub session_cookie {
         -httponly => 1,
         -samesite => 'Lax',   # defence-in-depth alongside the CSRF token
         -path     => '/',
-        ($HTTPS_ENABLED ? (-secure => 1) : ()),
+        (effective_https() ? (-secure => 1) : ()),
     );
+}
+
+################################################################################
+# effective_https
+#
+# True when the current request should be treated as TLS, for the Secure cookie
+# flag and HSTS. HTTPS_ENABLED=1 forces it on (the admin asserts the site is
+# HTTPS, which also covers a reverse proxy that terminates TLS). Otherwise it is
+# auto-detected from the web-server environment ($ENV{HTTPS} eq 'on', or
+# REQUEST_SCHEME eq 'https') and -- only when TRUST_FORWARDED_PROTO=1 -- from the
+# first token of a reverse proxy's X-Forwarded-Proto header. That header is not
+# trusted by default because a client can forge it on a direct connection.
+#
+# Parameters: none
+################################################################################
+sub effective_https {
+    return 1 if $HTTPS_ENABLED;
+    return 1 if defined $ENV{HTTPS} && lc($ENV{HTTPS}) eq 'on';
+    return 1 if defined $ENV{REQUEST_SCHEME} && lc($ENV{REQUEST_SCHEME}) eq 'https';
+    if ($TRUST_FORWARDED_PROTO && defined $ENV{HTTP_X_FORWARDED_PROTO}) {
+        my ($first) = split /\s*,\s*/, $ENV{HTTP_X_FORWARDED_PROTO};
+        return 1 if defined $first && lc($first) eq 'https';
+    }
+    return 0;
 }
 
 ################################################################################
@@ -3977,6 +4031,19 @@ sub do_login {
     my $username = $cgi->param('username') // '';
     my $password = $cgi->param('password') // '';
 
+    # F-01: when bcrypt is mandatory but unavailable, no login can be trusted --
+    # a successful login would also try to re-hash the password and cannot store
+    # it safely. Refuse up front with a clear notice rather than verifying
+    # against (possibly legacy) hashes.
+    if ($REQUIRE_BCRYPT && !bcrypt_available()) {
+        audit(action => 'login_disabled', username => $username,
+              detail => 'login refused: REQUIRE_BCRYPT=1 but Crypt::Bcrypt is unavailable');
+        login_jitter();
+        show_login_form('Login is disabled: the required password-hashing module '
+            . '(Crypt::Bcrypt) is not installed. Contact the administrator.');
+        return;
+    }
+
     if ($username eq '' || $password eq '') {
         show_login_form('Please enter a username and password.');
         return;
@@ -4096,7 +4163,7 @@ sub do_logout {
         destroy_session($sid);
         my $cookie = CGI::Cookie->new(-name => $COOKIE_NAME, -value => '', -path => '/',
                                       -httponly => 1, -samesite => 'Lax', -expires => '-1d',
-                                      ($HTTPS_ENABLED ? (-secure => 1) : ()));
+                                      (effective_https() ? (-secure => 1) : ()));
         print std_header(-cookie => $cookie, -location => script_url(), -status => '302 Found');
     } else {
         print std_header(-location => script_url(), -status => '302 Found');
@@ -4142,6 +4209,21 @@ sub show_login_form {
     print qq{<img class="login-icon" src="data:image/png;base64,$LOGIN_ICON_BASE64" }
         . qq{alt="" width="100" height="100">\n};
     print qq{<h1>Log in</h1>\n};
+    # F-01: surface a missing Crypt::Bcrypt on the login screen itself. With
+    # REQUIRE_BCRYPT=1 login is disabled (do_login refuses); with 0 the app still
+    # works but hashes with the weaker Apache MD5 ($apr1$).
+    unless (bcrypt_available()) {
+        if ($REQUIRE_BCRYPT) {
+            print qq{<div class="fatal-error"><strong>Login disabled:</strong> the }
+                . qq{required password-hashing module Crypt::Bcrypt is not installed }
+                . qq{(REQUIRE_BCRYPT=1). Contact the administrator.</div>\n};
+        } else {
+            print qq{<p class="error" style="background:#fff8e6;border:1px solid #d29922;}
+                . qq{color:#7a5b00;padding:0.5em 0.7em;border-radius:4px">Warning: }
+                . qq{Crypt::Bcrypt is not installed; passwords use the weaker Apache MD5 }
+                . qq{hash. Install Crypt::Bcrypt and set REQUIRE_BCRYPT=1.</p>\n};
+        }
+    }
     if ($error) {
         print qq{<p class="error">} . esc($error) . qq{</p>\n};
     }
@@ -4870,6 +4952,14 @@ sub run_privileged {
                 $sel->remove($fh); close($fh);
             } else {
                 $buf{$fh} .= $chunk;
+                # F-04: bound worker memory against a runaway child.
+                if ($CAPTURE_MAX_BYTES
+                    && length($buf{$stdout}) + length($buf{$stderr}) > $CAPTURE_MAX_BYTES) {
+                    kill('TERM', $pid);
+                    waitpid($pid, 0);
+                    return (undef, undef, undef,
+                        "command output exceeded CAPTURE_MAX_BYTES ($CAPTURE_MAX_BYTES bytes)");
+                }
             }
         }
     }
@@ -21600,6 +21690,16 @@ sub run_fetchconfig {
                 close($fh);
             } else {
                 $buf{$fh} .= $chunk;
+                # F-04: bound worker memory against a runaway child. Discard and
+                # report -- the output here is parsed, so a truncated buffer is
+                # useless.
+                if ($CAPTURE_MAX_BYTES
+                    && length($buf{$stdout}) + length($buf{$stderr}) > $CAPTURE_MAX_BYTES) {
+                    kill('TERM', $pid);
+                    waitpid($pid, 0);
+                    return (undef, undef, undef,
+                        "fetchconfig output exceeded CAPTURE_MAX_BYTES ($CAPTURE_MAX_BYTES bytes)");
+                }
             }
         }
     }
@@ -22809,6 +22909,7 @@ sub run_command_capture {
     my $out       = '';
     my $timeout   = (defined $BACKUP_TIMEOUT && $BACKUP_TIMEOUT > 0) ? $BACKUP_TIMEOUT : 0;
     my $timed_out = 0;
+    my $over_limit = 0;
     my $client_gone = 0;
     my $err;
     my $rin = ''; vec($rin, fileno($fh), 1) = 1;
@@ -22837,18 +22938,24 @@ sub run_command_capture {
             }
             last if $got == 0;              # EOF -- child finished
             $out .= $buf;
+            # F-04: bound worker memory. Keep the partial transcript (as the
+            # timeout path does) and stop reading.
+            if ($CAPTURE_MAX_BYTES && length($out) > $CAPTURE_MAX_BYTES) { $over_limit = 1; last; }
         } elsif (!defined $n || $n < 0) {
             next if $!{EINTR};              # signal; loop re-checks $aborted
             last;
         }
         # $n == 0 means select timed out -> loop re-checks deadline/keepalive.
     }
-    if ($timed_out || $aborted) {
+    if ($timed_out || $aborted || $over_limit) {
         kill('TERM', $pid);
         # give it a moment, then force-kill, so the pipe can close
         select(undef, undef, undef, 0.3);
         kill('KILL', $pid);
-        if ($timed_out) {
+        if ($over_limit) {
+            $err = "Backup output exceeded CAPTURE_MAX_BYTES ($CAPTURE_MAX_BYTES bytes)"
+                 . " and was terminated (showing the output captured so far).";
+        } elsif ($timed_out) {
             $err = "Backup timed out after ${timeout}s and was terminated"
                  . " (showing the output captured so far).";
         } else {
@@ -22867,7 +22974,7 @@ sub run_command_capture {
         $raw = $?;
     }
     my $status = ($raw >= 0) ? ($raw >> 8) : 0;
-    $status = undef if $timed_out || $aborted;   # exit status is meaningless after a kill
+    $status = undef if $timed_out || $aborted || $over_limit;   # exit status is meaningless after a kill
     return (collapse_model_registration($out), $status, $err, $aborted);
 }
 
@@ -23178,7 +23285,7 @@ sub std_header {
         '-Cache_Control'          => 'no-store, no-cache, must-revalidate',
         '-Pragma'                 => 'no-cache',
         # V6: HSTS, only when the app is actually served over TLS.
-        ($HTTPS_ENABLED ? ('-Strict_Transport_Security' => 'max-age=31536000; includeSubDomains') : ()),
+        (effective_https() ? ('-Strict_Transport_Security' => 'max-age=31536000; includeSubDomains') : ()),
         @args,     # caller's args win (e.g. a stricter Referrer-Policy on the reset pages)
     );
     return $cgi->header(%h);

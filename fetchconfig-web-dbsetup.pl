@@ -604,6 +604,9 @@ SUDO_BIN                = /usr/bin/sudo
 # respond the run is terminated and the partial output is still shown. 0 = no
 # limit. Default 120.
 BACKUP_TIMEOUT          = 120
+# Max combined (stdout+stderr) bytes captured from a single subprocess, guarding
+# worker memory against a runaway child. 0 disables the cap. Default 50 MiB.
+CAPTURE_MAX_BYTES       = 52428800
 # Privileged helper for the Tools template editor's Save/Revert (run via sudo).
 # Leave empty to disable sudo saving (then the template directories must be
 # writable by the web-server user). See "Template editor" in README.md.
@@ -676,11 +679,18 @@ EMAIL_FROM              = fetchconfig-web\@example.com
 SITE_URL                = https://fetchconfig.example.com
 
 # --- security ---
-# Set to 1 when fetchconfig-web is served over HTTPS: the session cookie then
-# gets the "Secure" flag so the browser never sends it over plain HTTP. Leave 0
-# for an HTTP-only deployment (the cookie would otherwise never be sent and
-# login would appear to fail).
-HTTPS_ENABLED           = 0
+# Secure by default. HTTPS_ENABLED=1 forces the session cookie's "Secure" flag
+# and HSTS. The app also auto-detects a TLS request from the web-server
+# environment; with TRUST_FORWARDED_PROTO=1 it additionally trusts a reverse
+# proxy's X-Forwarded-Proto header. Set HTTPS_ENABLED=0 for an HTTP-only
+# deployment, otherwise the Secure cookie is never sent over plain HTTP and
+# login appears to fail.
+HTTPS_ENABLED           = 1
+TRUST_FORWARDED_PROTO   = 0
+# Require bcrypt (Crypt::Bcrypt) for password hashing. 1 = never fall back to the
+# weaker Apache MD5 hash; if the module is missing, login is disabled with a
+# clear notice. Set 0 only on a stack without Crypt::Bcrypt (e.g. AIX dev).
+REQUIRE_BCRYPT          = 1
 
 # --- diagnostics / branding ---
 # Set to 1 to show load/render-time lines across the UI (device list, status,
