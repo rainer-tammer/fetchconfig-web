@@ -3,8 +3,9 @@
 **Audience:** engineers extending or maintaining fetchconfig-web.
 **Scope:** architecture, request lifecycle, data structures, the PostgreSQL
 schema, the security model, and step-by-step recipes for adding functionality.
-**Version:** this document tracks fetchconfig-web 2.10 (requires fetchconfig
-9.72+).
+**Version:** this document tracks fetchconfig-web 2.11 (requires fetchconfig
+9.74+; the optional Backup Dashboard needs the engine's DB writer, fetchconfig
+9.75+).
 
 ---
 
@@ -453,6 +454,119 @@ with a fresh connection per request (no pooling); every query is parameterized.
 
 ### 8.1 Tables
 
+> **`DEVICE_TABLE` is not a database table.** It is fetchconfig's own on-disk **text
+> config file** (the `device_table`), owned and written by the fetchconfig
+> **engine** -- fetchconfig-web only reads it. It appears in the diagrams solely to
+> anchor the `dev_id` / `device_id` / `site` values the database tables carry; every
+> link to it is **logical** (dashed), never a database foreign key.
+
+The tables form three independent groups -- the schema-version ledger, the web UI
+tables, and the Backup Dashboard history tables -- documented in that order. In the
+ER diagrams **solid** lines are real foreign keys and **dashed** lines are logical
+links enforced in code. (Mermaid lays sibling entities out horizontally, so each
+group is its own narrower diagram.)
+
+#### Schema-version ledger
+
+A single standalone table with **no relationship to any other table** (not to the
+web UI tables, not to the backup history). The `--upgrade` tool reads and writes it
+to decide which `dbupdate` scripts to apply.
+
+**schema_migrations** -- applied-migration ledger (drives `--upgrade`).
+
+| Column | Type | Notes |
+|---|---|---|
+| id | TEXT PK | dbupdate version, e.g. `2.11` |
+| applied_at | BIGINT | epoch when recorded |
+
+#### Web UI tables
+
+Accounts, sites and per-device data:
+
+```mermaid
+erDiagram
+    USERS            ||--o{ USER_SITES      : "has (FK, ON DELETE CASCADE)"
+    SITES            ||--o{ USER_SITES      : "has (FK, ON DELETE RESTRICT)"
+    USERS            ||..o{ PASSWORD_RESETS : "username (logical, no FK)"
+    DEVICE_TABLE     ||..o{ DEVICE_NOTES    : "device_id (config, no FK)"
+
+    USERS {
+        text username PK
+        text pass_hash
+        boolean edit_device_table
+        boolean admin_function
+        boolean download_full_report
+        boolean download_full_config
+        text email "nullable"
+    }
+    SITES {
+        integer id PK "default_0_any_site"
+        text code UK
+        text description
+    }
+    USER_SITES {
+        text username PK,FK
+        integer site_id PK,FK
+    }
+    PASSWORD_RESETS {
+        text token_hash PK "SHA256_hash"
+        text username "target_account"
+        timestamptz created
+        timestamptz expires
+        boolean used
+    }
+    DEVICE_NOTES {
+        integer note_id PK "sequence"
+        text device_id UK
+        text note
+        boolean keep
+        timestamptz created
+        timestamptz updated
+    }
+    DEVICE_TABLE {
+        text dev_id "on_disk_config_file"
+    }
+```
+
+Audit and operational tables -- standalone, but each row carries a
+`username`/`keyval` that logically references `users`:
+
+```mermaid
+erDiagram
+    USERS ||..o{ AUDIT_LOG      : "username actor (no FK)"
+    USERS ||..o{ APP_STATE      : "username writer (no FK)"
+    USERS ||..o{ LOGIN_ATTEMPTS : "keyval user-rows (no FK)"
+
+    USERS {
+        text username PK
+    }
+    AUDIT_LOG {
+        bigint id PK "sequence"
+        timestamptz ts
+        text username
+        text ip
+        text action
+        text object_type
+        text object_id
+        text field
+        text old_value
+        text new_value
+        text detail
+    }
+    APP_STATE {
+        text key PK
+        text value
+        text username
+        timestamptz ts
+    }
+    LOGIN_ATTEMPTS {
+        text kind PK "ip_or_user"
+        text keyval PK
+        integer failures
+        timestamptz last_fail
+    }
+```
+
 **users** -- the account store.
 
 | Column | Type | Notes |
@@ -538,6 +652,97 @@ by emptying the value.
 | note | TEXT | |
 | keep | BOOLEAN | "pin" so an orphaned-notes cleanup leaves it |
 | created / updated | TIMESTAMPTZ | |
+
+#### Backup Dashboard history tables (2.11)
+
+Optional; created by `--upgrade`, written by the engine, read by the app. 8.2-safe;
+timestamps are a naive local wall-clock epoch (BIGINT). The web login has `SELECT`
+only on these three tables; the **writer** role owns them. They have **no foreign
+keys** -- each keys on `dev_id` from the config device table.
+
+```mermaid
+erDiagram
+    DEVICE_TABLE ||..o{ BACKUP_CURRENT  : "dev_id (config, no FK)"
+    DEVICE_TABLE ||..o{ BACKUP_RUNS     : "dev_id (config, no FK)"
+    DEVICE_TABLE ||..o{ BACKUP_VERSIONS : "dev_id (config, no FK)"
+
+    BACKUP_CURRENT {
+        text dev_id PK
+        text repository
+        bigint run_end
+        text state
+        text changed
+        integer duration_sec
+        bigint size_bytes
+        text fail_reason
+        bigint last_good_at "null_equals_never"
+        bigint last_good_size
+    }
+    BACKUP_RUNS {
+        text dev_id UK "unique_dev_id_run_end"
+        bigint run_end UK
+        text state
+        text changed
+        integer duration_sec
+        bigint size_bytes
+        text fail_reason
+        text repository
+    }
+    BACKUP_VERSIONS {
+        text dev_id UK "unique_dev_id_file_timestamp"
+        bigint file_timestamp UK
+        text path
+        bigint size_bytes
+        text sha1
+        boolean expired
+        bigint expired_at
+    }
+    DEVICE_TABLE {
+        text dev_id "on_disk_config_file"
+    }
+```
+
+**backup_current** -- one row per device (Overview + All-devices table).
+
+| Column | Type | Notes |
+|---|---|---|
+| dev_id | TEXT PK | device id |
+| repository | TEXT | repo path |
+| run_end | BIGINT | last run end |
+| state | TEXT | last run state (`success` / `failed` / ...) |
+| changed | TEXT | whether the config changed |
+| duration_sec | INTEGER | last run duration |
+| size_bytes | BIGINT | last config size |
+| fail_reason | TEXT | on failure |
+| last_good_at | BIGINT | last successful backup (NULL = never) |
+| last_good_size | BIGINT | size of the last good backup |
+
+**backup_runs** -- one row per run (dense; feeds the 14-day trend). Indexed on
+`run_end`; unique on `(dev_id, run_end)`.
+
+| Column | Type | Notes |
+|---|---|---|
+| dev_id | TEXT NOT NULL | device id |
+| run_end | BIGINT NOT NULL | run end |
+| state | TEXT | `success` / `failed` |
+| changed | TEXT | whether the config changed |
+| duration_sec | INTEGER | run duration |
+| size_bytes | BIGINT | config size |
+| fail_reason | TEXT | on failure |
+| repository | TEXT | repo path |
+
+**backup_versions** -- one row per saved backup (sparse change history). Unique on
+`(dev_id, file_timestamp)`; partial index on `(dev_id) WHERE expired = FALSE`.
+
+| Column | Type | Notes |
+|---|---|---|
+| dev_id | TEXT NOT NULL | device id |
+| file_timestamp | BIGINT NOT NULL | backup file timestamp (join key) |
+| path | TEXT | backup file path (joins the Backups-page SHA1 button) |
+| size_bytes | BIGINT | file size |
+| sha1 | TEXT NOT NULL | integrity checksum |
+| expired | BOOLEAN NOT NULL DEFAULT FALSE | flagged by a future cleanup |
+| expired_at | BIGINT | when expired |
 
 ### 8.2 Connection and grants
 
@@ -763,3 +968,214 @@ flowchart TD
   calls.
 * **One file**: resist splitting unless you also rework the deployment and test
   harness -- the single-file property is intentional (simple deploy).
+
+## 13. The fetchconfig interface (results and token contract)
+
+fetchconfig-web drives the `fetchconfig.pl` engine as a black box over three
+channels: the process **exit code**, its **text output** (stdout / stderr), and
+the **files it writes** (the per-device `.status` file, the saved-config
+filenames, and `Constants.pm`). Everything the web app keys on is catalogued
+here so the engine side can see what must stay stable.
+
+> **Any change to a token, record format, status-file key, filename format or
+> exit-code meaning listed below is a breaking change for fetchconfig-web.**
+> Each item names its consuming function and whether a break is *functional* (a
+> feature misbehaves) or *cosmetic* (display only; a fallback still works).
+
+### 13.1 Execution pipelines
+
+* `run_fetchconfig(@args)` -- `open3`, **stdout and stderr kept separate**;
+  returns `($out, $err, $status, $fork_err)`. Used for every parsed mode
+  (`-l`, `-g`, `-m`, `-s`, `-t`, `-o`, `-e`, `--template-syntax`).
+* `run_command_capture(@cmd)` -- **stdout and stderr merged**, with keepalive
+  and abort handling; returns `($out, $status, $err, $aborted)`. Used for the
+  live Backup Now run and the destructive `-D` scans (the full transcript is the
+  point).
+* `run_privileged(@cmd)` -- `open3`, separate, binary-safe; used for the sudo
+  debug-log helper (reads fetchconfig's `.debug` files), not for `fetchconfig.pl`
+  itself.
+
+Reliability rules in every pipeline: the exit code is trusted **only if
+`waitpid` reaped our own PID** (guards a stale `$?` under concurrent scans);
+`EINTR` reads are retried, not treated as EOF; total captured output is bounded
+by `CAPTURE_MAX_BYTES` (over-limit -> kill child, return an error, discard the
+truncated buffer).
+
+### 13.2 Two regimes, and the per-mode evaluation
+
+There is a hard asymmetry worth stating first: the **main backup run always
+exits 0**, so its exit code is meaningless -- the `.status` file is the
+authoritative success signal and the log text is only a fallback. Every
+**auxiliary mode** instead uses the **exit code as the primary signal**, with
+text as a cross-check or a benign-exception handler.
+
+| Invocation | Primary signal | Meaning / handling | Consuming function |
+|---|---|---|---|
+| `-devices=<tmp>` (full run, Backup Now) | `.status` `backup_state` (exit code ignored) | `failed` -> failure; else success; a hard error or an abort -> failure; if no `.status`, scrape the log | `run_backup_now`, `backup_run_failed` |
+| `-l <dev>` | exit code + stdout | 0 -> parse rows; non-zero -> benign if the "no backed up config files found" text is present, else error | `list_backups`, `device_backup_status` |
+| `-g <dev> -n <idx>` | exit code + stdout | 0 -> return raw bytes; non-zero -> error (with stderr) | `get_backup_content` |
+| `-g <dev> -n N -m M` | exit code (0 / 1 / greater) + stdout | 0 = identical, 1 = differs, greater than 1 = error | `compare_backups` |
+| `-s <dev>` | exit code (0 / 1 / 2), text cross-check | 0 = consistent, 1 or 2 = issue, else text markers, else error | `device_suffix_status` |
+| `-o`, `-e` | exit code | 0 = clean, 1 = items found, greater than 1 = error | `run_scan_check` + tool handlers |
+| `-Z` | stdout summary (exit code is not an error flag) | 1 = zero-byte backups found, 0 = none | `run_empty_bk_check` |
+| `-o -D`, `-e -D`, `-Z -D` | merged transcript + exit code | shown as the operation log | `run_scan_delete` |
+| `-t` | exit code (0 / 1 / 2) + stdout | 0 = at least one template, 1 = dirs ok but none, 2 = a needed dir missing | `run_templates_t` |
+| `--template-syntax <path>` | exit code + stdout (stderr ignored) | non-zero -> no scheme (undef); 0 -> scheme name from stdout | template scheme detection |
+
+### 13.3 Exact token / format contract
+
+**A. Per-device `.status` file** (the authoritative backup result; parsed by
+`read_status_file`, `read_all_status`, and the Backup-Now inline parse). Each
+field is matched as `^\s*<key>\s*=\s*<value>`:
+
+* `backup_start_date`, `backup_start_time`, `backup_end_date`,
+  `backup_end_time` -- value `\S+` (displayed).
+* `backup_duration_sec` -- value `\d+` (displayed; also the live-status spinner).
+* `backup_state` -- value `\S+`. **Logic depends on the exact value `failed`**
+  (-> failure in `backup_run_failed`); `success`, `unchanged`, `initial` and any
+  other value are treated as success. *Functional.*
+* `backup_changed` -- value `\S+`. Expected `unchanged` / `changed` / `initial`
+  / `forced`; used only to build the `ch-<value>` display class, not for logic.
+  *Cosmetic.*
+
+Renaming any key, or the `failed` state token, is a **functional** break
+(success/failure misdetection and blank last-state display).
+
+**B. Saved-config filename format** (`parse_backup_timestamp`, suffix helpers).
+The basename is expected as `<dev_id>.<tag>.YYYYMMDD.HHMMSS<TZ>[.suffix]`:
+
+* timestamp: `\.(\d{4})(\d{2})(\d{2})\.(\d{2})(\d{2})(\d{2})([A-Za-z]*)` --
+  the trailing timezone is assumed alphabetic.
+* optional appended suffix: `\.\d{8}\.\d{6}[A-Za-z]*(\.[^.].*)$`.
+
+Changing the timestamp layout blanks the date/time columns and confuses the
+suffix tool. *Functional (for the dated views), otherwise cosmetic.*
+
+**C. Exit-code meanings** (summarised from 13.2; each is a contract):
+`-l` non-zero = "no backups / error"; `-g -n -m` uses the diff convention
+(0 / 1 / greater-than-1); `-s` uses 0 / 1 / 2; `-o` and `-e` use 0 / 1 /
+greater-than-1; `-Z` uses 1 = "found" (not an error); `-t` uses 0 / 1 / 2. The
+**full backup run must keep exiting 0** (or, if that ever changes, the web app
+still relies on `.status`, not the code). Changing any of these numeric meanings
+is **functional** for that feature.
+
+**D. Structured stdout record formats:**
+
+* `-l` -- tab-separated `index<TAB>size<TAB>path`, newest first; `index` is
+  digits. Rows not matching `^\d+\t` are ignored. (`list_backups`,
+  `device_backup_status`.) *Functional.*
+* `-t` -- tab-separated `ID<TAB>section<TAB>full_path<TAB>model<TAB>dir`
+  (at least 5 fields); `section` must be exactly `default` or `device`; the
+  trailing `# found ...` summary line (`^\s*#`) is skipped. (`run_templates_t`.)
+  *Functional.*
+* `-g` -- raw config bytes, passed through unmodified (no format dependency).
+* `-g -n -m` diff text is styled by leading `+++` / `---` / `@@` / `***`
+  markers only. *Cosmetic.*
+
+**E. Literal text strings matched in stdout / stderr** (case-insensitive):
+
+* `no backed up config files found` -- `-l`: the benign "never backed up" state,
+  distinguished from a real error. (`list_backups`, `device_backup_status`.)
+  *Functional* (rename -> a new device reads as an error, not "no backups yet").
+* `there is no latest config` -- the benign initial-backup line, **excluded**
+  from error scraping. (`backup_run_failed`, fallback path.) *Cosmetic/fallback*
+  (only matters when no `.status` was written).
+* `\berror:` -- generic failure marker scraped from the Backup-Now log, **only
+  when `.status` is unavailable**. (`backup_run_failed`.) *Cosmetic/fallback.*
+* `backup_state\s*=\s*failed` in free log text -- the same fallback. *Fallback.*
+* `-s` text cross-checks, used **only if the exit code is missing/unexpected**:
+  `inconsistent backup suffixes`, `does not match the backup file suffixes`,
+  `configured suffix\s+matches the backup file suffixes`. (`device_suffix_status`.)
+  *Cosmetic/fallback* (exit code is primary).
+* `debug:\s*registering model:` (with a `<prog>: debug: ` prefix) -- folded into
+  a summary for display. (`collapse_model_registration`.) *Cosmetic.*
+* `^fetchconfig\.pl:` -- a stray diagnostic line skipped during
+  `--template-syntax` scheme parsing. *Cosmetic/defensive.*
+
+**F. Version module** (`fetchconfig_installed_version`; a **file read**, not a
+run): `FETCHCONFIG_PATH/fetchconfig/Constants.pm`, package
+`fetchconfig::Constants`, function `version()` returning a dotted string.
+Compared against the web app's `MIN_FETCHCONFIG_VERSION` (currently **9.74**) by
+`version_cmp` (leading integer of each dotted component). Moving or renaming the
+module, package or `version()` yields the "version could not be determined"
+banner. *Functional for the warning (non-fatal to the app).*
+
+**G. CLI flags / options the web app passes** (the invocation contract -- each
+must keep its name and argument shape): `-devices=<file>` (always),
+`-l <dev>`, `-g <dev>`, `-n <idx>`, `-m <idx>`, `-s <dev>`, `-t`, `-o`, `-e`,
+`-Z`, `-D` (with a scan flag, destructive), `--template-syntax <path>`, and the
+bare run (`-devices=<tmp>` only) for Backup Now. Removing or renaming any flag
+breaks the corresponding feature. *Functional.*
+
+> **Not a contract (intentionally tolerant):** the raw `-g` config bytes and the
+> config-syntax highlighters render device-vendor content, not fetchconfig
+> output, so they depend on device formats rather than the engine. The main
+> run's exit code is explicitly *not* relied upon. Anything marked *cosmetic*
+> above degrades gracefully (a display folds differently, or a fallback keyed on
+> `.status` / the exit code still decides correctly).
+
+### 13.4 Backup Dashboard
+
+Optional, `ENABLE_DASHBOARD`-gated, DB-only. The dashboard reads three history
+tables the fetchconfig engine (9.75+) writes via its `db:` option: `backup_current`
+(one row/device, Overview + table), `backup_runs` (one row/run, the trend),
+`backup_versions` (one row/saved backup, carries the per-version `sha1`).
+fetchconfig-web only reads these (`SELECT`); the engine writes. The lone exception
+is the admin cleanup action (below), which deletes via a separate connection *as
+the writer role*.
+
+**Access.** The Overview (`show_dashboard_overview`; `dashboard_overview_allowed`
+= `ENABLE_DASHBOARD`) is open to every authenticated user: a site-limited user
+sees only their own sites (tiles, trend and By-site scoped via
+`read_device_ids($user)`), an unrestricted user the whole fleet. **All devices**
+and **Cleanup dashboard** are admin-only (`dashboard_allowed`). After login, users
+land on the Overview when the dashboard is enabled (`do_login`).
+
+**Config join.** `site`, `model` and `template` are config-only (absent from the
+backup tables), so the device views join `backup_current` to the parsed device
+table by `dev_id` (`dashboard_devices_rows`, `dashboard_overview_data`): site code
+-> description via `db_all_sites`; generic devices shown as `generic · <template>`;
+Site shown as `code / description` and the client-side filter keyed on the site
+code. The All-devices table and its CSV (`dashboard_devices_csv`) render the full
+visible set once and filter/sort/paginate client-side (sort by Last backup
+(default, newest first) or Status, over the whole set). A device with no
+`backup_current` row shows **No data**, distinct from **Never** (row, no good backup).
+
+**Cleanup** (`show_dashboard_cleanup` / `do_dashboard_cleanup_delete`, in
+`%STATE_CHANGING`): `dashboard_orphans` lists dev-ids present in the three tables
+but absent from the device table; the delete is all-or-nothing in one transaction
+via `db_connect_as_writer` (credentials from the device-table `db:` record, so the
+web login stays `SELECT`-only), and is audit-logged.
+
+**Backups-page SHA1.** `show_backup_list` appends a per-row **SHA1** button when
+`backup_sha1_map` (keyed on `backup_versions.path`) has a hash for that backup;
+`sha1_copy_script` copies it. Best-effort -- no button when the history schema is
+absent. It is an integrity checksum, not a cryptographic signature.
+
+* **Timestamps** are a *naive local wall-clock epoch* -- the engine encodes its
+  local time with `timegm(local)`, so the web renders with `gmtime` (`dash_fmt_ts`)
+  and computes age against `dash_naive_now()`. No timezone conversion anywhere.
+  Single box / one TZ makes this correct and simple.
+* **State detection** (`dashboard_schema_state`): `missing` (no table) / `nogrant`
+  (no `SELECT`) / `empty` (no rows) / `ok`. Non-`ok` renders `dashboard_state_block`
+  guidance; the empty panel prints the `db:` string (writer name from
+  `app_state('dashboard_writer')`, password masked).
+* **`db_host`** parse/format is shared (`db_host_parse`/`db_host_format`) and
+  mirrors the engine's rule exactly, so the panel emits what the engine parses.
+* **Schema install/upgrade** lives in `fetchconfig-web-dbsetup.pl --upgrade` (run
+  as root): ledger `schema_migrations`, applies pending `*.sql` oldest-first via
+  Perl DBI (no `psql`), creates the writer role, and grants. `--upgrade` sets the
+  three history tables' owner to the **writer** (so it can run the cleanup
+  `DELETE`), while `schema_migrations` stays superuser-owned; the web login is
+  `SELECT`-only. The writer's `SELECT` grant is also required by the engine's
+  pre-9.5 DML.
+* The renamed **"General parameters"** editor tab has admin-only structured
+  `db:` fields; they round-trip via `parse_device_table` (kind `db`),
+  `reconstruct_records_from_form` (guarded by the `db_section` marker; `db_pass`
+  restores from `$SECRET_KEEP`), and `serialize_records`. `db_pass` is masked in
+  display and marked audit-secret.
+* **TODO (follow-up):** live-DB integration tests for the read layer, the
+  `--upgrade` runner, the cleanup delete, and the engine's `backup_current` upsert
+  (the sandbox has no PostgreSQL, so these paths are covered only by unit/stub
+  tests); and the DB-cleanup retention algorithm (keep-count aware, not purely
+  time-based).

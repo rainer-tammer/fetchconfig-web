@@ -3,12 +3,59 @@ fetchconfig-web -- Change Log
 
 Release history for fetchconfig-web, newest version first.
 
+2.11
+====
+
+Adds the optional Backup Dashboard, backed by history tables the fetchconfig
+engine (9.75) writes through its optional DB writer. With the dashboard off,
+nothing changes. Also adds a schema-version ledger and an --upgrade mode for the
+setup tool.
+
+Dashboard (ENABLE_DASHBOARD, default 0)
+---------------------------------------
+
+- Overview ("Backup health"): fleet KPIs, freshness bar, status donut, backup-
+  age histogram, 14-day trend and a By site panel -- all with a
+  Fresh/Stale/Failed/Never colour legend. Open to every user (site-limited users
+  see only their own sites); never filtered.
+- All devices (admin): Device / Site (code / description) / Model / Last backup
+  / Status / Size, with View (?dev=), a Device/Site/Status filter, sortable Last
+  backup (default) and Status, a pager and Export CSV. Devices with no DB row
+  yet show No data (vs Never = a row but no good backup).
+- Tools -> Cleanup dashboard (admin): delete orphaned statistics (device-ids no
+  longer in the device table), all-or-nothing, via a writer connection.
+- Backups page: a small SHA1 button per backup copies that version's integrity
+  checksum (from backup_versions), shown only when on file.
+- After login, users land on the Overview when the dashboard is enabled.
+- DB-only and best-effort: with the schema missing/empty the pages show setup
+  guidance (including the exact db: line, password masked) instead of failing.
+
+Database
+--------
+
+- schema_migrations ledger + fetchconfig-web-dbsetup.pl --upgrade (run as root):
+  applies every pending fetchconfig-web-dbupdate-*.sql and sets up the writer
+  role and grants -- all via Perl DBI, no psql dependency.
+- fetchconfig-web-dbupdate-2.11.sql: the three history tables (backup_current,
+  backup_runs, backup_versions) + indexes; 8.2-safe, idempotent. --upgrade makes
+  the writer own them (the web login stays SELECT-only); the ledger stays
+  superuser-owned.
+- Timestamps are a naive local wall-clock epoch (single box, one TZ).
+
+Other
+-----
+
+- db_pass is added to the secret-masking rules.
+- The editor's third tab is renamed "General parameters" and holds the admin-
+  only db: fields (round-tripped into the default:-level db: line).
+
 2.10
 ====
 
-Security-hardening release (no database change). Addresses an external source
-review: mandatory bcrypt, secure-by-default HTTPS, and a subprocess output cap,
-plus authorization and documentation hardening.
+Requires fetchconfig 9.74 (was 9.72). A security-hardening release (no database
+change) that also adds template-integrity awareness to the Templates page.
+Addresses an external source review: mandatory bcrypt, secure-by-default HTTPS,
+and a subprocess output cap, plus authorization and documentation hardening.
 
 Security
 --------
@@ -34,6 +81,32 @@ Security
   run HTTP-only, but that sends the reset token over cleartext -- use https://
   in production. (Reset tokens are already SHA-256-hashed at rest, single-use
   and TTL-bound, and are never derived from the Host header.) [F-03]
+- **Fixed: secrets could leak in the configuration compare view.**
+  render_unified_diff() masked each line after the diff marker (-/+/</ >) was
+  prepended, which moved the start of the line and defeated every ^-anchored
+  masking rule -- the Aruba CX indented key, both SNMP community forms, the
+  Hirschmann positional community, and the radius/tacacs key (incl. the Nexus
+  numeric type). It now masks the config content and re-attaches the marker, so
+  the compare view masks exactly what the normal config view does. (The side-by-
+  side view and the normal config view were never affected.)
+
+Templates
+---------
+
+- New "Orig" column on Tools -> Templates, classifying each file by its SHA-1
+  against the integrity.sha1 manifest fetchconfig ships (fetchconfig owns the
+  templates): Original (hash matches a shipped template), Edited (hash listed
+  but differs -- a shipped template modified locally, which will be overwritten
+  on the next fetchconfig update, shown as a warning), or Custom (no hash
+  available -- the admin's own template, including any template in a directory
+  that has no manifest, such as an additional template directory).
+- Shipped templates are protected from in-place changes. On an Original/Edited
+  row, Edit and Delete are disabled and Rename is replaced by a green Copy
+  button that creates an editable custom copy -- name pre-filled <name>-cust
+  (editable; .tmpl is always added), into a chosen configured template directory
+  or, when none are configured, the source template's own directory. An existing
+  name, or a shipped manifest name, is never overwritten. Custom templates keep
+  full edit/rename/delete as before.
 
 Hardening and documentation
 ---------------------------

@@ -519,7 +519,7 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v2.10</span>
+      <span class="pill">v2.11</span>
       <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
@@ -536,6 +536,7 @@
 <div class="nav-group"><a href="#10-testing">10. Testing</a></div>
 <div class="nav-group"><a href="#11-recipe-adding-a-new-feature-end-to-end">11. Recipe: adding a new feature end-to-end</a></div>
 <div class="nav-group"><a href="#12-conventions-and-gotchas">12. Conventions and gotchas</a></div>
+<div class="nav-group"><div class="nav-group-label">13. The fetchconfig interface (results and token contract)</div><a href="#131-execution-pipelines">13.1 Execution pipelines</a><a href="#132-two-regimes-and-the-per-mode-evaluation">13.2 Two regimes, and the per-mode evaluation</a><a href="#133-exact-token--format-contract">13.3 Exact token / format contract</a><a href="#134-backup-dashboard">13.4 Backup Dashboard</a></div>
     </nav>
   </aside>
 
@@ -543,10 +544,10 @@
 
     <div class="hero">
       <h1 class="hero-title">fetchconfig-web &mdash; Technical / Developer Documentation</h1>
-      <p class="lede"><strong>Audience:</strong> engineers extending or maintaining fetchconfig-web. <strong>Scope:</strong> architecture, request lifecycle, data structures, the PostgreSQL schema, the security model, and step-by-step recipes for adding functionality. <strong>Version:</strong> this document tracks fetchconfig-web 2.10 (requires fetchconfig 9.72+).</p>
+      <p class="lede"><strong>Audience:</strong> engineers extending or maintaining fetchconfig-web. <strong>Scope:</strong> architecture, request lifecycle, data structures, the PostgreSQL schema, the security model, and step-by-step recipes for adding functionality. <strong>Version:</strong> this document tracks fetchconfig-web 2.11 (requires fetchconfig 9.74+; the optional Backup Dashboard needs the engine&#x27;s DB writer, fetchconfig 9.75+).</p>
       
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">2.10</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">2.11</span><span class="label">version</span></div>
         <div class="hero-stat"><span class="num">Perl FCGI/CGI</span><span class="label">language</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
@@ -689,6 +690,90 @@ sub name { ... }</code></pre>
 <h2>8. Database (PostgreSQL)</h2>
 <p>The app owns a PostgreSQL schema created by <code>fetchconfig-web-dbsetup.pl</code>. Upgrades ship as <code>fetchconfig-web-dbupdate-&lt;ver&gt;.sql</code>. All access is via DBI with a fresh connection per request (no pooling); every query is parameterized.</p>
 <h3 id="81-tables">8.1 Tables</h3>
+<div class="callout note"><p><strong><code>DEVICE_TABLE</code> is not a database table.</strong> It is fetchconfig&#x27;s own on-disk <strong>text config file</strong> (the <code>device_table</code>), owned and written by the fetchconfig <strong>engine</strong> -- fetchconfig-web only reads it. It appears in the diagrams solely to anchor the <code>dev_id</code> / <code>device_id</code> / <code>site</code> values the database tables carry; every link to it is <strong>logical</strong> (dashed), never a database foreign key.</p></div>
+<p>The tables form three independent groups -- the schema-version ledger, the web UI tables, and the Backup Dashboard history tables -- documented in that order. In the ER diagrams <strong>solid</strong> lines are real foreign keys and <strong>dashed</strong> lines are logical links enforced in code. (Mermaid lays sibling entities out horizontally, so each group is its own narrower diagram.)</p>
+<h4 id="schema-version-ledger">Schema-version ledger</h4>
+<p>A single standalone table with <strong>no relationship to any other table</strong> (not to the web UI tables, not to the backup history). The <code>--upgrade</code> tool reads and writes it to decide which <code>dbupdate</code> scripts to apply.</p>
+<p><strong>schema_migrations</strong> -- applied-migration ledger (drives <code>--upgrade</code>).</p>
+<div class="table-wrap"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td>id</td><td>TEXT PK</td><td>dbupdate version, e.g. <code>2.11</code></td></tr><tr><td>applied_at</td><td>BIGINT</td><td>epoch when recorded</td></tr></tbody></table></div>
+<h4 id="web-ui-tables">Web UI tables</h4>
+<p>Accounts, sites and per-device data:</p>
+<pre class="mermaid">erDiagram
+    USERS            ||--o{ USER_SITES      : &quot;has (FK, ON DELETE CASCADE)&quot;
+    SITES            ||--o{ USER_SITES      : &quot;has (FK, ON DELETE RESTRICT)&quot;
+    USERS            ||..o{ PASSWORD_RESETS : &quot;username (logical, no FK)&quot;
+    DEVICE_TABLE     ||..o{ DEVICE_NOTES    : &quot;device_id (config, no FK)&quot;
+
+    USERS {
+        text username PK
+        text pass_hash
+        boolean edit_device_table
+        boolean admin_function
+        boolean download_full_report
+        boolean download_full_config
+        text email &quot;nullable&quot;
+    }
+    SITES {
+        integer id PK &quot;default_0_any_site&quot;
+        text code UK
+        text description
+    }
+    USER_SITES {
+        text username PK,FK
+        integer site_id PK,FK
+    }
+    PASSWORD_RESETS {
+        text token_hash PK &quot;SHA256_hash&quot;
+        text username &quot;target_account&quot;
+        timestamptz created
+        timestamptz expires
+        boolean used
+    }
+    DEVICE_NOTES {
+        integer note_id PK &quot;sequence&quot;
+        text device_id UK
+        text note
+        boolean keep
+        timestamptz created
+        timestamptz updated
+    }
+    DEVICE_TABLE {
+        text dev_id &quot;on_disk_config_file&quot;
+    }</pre>
+<p>Audit and operational tables -- standalone, but each row carries a <code>username</code>/<code>keyval</code> that logically references <code>users</code>:</p>
+<pre class="mermaid">erDiagram
+    USERS ||..o{ AUDIT_LOG      : &quot;username actor (no FK)&quot;
+    USERS ||..o{ APP_STATE      : &quot;username writer (no FK)&quot;
+    USERS ||..o{ LOGIN_ATTEMPTS : &quot;keyval user-rows (no FK)&quot;
+
+    USERS {
+        text username PK
+    }
+    AUDIT_LOG {
+        bigint id PK &quot;sequence&quot;
+        timestamptz ts
+        text username
+        text ip
+        text action
+        text object_type
+        text object_id
+        text field
+        text old_value
+        text new_value
+        text detail
+    }
+    APP_STATE {
+        text key PK
+        text value
+        text username
+        timestamptz ts
+    }
+    LOGIN_ATTEMPTS {
+        text kind PK &quot;ip_or_user&quot;
+        text keyval PK
+        integer failures
+        timestamptz last_fail
+    }</pre>
 <p><strong>users</strong> -- the account store.</p>
 <div class="table-wrap"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td>username</td><td>TEXT PK</td><td>login name</td></tr><tr><td>pass_hash</td><td>TEXT NOT NULL</td><td>bcrypt (or legacy) hash</td></tr><tr><td>edit_device_table</td><td>BOOLEAN</td><td>right: edit the device table</td></tr><tr><td>admin_function</td><td>BOOLEAN</td><td>right: admin (tools, users, audit)</td></tr><tr><td>download_full_report</td><td>BOOLEAN</td><td>right: unmasked report download</td></tr><tr><td>download_full_config</td><td>BOOLEAN</td><td>right: unmasked config download</td></tr><tr><td>email</td><td>TEXT</td><td>notification/reset address (nullable)</td></tr></tbody></table></div>
 <p><strong>sites</strong> -- the site codes used for device scoping.</p>
@@ -707,6 +792,53 @@ sub name { ... }</code></pre>
 <div class="table-wrap"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td>token_hash</td><td>TEXT PK</td><td>SHA-256 of the token (the token itself is never stored)</td></tr><tr><td>username</td><td>TEXT NOT NULL</td><td>target account</td></tr><tr><td>created / expires</td><td>TIMESTAMPTZ</td><td>TTL from <code>RESET_TOKEN_TTL</code></td></tr><tr><td>used</td><td>BOOLEAN</td><td>single-use flag</td></tr></tbody></table></div>
 <p><strong>device_notes</strong> -- per-device free-text notes.</p>
 <div class="table-wrap"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td>note_id</td><td>INTEGER PK (sequence)</td><td></td></tr><tr><td>device_id</td><td>TEXT, UNIQUE index</td><td>one note per device</td></tr><tr><td>note</td><td>TEXT</td><td></td></tr><tr><td>keep</td><td>BOOLEAN</td><td>&quot;pin&quot; so an orphaned-notes cleanup leaves it</td></tr><tr><td>created / updated</td><td>TIMESTAMPTZ</td><td></td></tr></tbody></table></div>
+<h4 id="backup-dashboard-history-tables-211">Backup Dashboard history tables (2.11)</h4>
+<p>Optional; created by <code>--upgrade</code>, written by the engine, read by the app. 8.2-safe; timestamps are a naive local wall-clock epoch (BIGINT). The web login has <code>SELECT</code> only on these three tables; the <strong>writer</strong> role owns them. They have <strong>no foreign keys</strong> -- each keys on <code>dev_id</code> from the config device table.</p>
+<pre class="mermaid">erDiagram
+    DEVICE_TABLE ||..o{ BACKUP_CURRENT  : &quot;dev_id (config, no FK)&quot;
+    DEVICE_TABLE ||..o{ BACKUP_RUNS     : &quot;dev_id (config, no FK)&quot;
+    DEVICE_TABLE ||..o{ BACKUP_VERSIONS : &quot;dev_id (config, no FK)&quot;
+
+    BACKUP_CURRENT {
+        text dev_id PK
+        text repository
+        bigint run_end
+        text state
+        text changed
+        integer duration_sec
+        bigint size_bytes
+        text fail_reason
+        bigint last_good_at &quot;null_equals_never&quot;
+        bigint last_good_size
+    }
+    BACKUP_RUNS {
+        text dev_id UK &quot;unique_dev_id_run_end&quot;
+        bigint run_end UK
+        text state
+        text changed
+        integer duration_sec
+        bigint size_bytes
+        text fail_reason
+        text repository
+    }
+    BACKUP_VERSIONS {
+        text dev_id UK &quot;unique_dev_id_file_timestamp&quot;
+        bigint file_timestamp UK
+        text path
+        bigint size_bytes
+        text sha1
+        boolean expired
+        bigint expired_at
+    }
+    DEVICE_TABLE {
+        text dev_id &quot;on_disk_config_file&quot;
+    }</pre>
+<p><strong>backup_current</strong> -- one row per device (Overview + All-devices table).</p>
+<div class="table-wrap"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td>dev_id</td><td>TEXT PK</td><td>device id</td></tr><tr><td>repository</td><td>TEXT</td><td>repo path</td></tr><tr><td>run_end</td><td>BIGINT</td><td>last run end</td></tr><tr><td>state</td><td>TEXT</td><td>last run state (<code>success</code> / <code>failed</code> / ...)</td></tr><tr><td>changed</td><td>TEXT</td><td>whether the config changed</td></tr><tr><td>duration_sec</td><td>INTEGER</td><td>last run duration</td></tr><tr><td>size_bytes</td><td>BIGINT</td><td>last config size</td></tr><tr><td>fail_reason</td><td>TEXT</td><td>on failure</td></tr><tr><td>last_good_at</td><td>BIGINT</td><td>last successful backup (NULL = never)</td></tr><tr><td>last_good_size</td><td>BIGINT</td><td>size of the last good backup</td></tr></tbody></table></div>
+<p><strong>backup_runs</strong> -- one row per run (dense; feeds the 14-day trend). Indexed on <code>run_end</code>; unique on <code>(dev_id, run_end)</code>.</p>
+<div class="table-wrap"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td>dev_id</td><td>TEXT NOT NULL</td><td>device id</td></tr><tr><td>run_end</td><td>BIGINT NOT NULL</td><td>run end</td></tr><tr><td>state</td><td>TEXT</td><td><code>success</code> / <code>failed</code></td></tr><tr><td>changed</td><td>TEXT</td><td>whether the config changed</td></tr><tr><td>duration_sec</td><td>INTEGER</td><td>run duration</td></tr><tr><td>size_bytes</td><td>BIGINT</td><td>config size</td></tr><tr><td>fail_reason</td><td>TEXT</td><td>on failure</td></tr><tr><td>repository</td><td>TEXT</td><td>repo path</td></tr></tbody></table></div>
+<p><strong>backup_versions</strong> -- one row per saved backup (sparse change history). Unique on <code>(dev_id, file_timestamp)</code>; partial index on <code>(dev_id) WHERE expired = FALSE</code>.</p>
+<div class="table-wrap"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody><tr><td>dev_id</td><td>TEXT NOT NULL</td><td>device id</td></tr><tr><td>file_timestamp</td><td>BIGINT NOT NULL</td><td>backup file timestamp (join key)</td></tr><tr><td>path</td><td>TEXT</td><td>backup file path (joins the Backups-page SHA1 button)</td></tr><tr><td>size_bytes</td><td>BIGINT</td><td>file size</td></tr><tr><td>sha1</td><td>TEXT NOT NULL</td><td>integrity checksum</td></tr><tr><td>expired</td><td>BOOLEAN NOT NULL DEFAULT FALSE</td><td>flagged by a future cleanup</td></tr><tr><td>expired_at</td><td>BIGINT</td><td>when expired</td></tr></tbody></table></div>
 <h3 id="82-connection-and-grants">8.2 Connection and grants</h3>
 <p><code>db_connect()</code> opens a DBI handle (<code>RaiseError=0</code>, <code>AutoCommit=1</code>) and returns <code>undef</code> on failure (callers show a &quot;server misconfiguration&quot; message rather than leaking details). The setup script grants the web user the minimal privileges (no DELETE on <code>app_state</code>, etc.). There is no ORM; queries are inline DBI.</p>
 <h3 id="83-schema-changes">8.3 Schema changes</h3>
@@ -759,6 +891,40 @@ sub name { ... }</code></pre>
 <div class="section-kicker">12</div>
 <h2>12. Conventions and gotchas</h2>
 <ul><li><strong>Reset request state</strong>: any new request-scoped global/cache must be cleared in <code>reset_request_state()</code> (FastCGI leak risk).</li><li><strong>Escape all output</strong>: use <code>esc()</code> (HTML-escape) on every interpolated value; never emit user/DB data raw.</li><li><strong>Parameterize all SQL</strong>; never interpolate a value, and interpolate a column name only from a fixed allow-list.</li><li><strong>Fail closed</strong>: on RNG/DB/validation failure, deny rather than degrade.</li><li><strong>Function headers</strong>: match the 80-<code>#</code> block format; keep lines &lt;= 80 cols in code where practical (inline HTML <code>print qq{}</code> is exempt).</li><li><strong>Masking before highlighting</strong>: never pass unmasked config to the UI.</li><li><strong>The driver stays at EOF</strong>; do not relocate the <code>handle_request(CGI-&gt;new)</code> calls.</li><li><strong>One file</strong>: resist splitting unless you also rework the deployment and test harness -- the single-file property is intentional (simple deploy).</li></ul>
+</section>
+<section id="13-the-fetchconfig-interface-results-and-token-contract">
+<div class="section-kicker">13</div>
+<h2>13. The fetchconfig interface (results and token contract)</h2>
+<p>fetchconfig-web drives the <code>fetchconfig.pl</code> engine as a black box over three channels: the process <strong>exit code</strong>, its <strong>text output</strong> (stdout / stderr), and the <strong>files it writes</strong> (the per-device <code>.status</code> file, the saved-config filenames, and <code>Constants.pm</code>). Everything the web app keys on is catalogued here so the engine side can see what must stay stable.</p>
+<div class="callout note"><p><strong>Any change to a token, record format, status-file key, filename format or exit-code meaning listed below is a breaking change for fetchconfig-web.</strong> Each item names its consuming function and whether a break is <em>functional</em> (a feature misbehaves) or <em>cosmetic</em> (display only; a fallback still works).</p></div>
+<h3 id="131-execution-pipelines">13.1 Execution pipelines</h3>
+<ul><li><code>run_fetchconfig(@args)</code> -- <code>open3</code>, <strong>stdout and stderr kept separate</strong>; returns <code>($out, $err, $status, $fork_err)</code>. Used for every parsed mode (<code>-l</code>, <code>-g</code>, <code>-m</code>, <code>-s</code>, <code>-t</code>, <code>-o</code>, <code>-e</code>, <code>--template-syntax</code>).</li><li><code>run_command_capture(@cmd)</code> -- <strong>stdout and stderr merged</strong>, with keepalive and abort handling; returns <code>($out, $status, $err, $aborted)</code>. Used for the live Backup Now run and the destructive <code>-D</code> scans (the full transcript is the point).</li><li><code>run_privileged(@cmd)</code> -- <code>open3</code>, separate, binary-safe; used for the sudo debug-log helper (reads fetchconfig&#x27;s <code>.debug</code> files), not for <code>fetchconfig.pl</code> itself.</li></ul>
+<p>Reliability rules in every pipeline: the exit code is trusted <strong>only if <code>waitpid</code> reaped our own PID</strong> (guards a stale <code>$?</code> under concurrent scans); <code>EINTR</code> reads are retried, not treated as EOF; total captured output is bounded by <code>CAPTURE_MAX_BYTES</code> (over-limit -&gt; kill child, return an error, discard the truncated buffer).</p>
+<h3 id="132-two-regimes-and-the-per-mode-evaluation">13.2 Two regimes, and the per-mode evaluation</h3>
+<p>There is a hard asymmetry worth stating first: the <strong>main backup run always exits 0</strong>, so its exit code is meaningless -- the <code>.status</code> file is the authoritative success signal and the log text is only a fallback. Every <strong>auxiliary mode</strong> instead uses the <strong>exit code as the primary signal</strong>, with text as a cross-check or a benign-exception handler.</p>
+<div class="table-wrap"><table><thead><tr><th>Invocation</th><th>Primary signal</th><th>Meaning / handling</th><th>Consuming function</th></tr></thead><tbody><tr><td><code>-devices=&lt;tmp&gt;</code> (full run, Backup Now)</td><td><code>.status</code> <code>backup_state</code> (exit code ignored)</td><td><code>failed</code> -&gt; failure; else success; a hard error or an abort -&gt; failure; if no <code>.status</code>, scrape the log</td><td><code>run_backup_now</code>, <code>backup_run_failed</code></td></tr><tr><td><code>-l &lt;dev&gt;</code></td><td>exit code + stdout</td><td>0 -&gt; parse rows; non-zero -&gt; benign if the &quot;no backed up config files found&quot; text is present, else error</td><td><code>list_backups</code>, <code>device_backup_status</code></td></tr><tr><td><code>-g &lt;dev&gt; -n &lt;idx&gt;</code></td><td>exit code + stdout</td><td>0 -&gt; return raw bytes; non-zero -&gt; error (with stderr)</td><td><code>get_backup_content</code></td></tr><tr><td><code>-g &lt;dev&gt; -n N -m M</code></td><td>exit code (0 / 1 / greater) + stdout</td><td>0 = identical, 1 = differs, greater than 1 = error</td><td><code>compare_backups</code></td></tr><tr><td><code>-s &lt;dev&gt;</code></td><td>exit code (0 / 1 / 2), text cross-check</td><td>0 = consistent, 1 or 2 = issue, else text markers, else error</td><td><code>device_suffix_status</code></td></tr><tr><td><code>-o</code>, <code>-e</code></td><td>exit code</td><td>0 = clean, 1 = items found, greater than 1 = error</td><td><code>run_scan_check</code> + tool handlers</td></tr><tr><td><code>-Z</code></td><td>stdout summary (exit code is not an error flag)</td><td>1 = zero-byte backups found, 0 = none</td><td><code>run_empty_bk_check</code></td></tr><tr><td><code>-o -D</code>, <code>-e -D</code>, <code>-Z -D</code></td><td>merged transcript + exit code</td><td>shown as the operation log</td><td><code>run_scan_delete</code></td></tr><tr><td><code>-t</code></td><td>exit code (0 / 1 / 2) + stdout</td><td>0 = at least one template, 1 = dirs ok but none, 2 = a needed dir missing</td><td><code>run_templates_t</code></td></tr><tr><td><code>--template-syntax &lt;path&gt;</code></td><td>exit code + stdout (stderr ignored)</td><td>non-zero -&gt; no scheme (undef); 0 -&gt; scheme name from stdout</td><td>template scheme detection</td></tr></tbody></table></div>
+<h3 id="133-exact-token--format-contract">13.3 Exact token / format contract</h3>
+<p><strong>A. Per-device <code>.status</code> file</strong> (the authoritative backup result; parsed by <code>read_status_file</code>, <code>read_all_status</code>, and the Backup-Now inline parse). Each field is matched as <code>^\s<em>&lt;key&gt;\s</em>=\s*&lt;value&gt;</code>:</p>
+<ul><li><code>backup_start_date</code>, <code>backup_start_time</code>, <code>backup_end_date</code>, <code>backup_end_time</code> -- value <code>\S+</code> (displayed).</li><li><code>backup_duration_sec</code> -- value <code>\d+</code> (displayed; also the live-status spinner).</li><li><code>backup_state</code> -- value <code>\S+</code>. <strong>Logic depends on the exact value <code>failed</code></strong> (-&gt; failure in <code>backup_run_failed</code>); <code>success</code>, <code>unchanged</code>, <code>initial</code> and any other value are treated as success. <em>Functional.</em></li><li><code>backup_changed</code> -- value <code>\S+</code>. Expected <code>unchanged</code> / <code>changed</code> / <code>initial</code> / <code>forced</code>; used only to build the <code>ch-&lt;value&gt;</code> display class, not for logic. <em>Cosmetic.</em></li></ul>
+<p>Renaming any key, or the <code>failed</code> state token, is a <strong>functional</strong> break (success/failure misdetection and blank last-state display).</p>
+<p><strong>B. Saved-config filename format</strong> (<code>parse_backup_timestamp</code>, suffix helpers). The basename is expected as <code>&lt;dev_id&gt;.&lt;tag&gt;.YYYYMMDD.HHMMSS&lt;TZ&gt;[.suffix]</code>:</p>
+<ul><li>timestamp: <code>\.(\d{4})(\d{2})(\d{2})\.(\d{2})(\d{2})(\d{2})([A-Za-z]*)</code> -- the trailing timezone is assumed alphabetic.</li><li>optional appended suffix: <code>\.\d{8}\.\d{6}[A-Za-z]<em>(\.[^.].</em>)$</code>.</li></ul>
+<p>Changing the timestamp layout blanks the date/time columns and confuses the suffix tool. <em>Functional (for the dated views), otherwise cosmetic.</em></p>
+<p><strong>C. Exit-code meanings</strong> (summarised from 13.2; each is a contract): <code>-l</code> non-zero = &quot;no backups / error&quot;; <code>-g -n -m</code> uses the diff convention (0 / 1 / greater-than-1); <code>-s</code> uses 0 / 1 / 2; <code>-o</code> and <code>-e</code> use 0 / 1 / greater-than-1; <code>-Z</code> uses 1 = &quot;found&quot; (not an error); <code>-t</code> uses 0 / 1 / 2. The <strong>full backup run must keep exiting 0</strong> (or, if that ever changes, the web app still relies on <code>.status</code>, not the code). Changing any of these numeric meanings is <strong>functional</strong> for that feature.</p>
+<p><strong>D. Structured stdout record formats:</strong></p>
+<ul><li><code>-l</code> -- tab-separated <code>index&lt;TAB&gt;size&lt;TAB&gt;path</code>, newest first; <code>index</code> is digits. Rows not matching <code>^\d+\t</code> are ignored. (<code>list_backups</code>, <code>device_backup_status</code>.) <em>Functional.</em></li><li><code>-t</code> -- tab-separated <code>ID&lt;TAB&gt;section&lt;TAB&gt;full_path&lt;TAB&gt;model&lt;TAB&gt;dir</code> (at least 5 fields); <code>section</code> must be exactly <code>default</code> or <code>device</code>; the trailing <code># found ...</code> summary line (<code>^\s<em>#</code>) is skipped. (<code>run_templates_t</code>.) </em>Functional.*</li><li><code>-g</code> -- raw config bytes, passed through unmodified (no format dependency).</li><li><code>-g -n -m</code> diff text is styled by leading <code>+++</code> / <code>---</code> / <code>@@</code> / <code>***</code> markers only. <em>Cosmetic.</em></li></ul>
+<p><strong>E. Literal text strings matched in stdout / stderr</strong> (case-insensitive):</p>
+<ul><li><code>no backed up config files found</code> -- <code>-l</code>: the benign &quot;never backed up&quot; state, distinguished from a real error. (<code>list_backups</code>, <code>device_backup_status</code>.) <em>Functional</em> (rename -&gt; a new device reads as an error, not &quot;no backups yet&quot;).</li><li><code>there is no latest config</code> -- the benign initial-backup line, <strong>excluded</strong> from error scraping. (<code>backup_run_failed</code>, fallback path.) <em>Cosmetic/fallback</em> (only matters when no <code>.status</code> was written).</li><li><code>\berror:</code> -- generic failure marker scraped from the Backup-Now log, <strong>only when <code>.status</code> is unavailable</strong>. (<code>backup_run_failed</code>.) <em>Cosmetic/fallback.</em></li><li><code>backup_state\s<em>=\s</em>failed</code> in free log text -- the same fallback. <em>Fallback.</em></li><li><code>-s</code> text cross-checks, used <strong>only if the exit code is missing/unexpected</strong>: <code>inconsistent backup suffixes</code>, <code>does not match the backup file suffixes</code>, <code>configured suffix\s+matches the backup file suffixes</code>. (<code>device_suffix_status</code>.) <em>Cosmetic/fallback</em> (exit code is primary).</li><li><code>debug:\s<em>registering model:</code> (with a <code>&lt;prog&gt;: debug: </code> prefix) -- folded into a summary for display. (<code>collapse_model_registration</code>.) </em>Cosmetic.*</li><li><code>^fetchconfig\.pl:</code> -- a stray diagnostic line skipped during <code>--template-syntax</code> scheme parsing. <em>Cosmetic/defensive.</em></li></ul>
+<p><strong>F. Version module</strong> (<code>fetchconfig_installed_version</code>; a <strong>file read</strong>, not a run): <code>FETCHCONFIG_PATH/fetchconfig/Constants.pm</code>, package <code>fetchconfig::Constants</code>, function <code>version()</code> returning a dotted string. Compared against the web app&#x27;s <code>MIN_FETCHCONFIG_VERSION</code> (currently <strong>9.74</strong>) by <code>version_cmp</code> (leading integer of each dotted component). Moving or renaming the module, package or <code>version()</code> yields the &quot;version could not be determined&quot; banner. <em>Functional for the warning (non-fatal to the app).</em></p>
+<p><strong>G. CLI flags / options the web app passes</strong> (the invocation contract -- each must keep its name and argument shape): <code>-devices=&lt;file&gt;</code> (always), <code>-l &lt;dev&gt;</code>, <code>-g &lt;dev&gt;</code>, <code>-n &lt;idx&gt;</code>, <code>-m &lt;idx&gt;</code>, <code>-s &lt;dev&gt;</code>, <code>-t</code>, <code>-o</code>, <code>-e</code>, <code>-Z</code>, <code>-D</code> (with a scan flag, destructive), <code>--template-syntax &lt;path&gt;</code>, and the bare run (<code>-devices=&lt;tmp&gt;</code> only) for Backup Now. Removing or renaming any flag breaks the corresponding feature. <em>Functional.</em></p>
+<div class="callout note"><p><strong>Not a contract (intentionally tolerant):</strong> the raw <code>-g</code> config bytes and the config-syntax highlighters render device-vendor content, not fetchconfig output, so they depend on device formats rather than the engine. The main run&#x27;s exit code is explicitly <em>not</em> relied upon. Anything marked <em>cosmetic</em> above degrades gracefully (a display folds differently, or a fallback keyed on <code>.status</code> / the exit code still decides correctly).</p></div>
+<h3 id="134-backup-dashboard">13.4 Backup Dashboard</h3>
+<p>Optional, <code>ENABLE_DASHBOARD</code>-gated, DB-only. The dashboard reads three history tables the fetchconfig engine (9.75+) writes via its <code>db:</code> option: <code>backup_current</code> (one row/device, Overview + table), <code>backup_runs</code> (one row/run, the trend), <code>backup_versions</code> (one row/saved backup, carries the per-version <code>sha1</code>). fetchconfig-web only reads these (<code>SELECT</code>); the engine writes. The lone exception is the admin cleanup action (below), which deletes via a separate connection <em>as the writer role</em>.</p>
+<p><strong>Access.</strong> The Overview (<code>show_dashboard_overview</code>; <code>dashboard_overview_allowed</code> = <code>ENABLE_DASHBOARD</code>) is open to every authenticated user: a site-limited user sees only their own sites (tiles, trend and By-site scoped via <code>read_device_ids($user)</code>), an unrestricted user the whole fleet. <strong>All devices</strong> and <strong>Cleanup dashboard</strong> are admin-only (<code>dashboard_allowed</code>). After login, users land on the Overview when the dashboard is enabled (<code>do_login</code>).</p>
+<p><strong>Config join.</strong> <code>site</code>, <code>model</code> and <code>template</code> are config-only (absent from the backup tables), so the device views join <code>backup_current</code> to the parsed device table by <code>dev_id</code> (<code>dashboard_devices_rows</code>, <code>dashboard_overview_data</code>): site code -&gt; description via <code>db_all_sites</code>; generic devices shown as <code>generic · &lt;template&gt;</code>; Site shown as <code>code / description</code> and the client-side filter keyed on the site code. The All-devices table and its CSV (<code>dashboard_devices_csv</code>) render the full visible set once and filter/sort/paginate client-side (sort by Last backup (default, newest first) or Status, over the whole set). A device with no <code>backup_current</code> row shows <strong>No data</strong>, distinct from <strong>Never</strong> (row, no good backup).</p>
+<p><strong>Cleanup</strong> (<code>show_dashboard_cleanup</code> / <code>do_dashboard_cleanup_delete</code>, in <code>%STATE_CHANGING</code>): <code>dashboard_orphans</code> lists dev-ids present in the three tables but absent from the device table; the delete is all-or-nothing in one transaction via <code>db_connect_as_writer</code> (credentials from the device-table <code>db:</code> record, so the web login stays <code>SELECT</code>-only), and is audit-logged.</p>
+<p><strong>Backups-page SHA1.</strong> <code>show_backup_list</code> appends a per-row <strong>SHA1</strong> button when <code>backup_sha1_map</code> (keyed on <code>backup_versions.path</code>) has a hash for that backup; <code>sha1_copy_script</code> copies it. Best-effort -- no button when the history schema is absent. It is an integrity checksum, not a cryptographic signature.</p>
+<ul><li><strong>Timestamps</strong> are a <em>naive local wall-clock epoch</em> -- the engine encodes its local time with <code>timegm(local)</code>, so the web renders with <code>gmtime</code> (<code>dash_fmt_ts</code>) and computes age against <code>dash_naive_now()</code>. No timezone conversion anywhere. Single box / one TZ makes this correct and simple.</li><li><strong>State detection</strong> (<code>dashboard_schema_state</code>): <code>missing</code> (no table) / <code>nogrant</code> (no <code>SELECT</code>) / <code>empty</code> (no rows) / <code>ok</code>. Non-<code>ok</code> renders <code>dashboard_state_block</code> guidance; the empty panel prints the <code>db:</code> string (writer name from <code>app_state(&#x27;dashboard_writer&#x27;)</code>, password masked).</li><li><strong><code>db_host</code></strong> parse/format is shared (<code>db_host_parse</code>/<code>db_host_format</code>) and mirrors the engine&#x27;s rule exactly, so the panel emits what the engine parses.</li><li><strong>Schema install/upgrade</strong> lives in <code>fetchconfig-web-dbsetup.pl --upgrade</code> (run as root): ledger <code>schema_migrations</code>, applies pending <code>*.sql</code> oldest-first via Perl DBI (no <code>psql</code>), creates the writer role, and grants. <code>--upgrade</code> sets the three history tables&#x27; owner to the <strong>writer</strong> (so it can run the cleanup <code>DELETE</code>), while <code>schema_migrations</code> stays superuser-owned; the web login is <code>SELECT</code>-only. The writer&#x27;s <code>SELECT</code> grant is also required by the engine&#x27;s pre-9.5 DML.</li><li>The renamed <strong>&quot;General parameters&quot;</strong> editor tab has admin-only structured <code>db:</code> fields; they round-trip via <code>parse_device_table</code> (kind <code>db</code>), <code>reconstruct_records_from_form</code> (guarded by the <code>db_section</code> marker; <code>db_pass</code> restores from <code>$SECRET_KEEP</code>), and <code>serialize_records</code>. <code>db_pass</code> is masked in display and marked audit-secret.</li><li><strong>TODO (follow-up):</strong> live-DB integration tests for the read layer, the <code>--upgrade</code> runner, the cleanup delete, and the engine&#x27;s <code>backup_current</code> upsert (the sandbox has no PostgreSQL, so these paths are covered only by unit/stub tests); and the DB-cleanup retention algorithm (keep-count aware, not purely time-based).</li></ul>
 </section>
 
     </div>

@@ -7,9 +7,9 @@ title bar and logo on every page, and a Devices / Status / User / Help
 menu (plus a Setup item for accounts with the edit or admin right) in the
 title bar's nav row:
 
-> **Requires fetchconfig 9.72 or newer.** fetchconfig-web reads the installed
+> **Requires fetchconfig 9.74 or newer.** fetchconfig-web reads the installed
 > version from `<FETCHCONFIG_PATH>/fetchconfig/Constants.pm` and shows a
-> warning banner (on every page, after login) if it is older than 9.72 or
+> warning banner (on every page, after login) if it is older than 9.74 or
 > cannot be determined. The minimum is set by the `MIN_FETCHCONFIG_VERSION`
 > constant in `fetchconfig-web.cgi`.
 
@@ -99,6 +99,7 @@ PostgreSQL database; no `htpasswd` binary or password file is used.
 **Part 3 -- Using fetchconfig-web**
 - [Devices and backups](#devices-and-backups)
 - [Viewing and comparing backups](#viewing-and-comparing-backups)
+- [Backup Dashboard](#backup-dashboard)
 - [Setup devices and the device-table editor](#setup-devices-and-the-device-table-editor)
 - [Tools](#tools-admins-only)
 - [User management](#user-management-via-the-web-ui)
@@ -209,7 +210,7 @@ each of these in turn.
 For an experienced operator, the shortest path to a running instance:
 
 1. **Install the prerequisites** -- Perl with DBI/DBD::Pg, CGI and
-   Algorithm::Diff; PostgreSQL; and fetchconfig 9.72+ (see
+   Algorithm::Diff; PostgreSQL; and fetchconfig 9.74+ (see
    [Requirements](#requirements)).
 2. **Create the user database** -- run `perl fetchconfig-web-dbsetup.pl`
    (see [The user database](#the-user-database)).
@@ -365,10 +366,11 @@ HTTPS_ENABLED           = 1
 TRUST_FORWARDED_PROTO   = 0
 REQUIRE_BCRYPT          = 1
 SHOW_RENDER_TIME        = 0
+ENABLE_DASHBOARD        = 0
 GENERIC_SYNTAX          = auto
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 #CRON_USER              = fetchconfig
-APP_VERSION             = 2.10
+APP_VERSION             = 2.11
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 
@@ -430,6 +432,16 @@ Format and loading:
   template-list pages show their "... load time" line, and the device-table
   editor shows its render time in gray at the bottom-right. A diagnostic aid;
   off by default, so none of these appear unless enabled.
+- **`ENABLE_DASHBOARD`** (`0`|`1`, default `0`): show the **Backup Dashboard**
+  (see [Backup Dashboard](#backup-dashboard) under Part 3). The dashboard reads the
+  backup-history tables (`backup_current`, `backup_runs`, `backup_versions`) written
+  by the fetchconfig engine's optional DB writer (**fetchconfig 9.75+**), so it
+  needs: (1) the history schema created -- run `fetchconfig-web-dbsetup.pl
+  --upgrade`; and (2) the engine's `db:` option set on the `device_table`
+  `default:` line. With `ENABLE_DASHBOARD = 1` but the schema missing, empty, or
+  the web DB user lacking `SELECT`, the dashboard shows guidance instead of data
+  (including, while the tables are empty, the exact `db:` string to paste into the
+  engine). Off by default, so nothing changes for installs that don't use it.
 - **`FETCHCONFIG_PATH` and `FETCHCONFIG_BIN`** together locate the
   fetchconfig executable: it is run as `<FETCHCONFIG_PATH>/<FETCHCONFIG_BIN>`
   (e.g. `/usr/local/fetchconfig/fetchconfig.pl`). `FETCHCONFIG_PATH` is also
@@ -897,7 +909,10 @@ Each row of a device's backup list shows, in order: a compare checkbox,
 the backup **index** (`#`), the **date**, the **time**, the **size**, and
 the full **path**. The date and time are parsed out of the backup file's
 own name rather than from its filesystem mtime, so they reflect when
-`fetchconfig.pl` actually captured that backup.
+`fetchconfig.pl` actually captured that backup. When the Backup Dashboard
+history holds an integrity checksum for a backup, a small **SHA1** button is
+shown next to its path; clicking it copies the checksum (a change/corruption
+check, not a cryptographic signature).
 
 fetchconfig names each saved config in the repository as
 `<dev_id>.<tag>.YYYYMMDD.HHMMSS<TZ>`, e.g.
@@ -1063,6 +1078,41 @@ operation is handled by the CGI behind the fetchconfig-web login:
 Only files named `report-*.html` are listed or touched; the directory is
 expected to be group-writable with the set-group-id bit so fetchconfig and the
 web user share it.
+
+### Backup Dashboard
+
+Optional; shown only when `ENABLE_DASHBOARD = 1`. It reads backup history the
+fetchconfig engine (9.75+) writes to the database, so it is read-only and does not
+touch the device backups themselves. For how to enable it, see the Backup
+Dashboard section of INSTALL.md.
+
+The **Dashboard** menu has two entries:
+
+* **Overview** ("Backup health") -- a fleet health page: tiles (total / fresh /
+  stale / failed / never), a freshness bar, a status donut, a backup-age
+  histogram, a 14-day success-rate trend, and a **By site** breakdown (per-site
+  success-rate bars, labelled `code / description`). Every logged-in user may open
+  it; a site-limited user sees only their own sites, an administrator the whole
+  fleet. It is a read-only summary and is not interactively filtered. When the
+  dashboard is enabled, users land here after login.
+* **All devices** (administrators only) -- a table of every device: **Device**,
+  **Site** (`code / description`), **Model** (the device type; generic devices show
+  `generic · <template>`), **Last backup**, **Status**, **Size**, and a **View**
+  button to that device's backups. Filter by device, site (by code) or status,
+  clear the filter, choose rows per page, and sort by **Last backup** (newest
+  first by default) or **Status** across the whole set. **Export CSV** downloads
+  the current data. A device in the table that has no history row yet shows
+  **No data** (distinct from **Never**, which has a row but no successful backup).
+
+**Tools -> Cleanup dashboard** (administrators only) lists *orphaned* statistics --
+history for device-ids that are no longer in the device table (e.g. renamed or
+removed devices) -- and offers a single all-or-nothing **Delete orphaned
+statistics** (with a confirmation). The device backups are never touched; the
+action is recorded in the audit log.
+
+On the per-device **Backups** page, each backup whose integrity checksum is on
+file shows a small **SHA1** button that copies the checksum (a change/corruption
+check, not a cryptographic signature).
 
 ### Setup devices and the device-table editor
 
@@ -1987,6 +2037,34 @@ package's `js/` and `fonts/` directories. If the parser, the renderer, or the
 font is missing -- or the template does not parse -- a short note is shown
 instead of a diagram (never a stale one).
 
+The **Orig** column classifies each template by its SHA-1 against the manifest
+fetchconfig ships. **fetchconfig owns the templates** and delivers an
+`integrity.sha1` manifest (a SHA-1 per shipped `*.tmpl`, computed over
+LF-normalised content) in the template directory; fetchconfig-web only *reads* it
+and never writes it. Each row is one of:
+
+- **Original** -- the hash is listed and matches: a pristine shipped template.
+- **Edited** -- the hash is listed but differs: a shipped template modified
+  locally. **It will be overwritten on the next fetchconfig update**, so it is
+  shown as a warning; copy it (below) to preserve your changes.
+- **Custom** -- no hash is available: either the name is not in the manifest, or
+  the directory has no `integrity.sha1` at all (for example an additional
+  template directory you set up). These are your own templates.
+
+(A row shows **&mdash;** only when the file isn't a plain readable template, e.g.
+a symlink or a binary, which the viewer refuses anyway.)
+
+Because a shipped template is replaced on every fetchconfig update, Original and
+Edited rows are protected from in-place changes: **Edit** and **Delete** are
+disabled and **Rename** is replaced by a green **Copy** button
+(`?action=copy_template_form`). Copy creates an editable *custom* template -- the
+target name is pre-filled `<name>-cust` (editable; the `.tmpl` extension is always
+added) and written into a chosen configured template directory, or the source
+template's own directory when none are configured. An existing name, or a shipped
+manifest name, is never overwritten; the new file then shows as **Custom** and has
+the full Edit/Rename/Delete actions. Custom templates are unaffected and keep
+those actions as before.
+
 #### Template editor
 
 Each row in the template list also has an **Edit** link
@@ -2386,11 +2464,12 @@ Notes on specific paths:
 
 ### Supported hash formats
 
-New passwords are written as **bcrypt** (`$2b$`) when the optional
-`Crypt::Bcrypt` module is installed -- `password_hash()` prefers it, at
-`BCRYPT_COST` (12). Without that module the app falls back to `$apr1$`
-(Apache MD5), which is why `Crypt::Bcrypt` is worth installing even though it is
-nominally optional (see the module table under *Requirements*).
+New passwords are written as **bcrypt** (`$2b$`) at `BCRYPT_COST` (12). With
+`REQUIRE_BCRYPT=1` (the default) `Crypt::Bcrypt` is **mandatory**: if it cannot be
+loaded, the login screen says so and **login is disabled**, rather than writing a
+weaker hash. Setting `REQUIRE_BCRYPT=0` re-enables the legacy `$apr1$` (Apache
+MD5) fallback for a stack without the module (see `REQUIRE_BCRYPT` under
+*Configuration* and the module table under *Requirements*).
 
 Existing `$apr1$` hashes are **upgraded transparently**: when a user with a
 legacy hash logs in successfully, the password is re-hashed to bcrypt and stored,
@@ -2400,7 +2479,7 @@ by `verify_password()`, which accepts:
 | Format               | Example prefix | Supported |
 |-----------------------|-----------------|-----------|
 | bcrypt                | `$2b$` (also `$2a$`/`$2y$`) | Yes -- **what the app writes** when `Crypt::Bcrypt` is present, at cost 12 |
-| Apache MD5 (apr1)     | `$apr1$...`      | Yes (pure-Perl, verified against `openssl passwd -apr1`) -- the fallback when `Crypt::Bcrypt` is absent, and upgraded to bcrypt on next login |
+| Apache MD5 (apr1)     | `$apr1$...`      | Yes (pure-Perl, verified against `openssl passwd -apr1`) -- the fallback only when `REQUIRE_BCRYPT=0` and `Crypt::Bcrypt` is absent, and upgraded to bcrypt on next login |
 | glibc MD5 crypt       | `$1$...`         | Yes (pure-Perl, same algorithm as apr1) |
 | glibc SHA-256/512     | `$5$...` / `$6$...` | Only if the *web server's* system `crypt()` supports it (true on most Linux; not guaranteed on AIX) |
 | Traditional DES crypt | 2-char salt      | Yes, via system `crypt()` |
@@ -2418,21 +2497,27 @@ below are grouped by concern.
 - Passwords are verified with a constant-time `secure_compare()` in
   `verify_password()` (not Perl's `eq`), so response timing does not leak how
   many leading hash characters matched. New hashes are **bcrypt** (`$2b$`, cost
-  12) when `Crypt::Bcrypt` is installed, falling back to `$apr1$` otherwise;
-  legacy `$apr1$` hashes are re-hashed to bcrypt on the owner's next successful
-  login. Also accepted on read: `$1$`, `$5$`/`$6$` and traditional DES `crypt`.
+  12); with `REQUIRE_BCRYPT=1` (the default) a missing `Crypt::Bcrypt` disables
+  login rather than falling back, while `REQUIRE_BCRYPT=0` allows the `$apr1$`
+  fallback. Legacy `$apr1$` hashes are re-hashed to bcrypt on the owner's next
+  successful login. Also accepted on read: `$1$`, `$5$`/`$6$` and traditional DES `crypt`.
   The unsalted `{SHA}` format is rejected.
 - Sessions are opaque 192-bit tokens from `/dev/urandom`, stored server-side
   in `$SESSION_DIR` (files mode 0600 in a 0700 directory). The session id is
   validated against `^[0-9a-f]{48}$` before use as a filename, so a crafted
   cookie cannot traverse out of `$SESSION_DIR`.
-- The session cookie is `HttpOnly` and `SameSite=Lax`. Set `HTTPS_ENABLED = 1`
-  (see Configuration) to add the `Secure` flag once the app is served over TLS.
-  **Serving fetchconfig-web over HTTPS is strongly recommended:** without TLS the
-  session cookie, the login password, and all device configuration (including
-  `pass=`/`enable=` secrets shown in Bulk edit and backups) travel in clear text
-  on the network. HTTPS is handled by the web server (Apache/nginx) in front of
-  the CGI, not by this script; `HTTPS_ENABLED` only governs the cookie flag.
+- The session cookie is `HttpOnly` and `SameSite=Lax`, and gains the `Secure`
+  flag (with an HSTS response header) when the request is treated as TLS by
+  `effective_https()`: `HTTPS_ENABLED` (default **1**), the web server's TLS
+  environment (`HTTPS=on` / `REQUEST_SCHEME=https`), or -- only with
+  `TRUST_FORWARDED_PROTO=1` -- a reverse proxy's `X-Forwarded-Proto` (see
+  Configuration). **Serving fetchconfig-web over HTTPS is strongly recommended:**
+  without TLS the session cookie, the login password, and all device
+  configuration (including `pass=`/`enable=` secrets shown in Bulk edit and
+  backups) travel in clear text on the network. HTTPS itself is terminated by the
+  web server (Apache/nginx) or a proxy in front of the CGI, not by this script;
+  an HTTP-only deployment must set `HTTPS_ENABLED=0`, or the `Secure` cookie is
+  withheld over plain HTTP and login appears to fail.
 - `SESSION_TTL` (default 28800 s) is an **idle timeout**: the stored expiry is
   slid forward on every authenticated request, so a session ends `SESSION_TTL`
   after the last activity, not a fixed time after login.
@@ -2556,14 +2641,20 @@ below are grouped by concern.
 
 ### Deployment hardening
 
-- Serve over HTTPS and enable the cookie `-secure` flag; login posts a
-  plaintext password and the session cookie authenticates every request.
-- `chown` the config file to the web-server user and `chmod 600` it.
-- Two operations write into the repository, which the web-server user
-  typically cannot: **Backup Now** and **orphaned-backup delete**. Both run
-  through `sudo -n` when `USE_SUDO_FOR_BACKUP_NOW` is set. Scope the sudoers
-  entry to exactly the `fetchconfig.pl` command, and keep the repository owned
-  by the account fetchconfig runs as.
+- Serve over HTTPS. `HTTPS_ENABLED` is `1` by default (Secure cookie + HSTS);
+  an HTTP-only deployment must set `HTTPS_ENABLED=0`. Login posts a plaintext
+  password and the session cookie authenticates every request.
+- Keep `REQUIRE_BCRYPT=1` (default) and install `Crypt::Bcrypt`, so passwords are
+  always bcrypt; a missing module disables login rather than weakening hashes.
+- Run the CGI as the web-server user, never root. `chown` the config file to that
+  user and `chmod 640` it -- it holds `DBpass` (and possibly `SMTP_PASS`).
+- Two operations write where the web-server user typically cannot -- **Backup
+  Now** and **orphaned-backup delete** -- and the template editor / debug-log
+  reader use a second helper. Both go through `sudo -n`; scope the sudoers entries
+  to exactly `fetchconfig.pl` and `fetchconfig-web-install-template.pl`, and keep
+  the repository owned by the account fetchconfig runs as.
+- `CAPTURE_MAX_BYTES` (default 50 MiB) bounds subprocess output capture.
+- See the full **Security hardening checklist** in INSTALL for the complete list.
 
 ## Development
 

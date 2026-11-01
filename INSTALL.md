@@ -30,6 +30,10 @@ repository.
   - [Step 8 -- First login](#step-8----first-login)
 - [Part 3 -- Upgrading](#part-3----upgrading)
   - [Upgrading the script](#upgrading-the-script)
+  - [Upgrading to 2.11](#upgrading-to-2.11)
+  - [Upgrading to 2.10](#upgrading-to-2.10)
+  - [Upgrading to 2.09](#upgrading-to-2.09)
+  - [Upgrading to 2.08](#upgrading-to-2.08)
   - [Upgrading to 1.62](#upgrading-to-1.62)
   - [Upgrading to 1.61](#upgrading-to-1.61)
   - [Upgrading to 1.60](#upgrading-to-1.60)
@@ -40,13 +44,14 @@ repository.
   - [Checklist](#checklist)
   - [Common problems](#common-problems)
 - [Running the test suite](#running-the-test-suite)
+- [Backup Dashboard (optional)](#backup-dashboard-optional)
 
 ## Part 1 -- Before you start
 
 ### What is in the package
 
-The release archive `fetchconfig-web-2.10.tar` unpacks to a directory
-`fetchconfig-web-2.10/` containing:
+The release archive `fetchconfig-web-2.11.tar` unpacks to a directory
+`fetchconfig-web-2.11/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -60,6 +65,7 @@ The release archive `fetchconfig-web-2.10.tar` unpacks to a directory
 | `fetchconfig-web-dbupdate-1.60.sql` | Idempotent SQL that upgrades an existing database to the 1.60 schema (`users.email`, login throttle, password-reset tokens; PostgreSQL 8.2+). |
 | `fetchconfig-web-dbupdate-1.62.sql` | Idempotent SQL that upgrades an existing database to the 1.62 schema (`users.download_full_config`, the `device_notes` table; PostgreSQL 8.2+). |
 | `fetchconfig-web-dbupdate-2.08.sql` | Idempotent SQL that upgrades an existing database to the 2.08 schema (`users.read_debug`; PostgreSQL 8.2+). |
+| `fetchconfig-web-dbupdate-2.11.sql` | Idempotent SQL that adds the 2.11 Backup-Dashboard history schema (`schema_migrations`, `backup_current`, `backup_runs`, `backup_versions`; PostgreSQL 8.2+). Schema only -- grants are done by `fetchconfig-web-dbsetup.pl --upgrade`. |
 | `fetchconfig-web-clean-resets.pl` | Standalone script to prune spent password-reset tokens and stale login-throttle rows (`-h` for help, `-s` to print the role SQL). |
 | `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`: installs, creates, reverts, deletes or renames a template file; reads/deletes a device debug log; and lists `CRON_USER`'s crontab for the schedule viewer (v1.7). |
 | `imageconvert.pl`, `README.imageconvert.md` (+ `.html`/`README.imageconvert`) | Optional helper for embedding a small image as a base64 Perl constant; its manual (Markdown master, with generated HTML and plain-text). |
@@ -81,7 +87,7 @@ The release archive `fetchconfig-web-2.10.tar` unpacks to a directory
 
 ### Requirements
 
-- **fetchconfig 9.72 or newer** already installed and working. fetchconfig-web
+- **fetchconfig 9.74 or newer** already installed and working. fetchconfig-web
   calls `fetchconfig.pl` and reads its device table, repository and template
   directories; it does not replace fetchconfig.
 - **Perl 5.10 or newer.** Tested on Linux and AIX.
@@ -484,6 +490,11 @@ HTTPS_ENABLED           = 1
 TRUST_FORWARDED_PROTO   = 0
 REQUIRE_BCRYPT          = 1
 
+# --- dashboard (optional; see the Backup Dashboard section) ---
+# 1 shows the Backup Dashboard; needs the history schema (--upgrade) and the
+# engine's db: option. Default 0.
+ENABLE_DASHBOARD        = 0
+
 # --- misc ---
 SHOW_RENDER_TIME        = 0
 # Syntax highlighting for template-backed ("generic") devices whose template
@@ -499,7 +510,7 @@ JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 # Overrides the version shown in the footer and About dialog. Omit it to show
 # the version the script ships as; the About dialog always shows that one too.
-#APP_VERSION            = 2.10
+#APP_VERSION            = 2.11
 COPYRIGHT               = 2026 (c) Your Organisation
 ```
 
@@ -808,10 +819,14 @@ Then set in `/etc/fetchconfig-web.cfg`:
 HTTPS_ENABLED = 1
 ```
 
-This adds the `Secure` flag to the session cookie so the browser never sends it
-over plain HTTP, and makes the application send a `Strict-Transport-Security`
-header. Leave it `0` on an HTTP-only deployment -- with `Secure` set the
-browser would withhold the cookie and login would appear to fail.
+`HTTPS_ENABLED` is **`1` by default**, so this is already in effect: the session
+cookie gets the `Secure` flag (the browser never sends it over plain HTTP) and the
+application sends a `Strict-Transport-Security` header. The app also treats a
+request as TLS when the web server's environment says so (`HTTPS=on` /
+`REQUEST_SCHEME=https`), and -- with `TRUST_FORWARDED_PROTO = 1` -- when a reverse
+proxy sets `X-Forwarded-Proto: https`. **On an HTTP-only deployment set
+`HTTPS_ENABLED = 0`**, or the browser withholds the `Secure` cookie and login
+appears to fail.
 
 #### 7.2 FastCGI or plain CGI
 
@@ -1131,6 +1146,16 @@ long-lived `mod_fcgid` workers keep running the old code until recycled, and
 `touch` does not trigger a reload. Run `apachectl graceful` after the copy
 (see *Step 7 -- Web server configuration*). Plain CGI needs no such step.
 
+### Upgrading to 2.11
+
+> **No mandatory database change in 2.11.** Upgrading from 2.10 is the file copy
+> above; the app behaves as before. The new **Backup Dashboard** is optional and
+> off by default (`ENABLE_DASHBOARD = 0`). To enable it, follow the
+> [Backup Dashboard](#backup-dashboard-optional) section: run
+> `fetchconfig-web-dbsetup.pl --upgrade` (as root) to add the history schema, set
+> `ENABLE_DASHBOARD = 1`, and point the engine (fetchconfig 9.75+) at the database
+> with the `db:` option.
+
 ### Upgrading to 2.10
 
 > **No database change in 2.10.** It is a security-hardening release; upgrading
@@ -1352,8 +1377,8 @@ Work through this after a fresh install or an upgrade:
       few hundred KB. A bare **500** with
       `exceeds MaxRequestLen` in the error log means `FcgidMaxRequestLen` is
       still at its 128 KB default -- see Step 7.3.
-- [ ] The footer shows the expected version: *fetchconfig-web v2.07 using
-      fetchconfig v9.6x*.
+- [ ] The footer shows the expected version: *fetchconfig-web v2.11 using
+      fetchconfig v9.7x*.
 
 ### Security hardening checklist
 
@@ -1451,3 +1476,61 @@ perl Makefile.PL && make test
 
 All tests should pass. Failures almost always mean a missing Perl module
 on the build host.
+
+## Backup Dashboard (optional)
+
+The Backup Dashboard shows fleet backup health (Overview graphics + an
+All-devices table). It reads history tables that the **fetchconfig engine
+(9.75+)** writes through its optional `db:` option; without that, the dashboard
+has nothing to show. Enabling it is three steps:
+
+1. **Create the history schema and the writer role.** Run the setup tool in
+   upgrade mode **as root** -- it reads the DB connection from the `0600`
+   `/etc/fetchconfig-web.cfg` (which root owns), then connects to PostgreSQL as
+   the **DB superuser it prompts for** (name + password, with a re-enter/abort
+   retry if the login fails) to apply the schema and grants. The database work
+   is done entirely through Perl DBI (`DBD::Pg`); **no `psql` or other external
+   binary is required.** It applies any pending `fetchconfig-web-dbupdate-*.sql`
+   (the 2.11 history schema included), tracked in a `schema_migrations` ledger so
+   each runs once, creates the writer role, sets the three history tables'
+   owner to that writer role (so the engine can maintain its own data without a
+   superuser; `schema_migrations` stays superuser-owned), and grants `SELECT` to
+   the web DB user and `SELECT`+`INSERT`+`UPDATE` to the writer:
+
+   ```
+   perl fetchconfig-web-dbsetup.pl --upgrade
+   ```
+
+   It asks for the writer user name once (default `fetchconfig_dashboard`) and
+   records it, so later runs are non-interactive. A role name with unusual
+   characters is warned about; reusing the web DB user as the writer is warned
+   about (it loses least-privilege separation).
+
+2. **Turn the dashboard on.** Set `ENABLE_DASHBOARD = 1` in
+   `/etc/fetchconfig-web.cfg`. A **Dashboard** menu then appears: **Overview**
+   ("Backup health") for every user -- a site-limited user sees only their own
+   sites -- and **All devices** for administrators. **Tools -> Cleanup dashboard**
+   (admin) removes statistics for devices no longer in the device table. While the
+   dashboard is enabled, users also land on the Overview after login.
+
+3. **Point the engine at the database.** On the `device_table` `default:` line,
+   add the engine's `db:` option. While the tables are still empty, the dashboard
+   prints the exact line to paste (password masked), e.g.:
+
+   ```
+   db: db_inst=fetchconfig,db_user=fetchconfig_dashboard,db_pass=<writer password>,db_host=localhost
+   ```
+
+   `db_host` is `host[:port]`, IPv6-capable (`[addr]:port`). The `db:` option also
+   accepts `db_connect_timeout`, `db_sslmode` and `db_max_outbox_days`; all seven
+   keys can be edited from the device-table editor's **General parameters** tab
+   (admin-only; `db_pass` masked). Once the engine runs and writes the first rows,
+   the dashboard shows live data.
+
+The dashboard is DB-only: with `ENABLE_DASHBOARD = 1` but the schema missing,
+unreadable (web user lacks `SELECT`), or empty, the pages show guidance (and the
+command above) instead of failing.
+
+Once history exists, the **Backups** page (per device) shows a small **SHA1**
+button beside each backup whose integrity checksum is on file; it copies the hash
+(a change/corruption check, not a cryptographic signature).

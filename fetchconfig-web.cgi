@@ -70,6 +70,7 @@ use IO::Select;
 use Symbol qw(gensym);
 use Errno ();
 use POSIX ();
+use Time::Local ();
 use Algorithm::Diff qw(sdiff);
 
 # --------------------------------------------------------------------------
@@ -91,12 +92,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.10';
+use constant APP_VERSION => '2.11';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.10';
+use constant APP_VERSION_INTERNAL => '2.11';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -104,7 +105,7 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.72';
+use constant MIN_FETCHCONFIG_VERSION => '9.74';
 
 # --- Help menu "additional help" scan (see help_scan_dir / help_extract_title) ---
 # Each of the two help subdirectories (fetchconfig/, fetchconfig-web/) is
@@ -237,6 +238,7 @@ my ($DEVICE_TABLE,
     $REQUIRE_BCRYPT,
     $CAPTURE_MAX_BYTES,
     $SHOW_RENDER_TIME,
+    $ENABLE_DASHBOARD,
     $EMAIL,
     $SMTP_HOST,
     $SMTP_PORT,
@@ -325,6 +327,7 @@ my @CFG_KEYS = (
     [ 'HTTPS_ENABLED',          'bool',      '1',                                      '0 | 1 (Secure cookie + HSTS; set 0 for HTTP-only)' ],
     [ 'TRUST_FORWARDED_PROTO',  'bool',      '0',                                      '0 | 1 (trust X-Forwarded-Proto from a reverse proxy)' ],
     [ 'SHOW_RENDER_TIME',       'bool',      '0',                                      '0 | 1' ],
+    [ 'ENABLE_DASHBOARD',       'bool',      '0',                                      '0 | 1 (show the Backup Dashboard; needs the history schema + engine db:)' ],
     [ 'WEB_DIR',                'path_opt',  '/www/virtual/fetchconfig/htdocs',        'absolute filesystem path' ],
     [ 'BASE_URL',               'url',       '/',                                      'absolute URL path' ],
     [ 'CSS_BASE_URL',           'url',       '/css',                                   'absolute URL path' ],
@@ -592,6 +595,12 @@ sub read_config {
     # when the app is reached directly; enable it only behind a trusted proxy.
     $TRUST_FORWARDED_PROTO = (defined $kv->{TRUST_FORWARDED_PROTO} && $kv->{TRUST_FORWARDED_PROTO} =~ /^[01]$/)
                      ? $kv->{TRUST_FORWARDED_PROTO} : 0;
+    # Show the Backup Dashboard (reads the backup-history tables the fetchconfig
+    # engine's optional DB writer populates). Default 0 (hidden). Requires the
+    # history schema (fetchconfig-web-dbsetup.pl --upgrade) and the engine's db:
+    # option; with it 1 but the schema/data absent, the dashboard shows guidance.
+    $ENABLE_DASHBOARD = (defined $kv->{ENABLE_DASHBOARD} && $kv->{ENABLE_DASHBOARD} =~ /^[01]$/)
+                     ? $kv->{ENABLE_DASHBOARD} : 0;
     # Require bcrypt (Crypt::Bcrypt) for password hashing. Default 1: new hashes
     # are never written as the weaker Apache MD5 ($apr1$), and login is disabled
     # with a clear notice if the module is unavailable. Set 0 only on a stack
@@ -1407,6 +1416,7 @@ my %STATE_CHANGING = map { $_ => 1 } qw(
   upload_template
   upload_hex
   rename_template
+  copy_template
   delete_template
   delete_report
   prune_reports
@@ -1424,6 +1434,7 @@ my %STATE_CHANGING = map { $_ => 1 } qw(
   delete_logo
   delete_debug
   delete_all_debug
+  dashboard_cleanup_delete
 );
 
 ################################################################################
@@ -1570,6 +1581,16 @@ sub main {
             do_set_edit_right($user);
         } elsif ($action eq 'set_admin_right') {
             do_set_admin_right($user);
+        } elsif ($action eq 'dashboard' || $action eq 'dashboard_overview') {
+            show_dashboard_overview($user);
+        } elsif ($action eq 'dashboard_devices') {
+            show_dashboard_devices($user);
+        } elsif ($action eq 'dashboard_devices_csv') {
+            do_dashboard_devices_csv($user);
+        } elsif ($action eq 'dashboard_cleanup') {
+            show_dashboard_cleanup($user);
+        } elsif ($action eq 'dashboard_cleanup_delete') {
+            do_dashboard_cleanup_delete($user);
         } elsif ($action eq 'help') {
             show_help($user);
         } elsif ($action eq 'setup') {
@@ -1671,6 +1692,10 @@ sub main {
             do_upload_hex($user);
         } elsif ($action eq 'rename_template') {
             do_rename_template($user);
+        } elsif ($action eq 'copy_template_form') {
+            show_copy_template_form($user);
+        } elsif ($action eq 'copy_template') {
+            do_copy_template($user);
         } elsif ($action eq 'delete_template') {
             do_delete_template($user);
         } elsif ($action eq 'download_template') {
@@ -1789,7 +1814,7 @@ our $RUN_MODE = 'CGI';
 # Device-table option keys whose values are secret and must NEVER be stored in
 # the audit log (logged as "***" instead). Password changes for USERS never
 # reach audit() at all.
-my %AUDIT_SECRET_KEY = map { $_ => 1 } qw(pass enable snmp_community community);
+my %AUDIT_SECRET_KEY = map { $_ => 1 } qw(pass enable snmp_community community db_pass);
 
 ################################################################################
 # audit_is_secret
@@ -3232,6 +3257,18 @@ sub known_site_codes {
     return \%c;
 }
 
+# Map of site code -> display description (the code itself when a site has no
+# description). Shared by the dashboard views.
+sub site_name_map {
+    my ($dbh) = @_;
+    my %name;
+    for my $s (@{ db_all_sites($dbh) }) {
+        $name{ $s->{code} } = (defined $s->{description} && $s->{description} ne '')
+                            ? $s->{description} : $s->{code};
+    }
+    return \%name;
+}
+
 ################################################################################
 # site_table_errors
 #
@@ -3981,6 +4018,1050 @@ sub csrf_field {
 }
 
 ################################################################################
+# db_host parsing / formatting -- shared by the "db:" editor + validation and
+# the dashboard "tables empty" info panel. IPv6-capable; mirrors the fetchconfig
+# engine's db_host rule EXACTLY, so what the panel emits is what the engine
+# parses:
+#
+#   [addr]:port              -> host=addr, port   (IPv6 with port)
+#   [addr]                   -> host=addr, default (IPv6, no port)
+#   >=2 colons, no brackets  -> whole value is the host (IPv6 literal), default
+#   exactly one colon        -> host:port
+#   no colon                 -> host, default port
+#
+# Returns ($host, $port); $port is undef when the default is to be used.
+################################################################################
+sub db_host_parse {
+    my ($s) = @_;
+    $s = '' unless defined $s;
+    $s =~ s/^\s+|\s+$//g;
+    return (undef, undef) if $s eq '';
+    if ($s =~ /^\[([^\]]*)\](?::(\d+))?\z/) {
+        my ($h, $p) = ($1, $2);
+        return ($h, (defined $p && $p ne '') ? $p : undef);
+    }
+    my $colons = ($s =~ tr/:/:/);
+    if ($colons >= 2) { return ($s, undef); }            # bare IPv6 literal
+    if ($colons == 1) {
+        my ($h, $p) = split(/:/, $s, 2);
+        return ($h, (defined $p && $p ne '') ? $p : undef);
+    }
+    return ($s, undef);                                  # host, default port
+}
+
+# Format ($host,$port) back into a db_host string the engine will parse the same
+# way: bracket an IPv6 literal only when a port is attached.
+sub db_host_format {
+    my ($host, $port) = @_;
+    return '' unless defined $host && $host ne '';
+    my $is_v6 = (index($host, ':') >= 0);
+    if (defined $port && $port ne '') {
+        return $is_v6 ? "[$host]:$port" : "$host:$port";
+    }
+    return $host;
+}
+
+# True when $s is a usable db_host (non-empty host; port, if present, 1..65535).
+sub db_host_valid {
+    my ($s) = @_;
+    my ($h, $p) = db_host_parse($s);
+    return 0 unless defined $h && $h ne '';
+    return 0 if defined $p && ($p !~ /^\d+\z/ || $p < 1 || $p > 65535);
+    return 1;
+}
+
+################################################################################
+# ===== Backup Dashboard (ENABLE_DASHBOARD) ================================== #
+#
+# Reads the backup-history tables the fetchconfig engine's optional DB writer
+# populates (backup_current / backup_runs / backup_versions), via the web app's
+# own DB connection (SELECT only). All timestamps are a NAIVE LOCAL WALL-CLOCK
+# epoch (see the design doc): the engine encodes fetchconfig's local time with
+# timegm(local), so the web renders with gmtime -- NO timezone conversion.
+################################################################################
+
+use constant DASH_STALE_SECS => 86400;        # > 24h since last good backup = stale
+
+# "now" in the same naive wall-clock convention as the stored epochs.
+sub dash_naive_now {
+    my @lt = localtime(time);
+    return Time::Local::timegm($lt[0], $lt[1], $lt[2], $lt[3], $lt[4], $lt[5]);
+}
+
+# Format a stored naive epoch as a wall-clock string using gmtime (no convert).
+sub dash_fmt_ts {
+    my ($e) = @_;
+    return '' unless defined $e && $e =~ /^\d+\z/;
+    my @t = gmtime($e);
+    return sprintf('%04d-%02d-%02d %02d:%02d',
+                   $t[5] + 1900, $t[4] + 1, $t[3], $t[2], $t[1]);
+}
+
+# Human "age" of a naive epoch relative to naive-now.
+sub dash_age {
+    my ($e, $now) = @_;
+    return 'never' unless defined $e && $e =~ /^\d+\z/;
+    $now = dash_naive_now() unless defined $now;
+    my $d = $now - $e;
+    $d = 0 if $d < 0;
+    return 'just now'        if $d < 90;
+    return int($d / 60)   . ' min ago' if $d < 3600;
+    return int($d / 3600) . ' h ago'   if $d < 86400;
+    return int($d / 86400) . ' d ago';
+}
+
+# Classify a device row into one bucket (priority: never, failed, stale, fresh).
+sub dash_status {
+    my ($state, $last_good, $now) = @_;
+    return 'never'  unless defined $last_good && $last_good ne '';
+    return 'failed' if defined $state && $state eq 'failed';
+    return 'stale'  if ($now - $last_good) > DASH_STALE_SECS;
+    return 'fresh';
+}
+
+# A status badge (reuses the on/off tag shape; colours per status).
+sub dash_badge {
+    my ($st) = @_;
+    my %label = (fresh => 'Fresh', stale => 'Stale', failed => 'Failed',
+                 never => 'Never', nodata => 'No data');
+    my $key = exists $label{$st} ? $st : 'never';
+    return qq{<span class="dash-badge dash-badge-$key">} . esc($label{$key}) . qq{</span>};
+}
+
+# The admin-only parts of the dashboard (the All-devices table and its CSV
+# export): only when ENABLE_DASHBOARD = 1 and the user is an administrator.
+sub dashboard_allowed {
+    my ($user) = @_;
+    return 0 unless $ENABLE_DASHBOARD;
+    my $dbh = db_connect() or return 0;
+    my $ok = user_is_admin($dbh, $user) ? 1 : 0;
+    $dbh->disconnect;
+    return $ok;
+}
+
+# The Overview ("Backup health") is a fleet-wide, aggregate-only view with no
+# device detail, secrets, or per-device drill-down, so it is available to ANY
+# authenticated user whenever ENABLE_DASHBOARD = 1 (it is never filtered per
+# user -- there is no sensitive information in it).
+sub dashboard_overview_allowed {
+    return $ENABLE_DASHBOARD ? 1 : 0;
+}
+
+sub dashboard_deny {
+    my ($user, $msg) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Dashboard', $user);
+    print qq{<h1>Dashboard</h1>\n<p class="error">} . esc($msg) . qq{</p>\n};
+    print page_foot();
+}
+
+# Schema / data state of the history tables, from the web (SELECT-only) view:
+#   'missing'  -- backup_current table absent (run dbsetup --upgrade)
+#   'nogrant'  -- table present but the web DB user lacks SELECT
+#   'empty'    -- present + readable, but no rows yet (engine not writing)
+#   'ok'       -- has rows
+sub dashboard_schema_state {
+    my ($dbh) = @_;
+    return 'missing' unless $dbh;
+    my ($have) = $dbh->selectrow_array(
+        q{SELECT 1 FROM information_schema.tables
+           WHERE table_schema = 'public' AND table_name = 'backup_current'});
+    return 'missing' unless $have;
+    my $cnt = $dbh->selectrow_array('SELECT count(*) FROM backup_current');
+    if (!defined $cnt) {
+        # permission denied (or similar) -> treat as no SELECT grant
+        return 'nogrant';
+    }
+    return $cnt > 0 ? 'ok' : 'empty';
+}
+
+# The "tables empty / missing / nogrant" guidance block. For the empty state it
+# prints the exact db: string to paste into the engine, with the writer name
+# recorded by dbsetup.pl --upgrade (app_state) and the password masked.
+sub dashboard_state_block {
+    my ($dbh, $state) = @_;
+    my $cmd = 'fetchconfig-web-dbsetup.pl --upgrade';
+    if ($state eq 'missing') {
+        return qq{<div class="login-notice"><strong>The backup-history schema is not present.</strong><br>}
+             . qq{Run <code>} . esc($cmd) . qq{</code> to create it, then reload.</div>\n};
+    }
+    if ($state eq 'nogrant') {
+        return qq{<div class="login-notice"><strong>The database user cannot read the history tables.</strong><br>}
+             . qq{The web DB user is missing <code>SELECT</code>. Run <code>} . esc($cmd)
+             . qq{</code> to grant it, then reload.</div>\n};
+    }
+    # empty: show the db: string the engine needs.
+    my $writer = 'fetchconfig_dashboard';
+    if ($dbh) {
+        my ($w, $ok) = app_state_get($dbh, 'dashboard_writer');
+        $writer = $w if $ok && defined $w && $w ne '';
+    }
+    my $host = db_host_format($DBhost, undef);
+    my $db_line = sprintf('db: db_inst=%s,db_user=%s,db_pass=%s,db_host=%s',
+                          $DBinst, $writer, '********', $host);
+    return qq{<div class="login-notice">}
+         . qq{<strong>No backup history yet.</strong> The schema is ready, but the fetchconfig }
+         . qq{engine has not written any runs.<br>Configure the engine's }
+         . qq{<code>device_table</code> <code>default:</code> line:}
+         . qq{<pre class="config" style="margin-top:0.5em">} . esc($db_line) . qq{</pre>}
+         . qq{(the password is the writer role's; <code>db_user</code> is the name recorded by }
+         . qq{<code>} . esc($cmd) . qq{</code>.) This panel disappears once the first run is written.}
+         . qq{</div>\n};
+}
+
+# Fleet aggregates for the Overview, in a few cheap queries.
+sub dashboard_overview_data {
+    my ($dbh, $user) = @_;
+    my $now = dash_naive_now();
+
+    # Scope: an unrestricted user (admin / site 0) sees the whole fleet; a
+    # site-limited user sees only the devices in their own sites. site= is a
+    # config-only option (absent from the backup tables), so the site of each
+    # device comes from the parsed device table, and read_device_ids() already
+    # returns only the user's visible devices for a limited user (all for an
+    # unrestricted one).
+    my $acc = $user ? user_site_access($dbh, $user) : { unrestricted => 1 };
+    my $unrestricted = $acc->{unrestricted} ? 1 : 0;
+
+    my ($devs) = read_device_ids($user, $acc);   # reuse the access we already fetched
+    my %site_of;
+    for my $dv (@$devs) {
+        my $code = (defined $dv->{site} && $dv->{site} ne '') ? $dv->{site} : SITE_ALL_CODE;
+        $site_of{ $dv->{id} } = $code;
+    }
+    my $name_of = site_name_map($dbh);
+
+    # One pass over the current-status rows: fleet tiles, age buckets, and the
+    # per-site breakdown, all from the same data so they always agree.
+    my $rows = $dbh->selectall_arrayref(
+        q{SELECT dev_id, state, last_good_at FROM backup_current}, { Slice => {} });
+
+    my %d = (total => 0, never => 0, failed => 0, stale => 0, fresh => 0,
+             age_lt24 => 0, age_1_3 => 0, age_3_7 => 0, age_gt7 => 0);
+    my %agg;        # site code => { total, fresh, stale, failed, never }
+    my %inscope;    # dev_ids actually counted (for the trend query below)
+    for my $r (@{ $rows || [] }) {
+        my $id = $r->{dev_id};
+        my $in = exists $site_of{$id};
+        next if !$in && !$unrestricted;      # limited user: skip other-site/removed devices
+        my $code = $in ? $site_of{$id} : SITE_ALL_CODE;
+        my $st   = dash_status($r->{state}, $r->{last_good_at}, $now);
+        $d{total}++;
+        $d{$st}++;
+        if (defined $r->{last_good_at} && $r->{last_good_at} ne '') {
+            my $age = $now - $r->{last_good_at};
+            if    ($age <  86400)  { $d{age_lt24}++; }
+            elsif ($age < 259200)  { $d{age_1_3}++;  }
+            elsif ($age < 604800)  { $d{age_3_7}++;  }
+            else                   { $d{age_gt7}++;  }
+        }
+        my $a = ($agg{$code} ||= { total => 0, fresh => 0, stale => 0, failed => 0, never => 0 });
+        $a->{total}++;
+        $a->{$st}++ if exists $a->{$st};
+        $inscope{$id} = 1;
+    }
+
+    my @by_site;
+    for my $code (keys %agg) {
+        my $label;
+        if ($code eq SITE_ALL_CODE) { $label = '(no site)'; }
+        else {
+            my $desc = $name_of->{$code};
+            $label = (defined $desc && $desc ne '' && $desc ne $code) ? "$code / $desc" : $code;
+        }
+        push @by_site, { site => $label, %{ $agg{$code} } };
+    }
+    @by_site = sort { $b->{total} <=> $a->{total} || lc($a->{site}) cmp lc($b->{site}) } @by_site;
+    $d{by_site} = \@by_site;
+
+    # 14-day success-rate trend from backup_runs, bucketed by naive day. Scoped
+    # to the user's devices when limited (a small IN-list); full-fleet otherwise.
+    my $since = $now - 14 * 86400;
+    if ($unrestricted) {
+        $d{trend} = $dbh->selectall_arrayref(qq{
+            SELECT (run_end / 86400) AS day, count(*) AS n,
+                   sum(CASE WHEN state = 'success' THEN 1 ELSE 0 END) AS ok
+            FROM backup_runs WHERE run_end >= $since
+            GROUP BY (run_end / 86400) ORDER BY day}, { Slice => {} }) || [];
+    }
+    else {
+        my @ids = keys %inscope;
+        if (@ids) {
+            my $ph = join(',', ('?') x @ids);
+            $d{trend} = $dbh->selectall_arrayref(qq{
+                SELECT (run_end / 86400) AS day, count(*) AS n,
+                       sum(CASE WHEN state = 'success' THEN 1 ELSE 0 END) AS ok
+                FROM backup_runs WHERE run_end >= $since AND dev_id IN ($ph)
+                GROUP BY (run_end / 86400) ORDER BY day}, { Slice => {} }, @ids) || [];
+        }
+        else {
+            $d{trend} = [];
+        }
+    }
+    return \%d;
+}
+
+# Shared colour key for the status segments (By-site bars, fleet-freshness bar,
+# donut) and the status badges. Colours come from the .dash-seg-* classes.
+sub dash_status_legend {
+    my @L = (['fresh', 'Fresh'], ['stale', 'Stale'], ['failed', 'Failed'], ['never', 'Never']);
+    my $h = qq{<div class="dash-legend">};
+    for my $x (@L) {
+        $h .= qq{<span><span class="dash-swatch dash-seg-$x->[0]"></span>} . esc($x->[1]) . qq{</span>};
+    }
+    return $h . qq{</div>};
+}
+
+# Group an integer with thousands separators (2840 -> "2,840").
+sub _dash_group {
+    my ($n) = @_;
+    $n = 0 unless defined $n && $n =~ /^\d+\z/;
+    1 while $n =~ s/^(\d+)(\d{3})/$1,$2/;
+    return $n;
+}
+
+# A simple stat tile. $status is a status key (fresh/stale/failed/never) for the
+# colour dot, or '' for no dot.
+sub dash_tile {
+    my ($label, $value, $sub, $status) = @_;
+    my $dot = $status ? qq{<span class="dash-tile-dot dash-seg-$status"></span>} : '';
+    return qq{<div class="dash-tile">}
+         . qq{<div class="dash-tile-label">$dot} . esc($label) . qq{</div>}
+         . qq{<div class="dash-tile-value">} . esc($value) . qq{</div>}
+         . ($sub ne '' ? qq{<div class="dash-tile-sub">} . esc($sub) . qq{</div>} : '')
+         . qq{</div>};
+}
+
+# SVG donut for the four-way status split. Arc colours come from .dash-arc-*.
+sub dash_donut {
+    my ($fresh, $stale, $failed, $never, $total) = @_;
+    $total ||= 1;
+    my $C = 326.726;   # 2*pi*52
+    my @seg = (['fresh', $fresh], ['stale', $stale], ['failed', $failed], ['never', $never]);
+    my $off = 0;
+    my $circles = '';
+    for my $s (@seg) {
+        my ($key, $n) = @$s;
+        my $len = $C * ($n / $total);
+        my $gap = $C - $len;
+        $circles .= qq{<circle class="dash-arc-$key" cx="64" cy="64" r="52" fill="none" stroke-width="20" }
+                 .  sprintf('stroke-dasharray="%.2f %.2f" stroke-dashoffset="%.2f">', $len, $gap, -$off)
+                 .  qq{</circle>};
+        $off += $len;
+    }
+    my $pct = sprintf('%d%%', int(100 * $fresh / $total + 0.5));
+    return qq{<svg width="120" height="120" viewBox="0 0 128 128" role="img" aria-label="status breakdown">}
+         . qq{<circle class="dash-arc-track" cx="64" cy="64" r="52" fill="none" stroke-width="20"></circle>}
+         . qq{<g transform="rotate(-90 64 64)">$circles</g>}
+         . qq{<text class="dash-donut-pct" x="64" y="60" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="21">$pct</text>}
+         . qq{<text class="dash-donut-cap" x="64" y="80" text-anchor="middle" font-size="10">healthy</text></svg>};
+}
+
+sub show_dashboard_overview {
+    my ($user) = @_;
+    return dashboard_deny($user, 'The Backup Dashboard is not enabled.')
+        unless dashboard_overview_allowed();
+
+    my $dbh   = db_connect();
+    my $state = dashboard_schema_state($dbh);
+
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Dashboard - Overview', $user, 'full');
+    print qq{<h1 class="dash-h1">Backup health</h1>\n};
+
+    if ($state ne 'ok') {
+        print dashboard_state_block($dbh, $state);
+        $dbh->disconnect if $dbh;
+        print page_foot();
+        return;
+    }
+
+    my $d   = dashboard_overview_data($dbh, $user);
+    my $tot = $d->{total} || 1;
+    my $pc  = sub { my ($n) = @_; sprintf('%.1f%%', 100 * $n / $tot); };
+
+    # KPI tiles
+    print qq{<section class="dash-tiles">};
+    print dash_tile('Total devices', $d->{total}, 'across the fleet', '');
+    print dash_tile('Fresh (<=24h)', $d->{fresh}, $pc->($d->{fresh}) . ' of fleet', 'fresh');
+    print dash_tile('Stale (1-7d)',  $d->{stale}, $pc->($d->{stale}), 'stale');
+    print dash_tile('Failed last run', $d->{failed}, 'auth / timeout / unreachable', 'failed');
+    print dash_tile('Never backed up', $d->{never}, 'no successful backup yet', 'never');
+    print qq{</section>\n};
+
+    # Fleet-freshness stacked bar
+    my $w = sub { my ($n) = @_; sprintf('%.3f%%', 100 * $n / $tot); };
+    print qq{<section class="dash-panel">};
+    print qq{<div class="dash-panel-head"><h2>Fleet freshness</h2>} . dash_status_legend() . qq{</div>};
+    print qq{<div class="dash-bar">}
+        . qq{<div class="dash-seg-fresh"  style="width:} . $w->($d->{fresh})  . qq{"></div>}
+        . qq{<div class="dash-seg-stale"  style="width:} . $w->($d->{stale})  . qq{"></div>}
+        . qq{<div class="dash-seg-failed" style="width:} . $w->($d->{failed}) . qq{"></div>}
+        . qq{<div class="dash-seg-never"  style="width:} . $w->($d->{never})  . qq{"></div></div>};
+    print qq{<div class="dash-tally">}
+        . qq{<span>Fresh <strong>$d->{fresh}</strong></span>}
+        . qq{<span>Stale <strong>$d->{stale}</strong></span>}
+        . qq{<span>Failed <strong>$d->{failed}</strong></span>}
+        . qq{<span>Never <strong>$d->{never}</strong></span></div>};
+    print qq{</section>\n};
+
+    # Charts row: donut + age histogram + trend
+    print qq{<section class="dash-charts">};
+
+    # donut
+    print qq{<div class="dash-panel">}
+        . qq{<div class="dash-panel-head"><h2>Status breakdown</h2>} . dash_status_legend() . qq{</div>}
+        . qq{<div class="dash-donut-row">}
+        . dash_donut($d->{fresh}, $d->{stale}, $d->{failed}, $d->{never}, $tot)
+        . qq{<div class="dash-donut-key">}
+        . qq{Fresh $d->{fresh}<br>Stale $d->{stale}<br>Failed $d->{failed}<br>Never $d->{never}</div>}
+        . qq{</div></div>};
+
+    # age histogram
+    my $maxage = $d->{age_lt24}; for (qw(age_1_3 age_3_7 age_gt7 never)) { $maxage = $d->{$_} if $d->{$_} > $maxage; }
+    $maxage ||= 1;
+    my $bar = sub {
+        my ($lbl, $n, $seg) = @_;
+        my $pw = sprintf('%.1f%%', 100 * $n / $maxage); $pw = '2px' if $n == 0;
+        return qq{<div><div class="dash-age-head">}
+             . qq{<span>} . esc($lbl) . qq{</span><span class="dash-num">$n</span></div>}
+             . qq{<div class="dash-age-track">}
+             . qq{<div class="dash-age-fill dash-seg-$seg" style="width:$pw"></div></div></div>};
+    };
+    print qq{<div class="dash-panel">}
+        . qq{<h2 class="dash-h2">Backup age</h2>}
+        . qq{<div class="dash-age">}
+        . $bar->('< 24h',    $d->{age_lt24}, 'fresh')
+        . $bar->('1-3 days', $d->{age_1_3},  'stale')
+        . $bar->('3-7 days', $d->{age_3_7},  'stale')
+        . $bar->('> 7 days', $d->{age_gt7},  'failed')
+        . $bar->('never',    $d->{never},    'never')
+        . qq{</div></div>};
+
+    # trend sparkline
+    print qq{<div class="dash-panel">}
+        . qq{<h2 class="dash-h2">Success rate &middot; 14 days</h2>};
+    my @pts;
+    my $tr = $d->{trend};
+    if (@$tr) {
+        my $n = scalar(@$tr);
+        for my $i (0 .. $n - 1) {
+            my $r = $tr->[$i];
+            my $rate = $r->{n} ? ($r->{ok} / $r->{n}) : 0;
+            my $x = $n > 1 ? ($i * 300 / ($n - 1)) : 0;
+            my $y = 90 - ($rate * 80) - 5;
+            push @pts, sprintf('%.1f,%.1f', $x, $y);
+        }
+        my $last = $tr->[-1];
+        my $lastrate = $last->{n} ? sprintf('%.1f%%', 100 * $last->{ok} / $last->{n}) : 'n/a';
+        print qq{<div class="dash-trend-rate dash-ok">$lastrate</div>};
+        print qq{<svg width="100%" height="90" viewBox="0 0 300 92" preserveAspectRatio="none" role="img" aria-label="14-day success rate">}
+            . qq{<polyline class="dash-trend-line" points="} . join(' ', @pts) . qq{"></polyline></svg>};
+    }
+    else {
+        print qq{<p class="muted">No run history in the last 14 days.</p>};
+    }
+    print qq{</div>};
+
+    print qq{</section>\n};
+
+    # By site (last block): per-site success-rate bars + colour legend. Scrollable
+    # when a fleet has many sites so it does not swamp the page.
+    my $sites = $d->{by_site} || [];
+    print qq{<section class="dash-panel dash-panel-last">};
+    print qq{<div class="dash-panel-head"><h2>By site</h2>} . dash_status_legend() . qq{</div>};
+    if (@$sites) {
+        my $many = (@$sites > 12);
+        print qq{<div class="dash-sites} . ($many ? ' dash-sites-scroll' : '') . qq{">};
+        for my $s (@$sites) {
+            my $t  = $s->{total} || 1;
+            my $wf = sprintf('%.3f%%', 100 * $s->{fresh}  / $t);
+            my $ws = sprintf('%.3f%%', 100 * $s->{stale}  / $t);
+            my $wx = sprintf('%.3f%%', 100 * $s->{failed} / $t);
+            my $wn = sprintf('%.3f%%', 100 * $s->{never}  / $t);
+            my $pf = sprintf('%.1f%%', 100 * $s->{fresh}  / $t);
+            print qq{<div>}
+                . qq{<div class="dash-site-head">}
+                . qq{<span class="dash-site-name">} . esc($s->{site}) . qq{</span>}
+                . qq{<span class="muted dash-num">}
+                . _dash_group($s->{total}) . qq{ &middot; $pf fresh</span></div>}
+                . qq{<div class="dash-bar dash-bar-sm">}
+                . qq{<div class="dash-seg-fresh"  style="width:$wf"></div>}
+                . qq{<div class="dash-seg-stale"  style="width:$ws"></div>}
+                . qq{<div class="dash-seg-failed" style="width:$wx"></div>}
+                . qq{<div class="dash-seg-never"  style="width:$wn"></div></div>}
+                . qq{</div>};
+        }
+        print qq{</div>};
+    }
+    else {
+        print qq{<p class="muted">No devices with backup history yet.</p>};
+    }
+    print qq{</section>\n};
+
+    $dbh->disconnect;
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# All devices for the All-devices table, joining the DB status (backup_current)
+# with each device's config metadata (model, template, site) from the device
+# table -- site= and model are config-only, absent from the backup tables. Admin
+# sees every device; a site-limited caller is filtered to its visible devices.
+# Each row: dev_id, site_code, site_desc, model (display), status, state,
+# last_good_at, last_good_size. Rendered in full for a client-side filter/pager.
+sub dashboard_devices_rows {
+    my ($dbh, $user) = @_;
+    my $now = dash_naive_now();
+    my $acc = $user ? user_site_access($dbh, $user) : { unrestricted => 1 };
+    my $unrestricted = $acc->{unrestricted} ? 1 : 0;
+    my $MID = "\xc2\xb7";   # UTF-8 middle dot for "generic <dot> <template>"
+
+    # Parse the device table once: dev_id -> { model, template, site_code }.
+    my ($content, $err) = slurp_device_table();
+    my %meta;
+    if (!$err && defined $content) {
+        for my $r (@{ parse_device_table($content) }) {
+            next unless $r->{kind} eq 'device';
+            next unless defined $r->{id} && $r->{id} ne '';
+            my $tmpl;
+            my $code = SITE_ALL_CODE;
+            for my $p (@{ $r->{opts} || [] }) {
+                $tmpl = $p->[1] if $p->[0] eq 'template' || $p->[0] eq 'model';
+                $code = $p->[1] if $p->[0] eq 'site' && defined $p->[1] && $p->[1] ne '';
+            }
+            $meta{ $r->{id} } = { model => (defined $r->{model} ? $r->{model} : ''),
+                                  template => $tmpl, site_code => $code };
+        }
+    }
+    my $name_of = site_name_map($dbh);
+    my $db = $dbh->selectall_arrayref(
+        q{SELECT dev_id, run_end, state, size_bytes, fail_reason, last_good_at, last_good_size
+            FROM backup_current}, { Slice => {} });
+    my %stat;
+    $stat{ $_->{dev_id} } = $_ for @{ $db || [] };
+
+    # Union of configured devices and devices that have history.
+    my %ids;
+    $ids{$_} = 1 for keys %meta;
+    $ids{$_} = 1 for keys %stat;
+
+    my @out;
+    for my $id (sort { lc($a) cmp lc($b) } keys %ids) {
+        my $m = $meta{$id};
+        my $s = $stat{$id};
+        my $code = $m ? $m->{site_code} : SITE_ALL_CODE;
+        if (!$unrestricted) {
+            next if $code eq SITE_ALL_CODE || !$acc->{codes}{$code};
+        }
+        my ($site_code, $site_desc) = ('', '');
+        if ($code ne SITE_ALL_CODE) {
+            $site_code = $code;
+            $site_desc = defined $name_of->{$code} ? $name_of->{$code} : '';
+        }
+        my $model_disp = '';
+        if ($m) {
+            if (defined $m->{model} && $m->{model} eq 'generic') {
+                my $t = $m->{template};
+                if (defined $t) { $t =~ s{.*/}{}; $t =~ s{\.tmpl\z}{}; }
+                $model_disp = (defined $t && $t ne '') ? "generic $MID $t" : 'generic';
+            }
+            else { $model_disp = defined $m->{model} ? $m->{model} : ''; }
+        }
+        # A device configured in the table but with no backup_current row yet is
+        # "No data" (the engine has not recorded it), distinct from "Never" (it
+        # has a row but no successful backup).
+        my $st = $s ? dash_status($s->{state}, $s->{last_good_at}, $now) : 'nodata';
+        push @out, {
+            dev_id         => $id,
+            site_code      => $site_code,
+            site_desc      => $site_desc,
+            model          => $model_disp,
+            status         => $st,
+            state          => ($s ? $s->{state} : undef),
+            last_good_at   => ($s ? $s->{last_good_at}   : undef),
+            last_good_size => ($s ? $s->{last_good_size} : undef),
+        };
+    }
+    return \@out;
+}
+
+sub show_dashboard_devices {
+    my ($user) = @_;
+    return dashboard_deny($user, 'The dashboard is not enabled or you are not an administrator.')
+        unless dashboard_allowed($user);
+
+    my $dbh   = db_connect();
+    my $state = dashboard_schema_state($dbh);
+
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Dashboard - All devices', $user, 'full');
+
+    if ($state ne 'ok') {
+        print dashboard_state_block($dbh, $state);
+        $dbh->disconnect if $dbh;
+        print page_foot();
+        return;
+    }
+
+    my $now  = dash_naive_now();
+    my $rows = dashboard_devices_rows($dbh, $user);
+    $dbh->disconnect;
+
+    # Full-set counts (not the live filter) + distinct site codes (-> description)
+    # for the drop-down. The site filter is keyed on the site CODE.
+    my %cnt = (fresh => 0, stale => 0, failed => 0, never => 0, nodata => 0);
+    my %sites;   # code => description
+    for my $r (@$rows) {
+        $cnt{ $r->{status} }++ if exists $cnt{ $r->{status} };
+        $sites{ $r->{site_code} } = $r->{site_desc} if $r->{site_code} ne '';
+    }
+    my $total = scalar @$rows;
+
+    # Green box with a title bar -- same chrome as the other pages (e.g. Audit log).
+    my $csv_url = esc(script_url() . '?action=dashboard_devices_csv');
+    print qq{<div class="tool-section" id="dd-section">\n};
+    print qq{<h2 class="tool-section-title">All devices</h2>\n};
+    print qq{<p class="muted" style="margin:0 0 0.8em">}
+        . _dash_group($total) . qq{ devices &middot; }
+        . qq{<span class="dash-ok">} . _dash_group($cnt{fresh}) . qq{ fresh</span>, }
+        . _dash_group($cnt{stale}) . qq{ stale, }
+        . qq{<span class="dash-bad">} . _dash_group($cnt{failed}) . qq{ failed</span>, }
+        . _dash_group($cnt{never}) . qq{ never}
+        . ($cnt{nodata} ? (qq{, } . _dash_group($cnt{nodata}) . qq{ no data}) : '')
+        . qq{</p>\n};
+
+    # Client-side filter row: Device | Site | Status, plus Clear, rows-per-page and
+    # Export CSV. It works across the whole set without re-querying -- site/model/
+    # status are not in the backup tables, so a server-side site filter would mean
+    # a slow per-request join; filtering the already-rendered rows avoids that. The
+    # site filter is by site CODE.
+    print qq{<div class="filter-row">\n};
+    print qq{<input type="text" id="dd-filter" class="filter-box" placeholder="Filter device&hellip;" autocomplete="off">\n};
+    print qq{<select id="dd-site" class="filter-select"><option value="">All sites</option>};
+    for my $code (sort { lc($a) cmp lc($b) } keys %sites) {
+        my $desc = $sites{$code};
+        my $lbl  = (defined $desc && $desc ne '') ? "$code / $desc" : $code;
+        print qq{<option value="} . esc(lc $code) . qq{">} . esc($lbl) . qq{</option>};
+    }
+    print qq{<option value="\0none">(no site)</option></select>\n};
+    print qq{<select id="dd-status" class="filter-select">}
+        . qq{<option value="">All statuses</option>}
+        . qq{<option value="fresh">Fresh</option>}
+        . qq{<option value="stale">Stale</option>}
+        . qq{<option value="failed">Failed</option>}
+        . qq{<option value="never">Never</option>}
+        . qq{<option value="nodata">No data</option></select>\n};
+    print qq{<button type="button" id="dd-clear" class="btn">Clear filter</button>\n};
+    print qq{<label class="page-size-label">Rows }
+        . qq{<select id="dd-rows" class="filter-select">}
+        . qq{<option>50</option><option selected>100</option><option>250</option>}
+        . qq{<option>500</option><option value="0">All</option></select></label>\n};
+    print qq{<a class="btn" href="$csv_url">Export CSV</a>\n};
+    print qq{</div>\n};
+
+    # Table (all rows rendered; the script filters and paginates them).
+    print qq{<table class="list" id="dd-table">\n<thead><tr>}
+        . qq{<th>Device</th><th>Site</th><th>Model</th>}
+        . qq{<th class="sortable" data-sort="lastbackup">Last backup <span class="sort-ind"></span></th>}
+        . qq{<th class="sortable" data-sort="status">Status <span class="sort-ind"></span></th>}
+        . qq{<th>Size</th><th></th>}
+        . qq{</tr></thead>\n<tbody>\n};
+    for my $r (@$rows) {
+        my $site_attr = $r->{site_code} ne '' ? lc $r->{site_code} : "\0none";
+        my $last;
+        if    ($r->{status} eq 'failed') { $last = qq{<span class="dash-bad">last run failed</span>}; }
+        elsif ($r->{status} eq 'nodata') { $last = qq{<span class="muted">no data</span>}; }
+        elsif (defined $r->{last_good_at}) { $last = esc(dash_age($r->{last_good_at}, $now)); }
+        else                               { $last = 'never'; }
+        my $sz        = defined $r->{last_good_size} ? _dash_kb($r->{last_good_size}) : '&mdash;';
+        # Site cell: "code / description" (code alone if the code has no description).
+        my $site_cell;
+        if ($r->{site_code} ne '') {
+            $site_cell = ($r->{site_desc} ne '')
+                ? esc($r->{site_code}) . ' / ' . esc($r->{site_desc})
+                : esc($r->{site_code});
+        }
+        else { $site_cell = qq{<span class="muted">&mdash;</span>}; }
+        my $model_cell= $r->{model} ne '' ? esc($r->{model}) : qq{<span class="muted">&mdash;</span>};
+        # from=dashboard so the device page's back button returns here.
+        my $view      = esc(script_url() . '?dev=' . CGI::escape($r->{dev_id}) . '&from=dashboard');
+        my $lb_epoch = defined $r->{last_good_at} ? $r->{last_good_at} : '';
+        print qq{<tr data-dev="} . esc(lc $r->{dev_id}) . qq{" }
+            . qq{data-site="} . esc($site_attr) . qq{" }
+            . qq{data-status="} . esc($r->{status}) . qq{" }
+            . qq{data-lastbackup="} . esc($lb_epoch) . qq{">}
+            . qq{<td style="font-family:Consolas,Menlo,monospace">} . esc($r->{dev_id}) . qq{</td>}
+            . qq{<td>$site_cell</td>}
+            . qq{<td>$model_cell</td>}
+            . qq{<td>$last</td>}
+            . qq{<td>} . dash_badge($r->{status}) . qq{</td>}
+            . qq{<td style="text-align:right;font-family:Consolas,Menlo,monospace">$sz</td>}
+            . qq{<td><a class="btn btn-small" href="$view">View</a></td>}
+            . qq{</tr>\n};
+    }
+    print qq{</tbody></table>\n};
+    print qq{<p class="no-match" id="dd-nomatch" style="display:none">No devices match your filter.</p>\n};
+
+    # Footer: the same pager as the Devices page (First / Prev / page info / Next /
+    # Last), right-aligned. Shown by the script only when there is more than one page.
+    print qq{<div class="dev-pager" id="dd-pager" style="display:none;justify-content:flex-end;margin:0.8em 0 0">}
+        . qq{<button type="button" class="btn btn-small" id="dd-first">&laquo; First</button>}
+        . qq{<button type="button" class="btn btn-small" id="dd-prev">&larr; Prev</button>}
+        . qq{<span id="dd-pageinfo" class="pageinfo"></span>}
+        . qq{<button type="button" class="btn btn-small" id="dd-next">Next &rarr;</button>}
+        . qq{<button type="button" class="btn btn-small" id="dd-last">Last &raquo;</button>}
+        . qq{</div>\n};
+
+    print qq{</div>\n};   # .tool-section (All devices)
+    print dashboard_devices_script();
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# CSV export of the All-devices table (admin-only), full visible set.
+sub do_dashboard_devices_csv {
+    my ($user) = @_;
+    return dashboard_deny($user, 'The dashboard is not enabled or you are not an administrator.')
+        unless dashboard_allowed($user);
+    my $dbh   = db_connect();
+    my $state = dashboard_schema_state($dbh);
+    if ($state ne 'ok') {
+        $dbh->disconnect if $dbh;
+        return dashboard_deny($user, 'The dashboard history schema is not ready.');
+    }
+    my $rows = dashboard_devices_rows($dbh, $user);
+    $dbh->disconnect;
+
+    print std_header(-type => 'text/csv', -charset => 'UTF-8',
+                     -attachment => 'backup-devices.csv');
+    my $csv = sub {   # minimal RFC-4180 quoting
+        join(',', map { my $v = defined $_ ? $_ : ''; $v =~ s/"/""/g; qq{"$v"} } @_) . "\r\n";
+    };
+    print $csv->(qw(device site_code site model last_backup status size_bytes));
+    for my $r (@$rows) {
+        my $lb = (defined $r->{last_good_at} && $r->{last_good_at} ne '')
+               ? dash_fmt_ts($r->{last_good_at}) : '';
+        print $csv->($r->{dev_id}, $r->{site_code}, $r->{site_desc}, $r->{model}, $lb,
+                     ucfirst($r->{status}),
+                     (defined $r->{last_good_size} ? $r->{last_good_size} : ''));
+    }
+}
+
+# Client-side filter, sort and paginate for the All-devices table.
+sub dashboard_devices_script {
+    return <<'JS';
+<script>
+(function(){
+  var table=document.getElementById('dd-table'); if(!table||!table.tBodies[0]) return;
+  var rows=[].slice.call(table.tBodies[0].rows);
+  var fEl=document.getElementById('dd-filter'),
+      sEl=document.getElementById('dd-site'),
+      stEl=document.getElementById('dd-status'),
+      rEl=document.getElementById('dd-rows'),
+      pager=document.getElementById('dd-pager'),
+      pInfo=document.getElementById('dd-pageinfo'),
+      pFirst=document.getElementById('dd-first'),
+      pPrev=document.getElementById('dd-prev'),
+      pNext=document.getElementById('dd-next'),
+      pLast=document.getElementById('dd-last'),
+      nomatch=document.getElementById('dd-nomatch');
+  var page=1;
+  var tbody=table.tBodies[0];
+  var sortKey='lastbackup', sortDir=-1;                 // initial: Last backup, newest first
+  var statusRank={failed:0,never:1,nodata:2,stale:3,fresh:4};
+  function sortVal(tr){
+    if(sortKey==='status'){ var s=tr.getAttribute('data-status'); return (s in statusRank)?statusRank[s]:99; }
+    var v=tr.getAttribute('data-lastbackup'); return (v==='')?-Infinity:parseFloat(v);
+  }
+  function applySort(){
+    // Sort the WHOLE row set (not just the visible page) and reorder the DOM so
+    // pagination stays contiguous.
+    rows.sort(function(a,b){
+      var va=sortVal(a), vb=sortVal(b);
+      if(va<vb) return -sortDir;
+      if(va>vb) return sortDir;
+      var da=a.getAttribute('data-dev'), db=b.getAttribute('data-dev');
+      return da<db?-1:(da>db?1:0);
+    });
+    rows.forEach(function(tr){ tbody.appendChild(tr); });
+    var ths=table.tHead?table.tHead.querySelectorAll('th[data-sort]'):[];
+    [].forEach.call(ths,function(th){
+      var ind=th.querySelector('.sort-ind'); if(!ind) return;
+      ind.textContent=(th.getAttribute('data-sort')===sortKey)?(sortDir<0?'▼':'▲'):'';
+    });
+  }
+  function perPage(){ var v=parseInt(rEl.value,10); return (v>0)?v:1e9; }
+  function matched(){
+    var q=(fEl.value||'').toLowerCase().replace(/^\s+|\s+$/g,''),
+        s=sEl.value, st=stEl.value;
+    return rows.filter(function(tr){
+      if(q && tr.getAttribute('data-dev').indexOf(q)<0) return false;
+      if(s && tr.getAttribute('data-site')!==s) return false;
+      if(st && tr.getAttribute('data-status')!==st) return false;
+      return true;
+    });
+  }
+  function pagesNow(){ return Math.max(1,Math.ceil(matched().length/perPage())); }
+  function render(){
+    var m=matched(), per=perPage(), pages=Math.max(1,Math.ceil(m.length/per));
+    if(page>pages) page=pages; if(page<1) page=1;
+    var start=(page-1)*per, end=Math.min(start+per,m.length);
+    rows.forEach(function(tr){ tr.style.display='none'; });
+    for(var i=start;i<end;i++) m[i].style.display='';
+    nomatch.style.display=m.length?'none':'';
+    // Uniform pager (First / Prev / page info / Next / Last), same as other pages.
+    if(pager){
+      pager.style.display=(pages>1)?'flex':'none';
+      if(pInfo) pInfo.textContent='Page '+page+' of '+pages+
+        ' ('+m.length+' match'+(m.length===1?'':'es')+')';
+      if(pFirst) pFirst.disabled=(page<=1);
+      if(pPrev)  pPrev.disabled =(page<=1);
+      if(pNext)  pNext.disabled =(page>=pages);
+      if(pLast)  pLast.disabled =(page>=pages);
+    }
+  }
+  if(pFirst) pFirst.addEventListener('click',function(){ page=1; render(); });
+  if(pPrev)  pPrev.addEventListener('click',function(){ if(page>1){ page--; render(); } });
+  if(pNext)  pNext.addEventListener('click',function(){ if(page<pagesNow()){ page++; render(); } });
+  if(pLast)  pLast.addEventListener('click',function(){ page=pagesNow(); render(); });
+  [fEl,sEl,stEl,rEl].forEach(function(el){
+    if(!el) return;
+    el.addEventListener('input',function(){page=1;render();});
+    el.addEventListener('change',function(){page=1;render();});
+  });
+  var clrEl=document.getElementById('dd-clear');
+  if(clrEl) clrEl.addEventListener('click',function(){
+    if(fEl) fEl.value=''; if(sEl) sEl.value=''; if(stEl) stEl.value='';
+    page=1; render();
+  });
+  var thsort=table.tHead?table.tHead.querySelectorAll('th[data-sort]'):[];
+  [].forEach.call(thsort,function(th){
+    th.style.cursor='pointer';
+    th.addEventListener('click',function(){
+      var k=th.getAttribute('data-sort');
+      if(sortKey===k){ sortDir=-sortDir; } else { sortKey=k; sortDir=(k==='lastbackup')?-1:1; }
+      applySort(); page=1; render();
+    });
+  });
+  applySort();
+  render();
+})();
+</script>
+JS
+}
+
+# Parse the device table's db: record into a hash of its options (the engine
+# writer credentials etc.), or undef when there is no db: record.
+sub dashboard_db_opts {
+    my ($content, $err) = slurp_device_table();
+    return undef if $err || !defined $content;
+    for my $r (@{ parse_device_table($content) }) {
+        next unless $r->{kind} eq 'db';
+        my %o;
+        for my $p (@{ $r->{opts} || [] }) { $o{ $p->[0] } = $p->[1]; }
+        return \%o;
+    }
+    return undef;
+}
+
+# Open a DB connection AS THE WRITER role, using the credentials from the device
+# table's db: record. The writer owns the history tables, so this is the single
+# privileged path used for orphan cleanup -- the normal web login stays
+# SELECT-only on those tables. Returns ($dbh, $err).
+sub db_connect_as_writer {
+    my $o = dashboard_db_opts();
+    return (undef, 'No db: record in the device table, so the engine writer credentials are unknown. Configure the db: line first.')
+        unless $o && defined $o->{db_user} && $o->{db_user} ne '';
+    my $inst = (defined $o->{db_inst} && $o->{db_inst} ne '') ? $o->{db_inst} : $DBinst;
+    my ($host, $port) = db_host_parse((defined $o->{db_host} && $o->{db_host} ne '') ? $o->{db_host} : 'localhost');
+    my $dsn = "dbi:Pg:dbname=$inst";
+    $dsn .= ";host=$host" if defined $host && $host ne '';
+    $dsn .= ";port=$port" if defined $port && $port ne '';
+    $dsn .= ";sslmode=$o->{db_sslmode}" if defined $o->{db_sslmode} && $o->{db_sslmode} ne '';
+    $dsn .= ";connect_timeout=$o->{db_connect_timeout}"
+        if defined $o->{db_connect_timeout} && $o->{db_connect_timeout} =~ /^\d+\z/;
+    my $dbh = DBI->connect($dsn, $o->{db_user}, $o->{db_pass},
+        { RaiseError => 0, PrintError => 0, AutoCommit => 1 });
+    return ($dbh, $dbh ? undef
+        : ('Cannot connect as the writer role "' . $o->{db_user} . '": ' . ($DBI::errstr // 'unknown')));
+}
+
+# Orphaned statistics: device-ids present in the history tables but with no
+# device-table entry. Returns an arrayref of
+#   { dev_id, backup_current, backup_runs, backup_versions }  (per-table counts).
+sub dashboard_orphans {
+    my ($dbh) = @_;
+    my %have;
+    my ($content, $err) = slurp_device_table();
+    if (!$err && defined $content) {
+        for my $r (@{ parse_device_table($content) }) {
+            next unless $r->{kind} eq 'device';
+            $have{ $r->{id} } = 1 if defined $r->{id} && $r->{id} ne '';
+        }
+    }
+    my %seen;
+    for my $tbl (qw(backup_current backup_runs backup_versions)) {
+        my $rows = $dbh->selectall_arrayref(
+            "SELECT dev_id, count(*) AS n FROM $tbl GROUP BY dev_id", { Slice => {} });
+        for my $r (@{ $rows || [] }) {
+            $seen{ $r->{dev_id} } ||= { dev_id => $r->{dev_id},
+                backup_current => 0, backup_runs => 0, backup_versions => 0 };
+            $seen{ $r->{dev_id} }{$tbl} = $r->{n};
+        }
+    }
+    my @orphans;
+    for my $id (sort { lc($a) cmp lc($b) } keys %seen) {
+        next if $have{$id};
+        push @orphans, $seen{$id};
+    }
+    return \@orphans;
+}
+
+# Tools -> Cleanup dashboard: list orphaned statistics + a delete button.
+sub show_dashboard_cleanup {
+    my ($user) = @_;
+    return dashboard_deny($user, 'The dashboard is not enabled or you are not an administrator.')
+        unless dashboard_allowed($user);
+
+    my $dbh   = db_connect();
+    my $state = dashboard_schema_state($dbh);
+
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Cleanup dashboard', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=dashboard_devices') . qq{">&larr; All devices</a></p>\n};
+
+    if ($state ne 'ok') {
+        print dashboard_state_block($dbh, $state);
+        $dbh->disconnect if $dbh;
+        print page_foot();
+        return;
+    }
+
+    my $orphans = dashboard_orphans($dbh);
+    $dbh->disconnect;
+
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Cleanup dashboard</h2>\n};
+    print qq{<p>Statistics in the history database whose device-id no longer has a }
+        . qq{device-table entry (e.g. a device that was renamed or removed). Deleting them }
+        . qq{removes the orphaned rows from <code>backup_current</code>, <code>backup_runs</code> }
+        . qq{and <code>backup_versions</code>. The device backups themselves are not touched.</p>\n};
+
+    if (!@$orphans) {
+        print qq{<p class="muted">No orphaned statistics &mdash; every device in the history still has a device-table entry.</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    my $n = scalar @$orphans;
+    print qq{<table class="list"><thead><tr>}
+        . qq{<th>Device-id (orphaned)</th>}
+        . qq{<th style="text-align:right">Saved backups</th>}
+        . qq{<th style="text-align:right">Runs</th>}
+        . qq{<th style="text-align:right">Current</th></tr></thead><tbody>\n};
+    for my $o (@$orphans) {
+        print qq{<tr><td style="font-family:Consolas,Menlo,monospace">} . esc($o->{dev_id}) . qq{</td>}
+            . qq{<td style="text-align:right;font-family:Consolas,Menlo,monospace">} . ($o->{backup_versions} || 0) . qq{</td>}
+            . qq{<td style="text-align:right;font-family:Consolas,Menlo,monospace">} . ($o->{backup_runs}     || 0) . qq{</td>}
+            . qq{<td style="text-align:right;font-family:Consolas,Menlo,monospace">} . ($o->{backup_current}  || 0) . qq{</td></tr>\n};
+    }
+    print qq{</tbody></table>\n};
+
+    # All-or-nothing delete, with the app's native Cancel/Confirm dialog
+    # (data-confirm / data-confirm-danger), same as the other destructive tools.
+    my $confirm = "Delete the dashboard statistics for $n orphaned device"
+                . ($n == 1 ? '' : 's') . "? This cannot be undone.";
+    print qq{<form method="POST" action="} . esc(script_url()) . qq{" }
+        . qq{data-confirm="} . esc($confirm) . qq{" data-confirm-danger="y">\n};
+    print qq{<input type="hidden" name="action" value="dashboard_cleanup_delete">\n};
+    print csrf_field();
+    print qq{<p style="margin-top:1em"><button type="submit" class="btn btn-danger">}
+        . qq{Delete orphaned statistics ($n)</button></p>\n};
+    print qq{</form>\n};
+
+    print qq{</div>\n};
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# POST: delete all orphaned statistics (all-or-nothing, in one transaction, via
+# the writer connection). The orphan set is recomputed server-side.
+sub do_dashboard_cleanup_delete {
+    my ($user) = @_;
+    return dashboard_deny($user, 'The dashboard is not enabled or you are not an administrator.')
+        unless dashboard_allowed($user);
+
+    my $dbh   = db_connect();
+    my $state = dashboard_schema_state($dbh);
+    if ($state ne 'ok') {
+        $dbh->disconnect if $dbh;
+        return dashboard_deny($user, 'The dashboard history schema is not ready.');
+    }
+    my $orphans = dashboard_orphans($dbh);
+    $dbh->disconnect;
+    my @ids = map { $_->{dev_id} } @$orphans;
+
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Cleanup dashboard', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=dashboard_cleanup') . qq{">&larr; Cleanup dashboard</a></p>\n};
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Cleanup dashboard</h2>\n};
+
+    if (!@ids) {
+        print qq{<p class="muted">Nothing to delete &mdash; no orphaned statistics.</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    my ($wdbh, $werr) = db_connect_as_writer();
+    unless ($wdbh) {
+        print qq{<p class="error">} . esc($werr) . qq{</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    # All-or-nothing: one transaction, delete child rows first.
+    $wdbh->{AutoCommit} = 0;
+    my $ph = join(',', ('?') x @ids);
+    my $ok = 1;
+    for my $tbl (qw(backup_versions backup_runs backup_current)) {
+        my $rv = $wdbh->do("DELETE FROM $tbl WHERE dev_id IN ($ph)", undef, @ids);
+        if (!defined $rv) { $ok = 0; last; }
+    }
+    my $errstr = $wdbh->errstr;
+    if ($ok) { $ok = $wdbh->commit; $errstr = $wdbh->errstr unless $ok; }
+    else     { $wdbh->rollback; }
+    $wdbh->disconnect;
+
+    if ($ok) {
+        audit(action => 'dashboard_cleanup', username => $user, object_type => 'dashboard',
+              object_id => '', detail => 'deleted orphaned statistics for ' . scalar(@ids)
+              . ' device(s): ' . join(', ', @ids));
+        print qq{<p>Deleted dashboard statistics for <strong>} . scalar(@ids)
+            . qq{</strong> orphaned device} . (@ids == 1 ? '' : 's') . qq{.</p>\n};
+    }
+    else {
+        print qq{<p class="error">Delete failed: } . esc($errstr // 'unknown error')
+            . qq{. No statistics were removed.</p>\n};
+    }
+    print qq{</div>\n};
+    print page_foot();
+}
+
+sub _dash_kb {
+    my ($b) = @_;
+    return '&mdash;' unless defined $b && $b =~ /^\d+\z/;
+    return sprintf('%.0f KB', $b / 1024) if $b >= 1024;
+    return "$b B";
+}
+
+################################################################################
 # Actions
 ################################################################################
 
@@ -3990,6 +5071,7 @@ sub csrf_field {
 # tricked into performing an action nor used as an open redirect.
 my %LOGIN_LANDING = map { $_ => 1 } qw(
     devices status report setup tools user help
+    dashboard dashboard_overview dashboard_devices
     view_templates view_template view_log view_report tool_schedule
 );
 
@@ -4123,10 +5205,20 @@ sub do_login {
         my $sid = create_session($username, $pw_warn);
         my $cookie = session_cookie($sid);
         # Return the user to the page they originally asked for (captured as a
-        # hidden "next" in the login form), if it is a safe landing action;
-        # otherwise the default Devices page.
-        my $dest = login_next_url(scalar $cgi->param('next'),
-                                  scalar $cgi->param('next_arg'));
+        # hidden "next" in the login form), if it is a safe landing action.
+        # With no explicit target, land on the Backup Dashboard Overview when it
+        # is enabled (available to every user); otherwise the Devices page.
+        my $next = scalar $cgi->param('next');
+        my $dest;
+        if (defined $next && $next ne '') {
+            $dest = login_next_url($next, scalar $cgi->param('next_arg'));
+        }
+        elsif ($ENABLE_DASHBOARD) {
+            $dest = script_url() . '?action=dashboard_overview';
+        }
+        else {
+            $dest = script_url();
+        }
         print std_header(-cookie => $cookie, -location => $dest, -status => '302 Found');
     } else {
         # Slow down online brute-force attempts. Applied on every failure --
@@ -4556,6 +5648,12 @@ sub show_device_list {
         my %by_site;
         $by_site{ $_->{site} }++ for grep { defined $_->{site} && $_->{site} ne '' } @$devices;
         my @site_codes = sort keys %by_site;
+        # Site codes carry a description from the DB; the filter dropdown shows
+        # "code / description" while the option VALUE (and the table Site column)
+        # stay the bare code, so the client-side filter is unaffected.
+        my $sdbh = db_connect();
+        my $site_desc = $sdbh ? site_name_map($sdbh) : {};
+        $sdbh->disconnect if $sdbh;
 
         print qq{<div class="dev-layout">\n};
         print qq{<div class="dev-main">\n};
@@ -4571,7 +5669,10 @@ sub show_device_list {
         print qq{<select id="site-filter" class="filter-select">\n};
         print qq{<option value="">(all sites)</option>\n};
         for my $sc (@site_codes) {
-            print qq{<option value="} . esc(lc $sc) . qq{">} . esc($sc) . qq{</option>\n};
+            my $d = $site_desc->{$sc};
+            my $label = (defined $d && $d ne '' && $d ne $sc) ? "$sc / $d" : $sc;
+            print qq{<option value="} . esc(lc $sc) . qq{" title="} . esc($label) . qq{">}
+                . esc($label) . qq{</option>\n};
         }
         print qq{<option value="\0none">(no site)</option>\n};
         print qq{</select>\n};
@@ -4828,7 +5929,15 @@ sub device_filter_script {
 
     // Changing a filter resets to page 1; changing page size keeps you near
     // the top too.
-    function onFilterChange() { page = 0; render(); saveFilters(); }
+    // Show the full "code / description" as a tooltip on the (narrow) select, so
+    // a long description that is visually truncated stays readable on hover. The
+    // option VALUE and the table Site column are unaffected.
+    function syncSiteTitle() {
+        if (!siteInput) return;
+        var o = siteInput.options[siteInput.selectedIndex];
+        siteInput.title = o ? (o.getAttribute('title') || o.text) : '';
+    }
+    function onFilterChange() { syncSiteTitle(); page = 0; render(); saveFilters(); }
     if (modelInput)   modelInput.addEventListener('change', onFilterChange);
     if (siteInput)    siteInput.addEventListener('change', onFilterChange);
     if (devInput)     devInput.addEventListener('input', onFilterChange);
@@ -4842,6 +5951,7 @@ sub device_filter_script {
             if (devInput)     devInput.value = '';
             if (hostInput)    hostInput.value = '';
             if (commentInput) commentInput.value = '';
+            syncSiteTitle();
             page = 0;
             render();
             saveFilters();
@@ -4888,6 +5998,7 @@ sub device_filter_script {
     });
 
     restoreFilters();
+    syncSiteTitle();
     sortBy(sort.key, sort.dir);   // initial sort + first render (calls render())
 })();
 </script>
@@ -6136,6 +7247,62 @@ sub status_page_script {
 JS
 }
 
+# Map of backup file path -> stored SHA1, from the dashboard history table
+# (backup_versions). Best-effort: returns an empty map when the history schema
+# is not present or has no rows for this device, so callers can simply skip the
+# SHA1 button for paths without an entry. The SHA1 is an integrity checksum
+# (detects inadvertent change/corruption), not a cryptographic signature.
+sub backup_sha1_map {
+    my ($dev) = @_;
+    my %map;
+    my $dbh = db_connect() or return \%map;
+    my $rows = $dbh->selectall_arrayref(
+        'SELECT path, sha1 FROM backup_versions WHERE dev_id = ?',
+        { Slice => {} }, $dev);     # undef if the table is absent (RaiseError off)
+    $dbh->disconnect;
+    for my $r (@{ $rows || [] }) {
+        $map{ $r->{path} } = $r->{sha1}
+            if defined $r->{path} && defined $r->{sha1} && $r->{sha1} ne '';
+    }
+    return \%map;
+}
+
+# One delegated handler for all per-row SHA1 buttons: copy the button's
+# data-sha1 to the clipboard (navigator.clipboard with an execCommand fallback
+# for plain HTTP), with brief in-button feedback.
+sub sha1_copy_script {
+    return <<'JS';
+<script>
+(function(){
+  function copyText(text, cb){
+    function fb(){
+      var h=function(e){ if(e.clipboardData){ e.clipboardData.setData('text/plain',text); e.preventDefault(); } };
+      document.addEventListener('copy',h);
+      var ta=document.createElement('textarea'); ta.value=text; ta.setAttribute('readonly','');
+      ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      try{ ta.setSelectionRange(0,text.length); }catch(e){}
+      var ok=false; try{ ok=document.execCommand('copy'); }catch(e){ ok=false; }
+      document.removeEventListener('copy',h); document.body.removeChild(ta); cb(ok);
+    }
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(function(){cb(true);}, fb);
+    } else { fb(); }
+  }
+  document.addEventListener('click', function(e){
+    var b = e.target && e.target.closest ? e.target.closest('.sha1-btn') : null;
+    if(!b) return;
+    e.preventDefault();
+    copyText(b.getAttribute('data-sha1')||'', function(ok){
+      b.textContent = ok ? 'Copied!' : 'Failed';
+      setTimeout(function(){ b.textContent='SHA1'; }, 1200);
+    });
+  });
+})();
+</script>
+JS
+}
+
 ################################################################################
 # show_backup_list
 #
@@ -6189,9 +7356,10 @@ sub show_backup_list {
     # Breadcrumb: return to the Status page when we arrived from there
     # (?from=status), otherwise to the Devices list.
     my $from = $cgi->param('from') // '';
-    my ($crumb_url, $crumb_label) = ($from eq 'status')
-        ? (script_url() . '?action=status', '&larr; Status')
-        : (script_url(),                    '&larr; Devices');
+    my ($crumb_url, $crumb_label);
+    if    ($from eq 'status')    { ($crumb_url, $crumb_label) = (script_url() . '?action=status',            '&larr; Status'); }
+    elsif ($from eq 'dashboard') { ($crumb_url, $crumb_label) = (script_url() . '?action=dashboard_devices', '&larr; All devices'); }
+    else                         { ($crumb_url, $crumb_label) = (script_url(),                               '&larr; Devices'); }
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc($crumb_url) . qq{">$crumb_label</a></p>\n};
     my $_bn = do { my $d = db_connect(); my $n = $d ? db_note_get($d, $dev) : undef; $d->disconnect if $d;
@@ -6249,6 +7417,9 @@ sub show_backup_list {
         }
         my $chk_th = $show_compare ? qq{<th title="Select up to two to compare">CMP</th>} : '';
         my $dl_th  = $show_dl ? qq{<th title="Select to download">DL</th>} : '';
+        # Per-version SHA1 (integrity checksum) from the dashboard history, keyed
+        # by path. Empty map when the history schema is not in use.
+        my $sha1_of = backup_sha1_map($dev);
         print qq{<table class="list">\n<tr>$chk_th$dl_th<th>#</th><th>Date</th><th>Time</th><th>Size</th><th>Path</th></tr>\n};
         for my $b (@$backups) {
             my $link = script_url() . '?dev=' . CGI::escape($dev) . '&idx=' . CGI::escape($b->{idx});
@@ -6265,9 +7436,20 @@ sub show_backup_list {
             print qq{<td>} . esc($b->{date}) . qq{</td>};
             print qq{<td>} . esc($b->{time}) . qq{</td>};
             print qq{<td>} . esc($b->{size}) . qq{</td>};
-            print qq{<td>} . esc($b->{path}) . qq{</td></tr>\n};
+            # Path, with a small gray SHA1 button when an integrity checksum is on
+            # file for this backup. Clicking copies the hash; the full hash is in
+            # the tooltip.
+            my $sha = $sha1_of->{ $b->{path} };
+            my $sha_btn = '';
+            if (defined $sha && $sha ne '') {
+                $sha_btn = qq{ <button type="button" class="btn btn-small sha1-btn" }
+                    . qq{data-sha1="} . esc($sha) . qq{" }
+                    . qq{title="SHA1 integrity checksum (click to copy): } . esc($sha) . qq{">SHA1</button>};
+            }
+            print qq{<td>} . esc($b->{path}) . $sha_btn . qq{</td></tr>\n};
         }
         print qq{</table>\n};
+        print sha1_copy_script();
         if ($show_compare) {
             print $cgi->end_form;
             print <<'JS';
@@ -8759,13 +9941,37 @@ sub render_unified_diff {
     my $html = qq{<pre class="config">};
     for my $line (split /\n/, $text, -1) {
         my $cls = '';
-        if    ($line =~ /^\+\+\+/ || $line =~ /^---/ || $line =~ /^\@\@/ || $line =~ /^\*\*\*/) { $cls = 'd-hunk'; }
-        elsif ($line =~ /^[+>]/) { $cls = 'd-add'; }
-        elsif ($line =~ /^[-<]/) { $cls = 'd-del'; }
+        my $out;
+        # CRITICAL: mask the config CONTENT, not the diff-marker-prefixed line.
+        # The masker has several ^-anchored rules (indented "key <value>", SNMP
+        # community, radius/tacacs "key", Hirschmann "users passwd ..."); a
+        # leading '-'/'+'/'<'/'>' marker would move the start of the line and
+        # defeat every one of them, leaking secrets that the normal config view
+        # masks. So split the marker off, mask the remainder, and re-attach the
+        # marker (HTML-escaped on its own). The marker's own space (normal diff)
+        # is preserved; the content keeps its original indentation.
+        if ($line =~ /^\+\+\+/ || $line =~ /^---/ || $line =~ /^\@\@/ || $line =~ /^\*\*\*/) {
+            # Hunk / separator header -- no config content.
+            $cls = 'd-hunk';
+            $out = $esc_text->($line);
+        }
+        elsif ($line =~ /^([<>]) (.*)$/s) {
+            # Normal diff (fetchconfig.pl -m / `diff`): "<marker><space><content>".
+            $cls = ($1 eq '>') ? 'd-add' : 'd-del';
+            $out = CGI::escapeHTML("$1 ") . $esc_text->($2);
+        }
+        elsif ($line =~ /^([-+])(.*)$/s) {
+            # Unified-style (build_unified_diff): "<marker><content>", no space.
+            $cls = ($1 eq '+') ? 'd-add' : 'd-del';
+            $out = CGI::escapeHTML($1) . $esc_text->($2);
+        }
+        else {
+            $out = $esc_text->($line);
+        }
         if ($cls ne '') {
-            $html .= qq{<span class="$cls">} . $esc_text->($line) . qq{</span>\n};
+            $html .= qq{<span class="$cls">} . $out . qq{</span>\n};
         } else {
-            $html .= $esc_text->($line) . qq{\n};
+            $html .= $out . qq{\n};
         }
     }
     $html .= qq{</pre>\n};
@@ -11569,7 +12775,7 @@ sub show_reports {
     unless (defined $dir) {
         print qq{<p class="muted">Reporting is not configured. Set an }
             . qq{allow-listed <code>report_dir</code> on the <code>email:</code> line }
-            . qq{(Setup &rarr; Edit device table &rarr; Email notification and reporting).</p>\n};
+            . qq{(Setup &rarr; Edit device table &rarr; General parameters).</p>\n};
         print qq{</div>\n};
         print page_foot();
         return;
@@ -12361,7 +13567,7 @@ sub show_view_templates {
         print template_t_raw_html($t);
     } else {
         print qq{<table class="list">\n<tr><th>Template</th><th>Full Template Name</th>}
-            . qq{<th>Size</th><th>Modified</th><th>Used</th><th></th></tr>\n};
+            . qq{<th>Size</th><th>Modified</th><th>Used</th><th>Orig</th><th></th></tr>\n};
         for my $f (@$files) {
             my $view = esc(script_url() . '?action=view_template&path='
                          . CGI::escape($f->{path}));
@@ -12374,19 +13580,47 @@ sub show_view_templates {
                 ? ($used ? qq{<span style="color:#1a7f37;font-weight:600">Yes</span>}
                          : qq{<span style="color:#b00020;font-weight:600">No</span>})
                 : qq{<span class="muted">&mdash;</span>};
+
+            # Integrity status against the directory's shipped integrity.sha1
+            # manifest (delivered by fetchconfig). "original"/"edited" = a shipped
+            # template; those are replaced on every fetchconfig update, so they
+            # are not edited/deleted/renamed in place -- Copy to a custom name
+            # instead. "custom" = no hash available (own template, or a directory
+            # with no manifest).
+            my $status  = $f->{problem} eq ''
+                        ? template_status($f->{path}) : 'custom';
+            my $shipped = ($status eq 'original' || $status eq 'edited') ? 1 : 0;
+            my $orig_cell =
+                  $f->{problem} ne ''    ? qq{<span class="muted">&mdash;</span>}
+                : $status eq 'original'  ? qq{<span class="muted">Original</span>}
+                : $status eq 'edited'    ? qq{<span style="color:#b36b00;font-weight:600" title="Modified shipped template -- it will be overwritten on the next fetchconfig update; use Copy to keep your changes">Edited</span>}
+                :                          qq{<span style="color:#1a7f37;font-weight:600">Custom</span>};
+
             my $actions;
             if ($f->{problem} ne '') {
                 $actions = qq{<span class="error">Warning: } . esc($f->{problem})
                          . qq{ &mdash; not a plain text file; view/edit/delete refused</span>};
+            } elsif ($shipped) {
+                # Shipped template (original or edited): replaced on every fetchconfig
+                # update, so editing/deleting in place is futile and renaming would
+                # collide on the next drop. Edit and Delete are shown disabled; a
+                # green Copy makes an editable custom copy instead.
+                my $copy = esc(script_url() . '?action=copy_template_form&path='
+                             . CGI::escape($f->{path}));
+                $actions = qq{<div class="row-actions">}
+                         . qq{<a class="btn" href="$view">View</a>\n}
+                         . qq{<span class="btn" disabled title="Shipped template &mdash; use Copy to edit a custom version">Edit</span>\n}
+                         . qq{<a class="btn btn-green" href="$copy" style="min-width:5.5em">Copy</a>\n}
+                         . qq{<a class="btn" href="$dl">Download</a>\n}
+                         . qq{<span class="btn btn-danger" disabled title="Shipped template &mdash; replaced on update, cannot delete">Delete</span>}
+                         . qq{</div>};
             } else {
-                # Rename (unused templates only): an inline form that opens the
-                # shared styled popup (data-prompt) to ask for the new name, then
-                # posts action=rename_template. A used template's name is the
-                # generic model= value a device resolves on, so renaming it is
-                # refused -- greyed out, like Delete.
+                # Custom template (or a directory with no manifest): full
+                # edit/rename/delete, still gated by the existing "in use" rule.
                 my $rename;
                 if ($used) {
                     $rename = qq{<button type="button" class="btn" disabled }
+                            . qq{style="min-width:5.5em" }
                             . qq{title="In use by a device &mdash; cannot rename">Rename</button>};
                 } else {
                     my $path_h = esc($f->{path});
@@ -12400,7 +13634,7 @@ sub show_view_templates {
                             . qq{<input type="hidden" name="path" value="$path_h">}
                             . qq{<input type="hidden" name="newname" value="">}
                             . csrf_field()
-                            . qq{<button type="submit" class="btn">Rename</button></form>};
+                            . qq{<button type="submit" class="btn" style="min-width:5.5em">Rename</button></form>};
                 }
                 my $del;
                 if ($used) {
@@ -12430,6 +13664,7 @@ sub show_view_templates {
                 . qq{<td>} . esc(human_size($f->{size})) . qq{</td>}
                 . qq{<td>} . esc(fmt_mtime($f->{mtime})) . qq{</td>}
                 . qq{<td>$used_cell</td>}
+                . qq{<td>$orig_cell</td>}
                 . qq{<td>$actions</td>}
                 . qq{</tr>\n};
         }
@@ -13476,6 +14711,168 @@ sub do_rename_template {
           detail=>($ok ? "renamed to $newbase" : "rename failed: $msg"));
     if ($ok) { redirect_to_action('view_templates', msg => "Renamed $oldbase to $newbase."); }
     else     { redirect_to_action('view_templates', err => "Rename failed: $msg"); }
+}
+
+################################################################################
+# show_copy_template_form
+#
+# GET: the "Copy template" page for a shipped (stock/edited) template. Offers an
+# editable target name pre-filled with "<stem>-cust" (.tmpl is always added) and,
+# when template directories are configured in the allow-list, a directory
+# dropdown (defaulting to the source's own directory); with none configured the
+# copy goes into the source template's directory. (action=copy_template_form)
+#
+# Parameters:
+#   $user
+################################################################################
+sub show_copy_template_form {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    unless (user_may_use_tools($user)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">You do not have permission to use the tools.</p>\n};
+        print page_foot(); return;
+    }
+    my $path = $cgi->param('path') // '';
+    print page_head('Copy template', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Copy template</h2>\n};
+    unless (template_path_ok($path)) {
+        print qq{<p class="error">Template not found, or not an allowed template path.</p>\n};
+        print qq{</div>\n}; print page_foot(); return;
+    }
+    (my $stem = $path) =~ s{.*/}{}; $stem =~ s/\.tmpl$//;
+    my $suggest = "$stem-cust";
+    (my $srcdir = $path) =~ s{/[^/]*$}{};
+    my @tdirs = @{ read_allowed_dirs()->{template} };
+
+    print qq{<p>Copy the shipped template <code>} . esc("$stem.tmpl")
+        . qq{</code> to a new, editable template. Original (shipped) templates are replaced on }
+        . qq{every fetchconfig update, so keep your changes under a custom name }
+        . qq{(suggested suffix <code>-cust</code>, so the copy sorts next to the }
+        . qq{original in the list).</p>\n};
+    print qq{<form method="POST" action="} . esc(script_url()) . qq{" class="tpl-upload-form">\n};
+    print qq{<input type="hidden" name="action" value="copy_template">\n};
+    print qq{<input type="hidden" name="path" value="} . esc($path) . qq{">\n};
+    print csrf_field();
+    print qq{<label class="tpl-up-field">New name}
+        . qq{<span style="display:inline-flex;align-items:baseline;gap:0.3em">}
+        . qq{<input type="text" name="newname" value="} . esc($suggest) . qq{" required>}
+        . qq{<code>.tmpl</code></span></label>\n};
+    if (@tdirs) {
+        print qq{<label class="tpl-up-field">Directory <select name="tdir">\n};
+        for my $d (@tdirs) {
+            my $p = esc($d->{path});
+            my $a = defined $d->{alias} && $d->{alias} ne '' ? esc($d->{alias}) . ' &mdash; ' : '';
+            my $sel = ($d->{path} eq $srcdir) ? ' selected' : '';
+            print qq{<option value="$p"$sel>$a$p</option>\n};
+        }
+        print qq{</select></label>\n};
+    } else {
+        print qq{<p class="opt-hint muted">No template directories are configured in the }
+            . qq{allow-list, so the copy is created in the source template's directory }
+            . qq{(<code>} . esc($srcdir) . qq{</code>).</p>\n};
+    }
+    print qq{<button type="submit" class="btn btn-green">Create copy</button>\n};
+    print qq{ <a class="btn" href="} . esc(script_url() . '?action=view_templates')
+        . qq{">Cancel</a>\n};
+    print qq{<p class="opt-hint muted">The name is the generic <code>model=</code> value; }
+        . qq{<code>.tmpl</code> is added automatically. An existing name is never }
+        . qq{overwritten, and a shipped template name cannot be reused.</p>\n};
+    print qq{</form>\n</div>\n};
+    print page_foot();
+}
+
+################################################################################
+# do_copy_template
+#
+# POST: create a new custom template from a shipped one. (action=copy_template)
+# The source must be a known template (template_path_ok); the target name is a
+# safe "<model>.tmpl" basename (.tmpl added if omitted); the target directory is
+# a configured template dir (allow-list) or, when none are configured, the
+# source's own directory. An existing name is never overwritten, and a shipped
+# (manifest) name cannot be reused. The copy is created via the privileged helper
+# ("install-new", atomic/refuse-if-exists) or a direct no-overwrite write.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_copy_template {
+    my ($user) = @_;
+    unless (user_may_use_tools($user)) {
+        redirect_to_action('view_templates', err => 'You do not have permission to use the tools.');
+        return;
+    }
+    my $src = $cgi->param('path') // '';
+    unless (template_path_ok($src)) {
+        redirect_to_action('view_templates', err => 'Source template not found, or not an allowed template path.');
+        return;
+    }
+    # Target name -> safe "<model>.tmpl" basename (.tmpl added if omitted).
+    my $name_in = $cgi->param('newname'); $name_in = '' unless defined $name_in;
+    $name_in =~ s/^\s+//; $name_in =~ s/\s+$//;
+    (my $base = $name_in) =~ s{^.*[/\\]}{};
+    $base .= '.tmpl' unless $base =~ /\.tmpl$/;
+    unless (template_upload_name_ok($base)) {
+        redirect_to_action('view_templates',
+            err => 'Invalid new template name. Use letters, digits and ._- (the name is the generic model= value).');
+        return;
+    }
+    # Target directory: a configured template dir (allow-list), else the source's
+    # own directory when none are configured.
+    my @tdirs = @{ read_allowed_dirs()->{template} };
+    my $dir;
+    if (@tdirs) {
+        my $dir_in = $cgi->param('tdir'); $dir_in = '' unless defined $dir_in;
+        $dir = ($dir_in =~ /^\$/) ? resolve_dir_alias('template', $dir_in) : $dir_in;
+        my %ok = map { $_->{path} => 1 } @tdirs;
+        unless (defined $dir && $dir ne '' && $ok{$dir}) {
+            redirect_to_action('view_templates', err => 'Choose a configured template directory.');
+            return;
+        }
+    } else {
+        ($dir = $src) =~ s{/[^/]*$}{};
+    }
+    $dir =~ s{/+$}{};
+    my $target = "$dir/$base";
+
+    # Never overwrite; never copy onto a shipped (manifest) name.
+    if (-e $target) {
+        redirect_to_action('view_templates',
+            err => "A template named $base already exists in that directory.");
+        return;
+    }
+    my $manifest = template_integrity_manifest($dir);
+    if ($manifest && exists $manifest->{$base}) {
+        redirect_to_action('view_templates',
+            err => "$base is a shipped template name in that directory; choose a different (custom) name.");
+        return;
+    }
+
+    # Read the source, then create the copy (atomic, refuse-if-exists) via the
+    # helper or a direct write -- the same install path as Upload.
+    my $data = '';
+    if (open(my $fh, '<', $src)) { binmode($fh); local $/; $data = <$fh>; close($fh); }
+    else {
+        redirect_to_action('view_templates', err => 'Cannot read the source template.');
+        return;
+    }
+    $data = '' unless defined $data;
+    my ($tfh, $tmp) = eval { tempfile('fcweb-cp-XXXXXXXX', DIR => $BACKUP_TMP_DIR, SUFFIX => '.tmpl') };
+    unless ($tfh) {
+        redirect_to_action('view_templates', err => 'Cannot create a temp file for the copy.');
+        return;
+    }
+    binmode($tfh); print $tfh $data; close($tfh); chmod(0600, $tmp);
+    my ($ok, $msg) = install_new_template($target, $tmp);
+    unlink($tmp);
+    (my $srcbase = $src) =~ s{.*/}{};
+    audit(action=>'copy_template', object_type=>'template', object_id=>$target,
+          detail=>($ok ? "copied from $srcbase" : "copy failed: $msg"));
+    if ($ok) { redirect_to_action('view_templates', msg => "Copied $srcbase to $base."); }
+    else     { redirect_to_action('view_templates', err => "Copy failed: $msg"); }
 }
 
 ################################################################################
@@ -17100,6 +18497,14 @@ sub parse_device_table {
             push @records, { kind => 'directory', raw => $line };
             next;
         }
+        # db: directive -- the dashboard history database (default-level, one
+        # line, fleet-wide). Parsed so the editor can show structured fields;
+        # serialized back as "db: k=v,...". Quoting follows parse_opts, so
+        # db_pass="a,b=c" round-trips.
+        if ($trimmed =~ /^db\s*:\s*(.*)$/i) {
+            push @records, { kind => 'db', opts => parse_opts($1) };
+            next;
+        }
         # Any other "word:" directive we don't model -> keep verbatim.
         if ($trimmed =~ /^\S+\s*:/) {
             push @records, { kind => 'other', raw => $line };
@@ -17183,12 +18588,13 @@ sub normalize_dir_opts {
 ################################################################################
 sub serialize_records {
     my ($records) = @_;
-    my (@emails, @defaults, @devices, @unknown);
+    my (@emails, @defaults, @devices, @unknown, @db);
     for my $r (@$records) {
         if    ($r->{kind} eq 'email')   { push @emails,   $r; }
         elsif ($r->{kind} eq 'default') { push @defaults, $r; }
         elsif ($r->{kind} eq 'device')  { push @devices,  $r; }
         elsif ($r->{kind} eq 'other')   { push @unknown,  $r; }
+        elsif ($r->{kind} eq 'db')      { push @db,       $r; }
         # 'comment' and 'directory' records are dropped here: the directory:
         # allow-list is re-emitted verbatim from disk below, never from the
         # (potentially forged) form data.
@@ -17235,6 +18641,22 @@ sub serialize_records {
             }
         }
         push @out, '';
+    }
+
+    # Dashboard history database (default-level, single line). Emitted only when
+    # it has options; an all-empty db record (user cleared the fields) drops the
+    # line. Comma-only quoting, like email:, so db_pass="a,b" survives.
+    if (@db) {
+        my @lines;
+        for my $r (@db) {
+            my $o = serialize_opts($r->{opts}, 1);
+            push @lines, 'db: ' . $o if defined $o && $o ne '';
+        }
+        if (@lines) {
+            push @out, '# Dashboard database', '';
+            push @out, @lines;
+            push @out, '';
+        }
     }
 
     push @out, '#              model           options', '';
@@ -17770,6 +19192,69 @@ sub render_add_option {
 # Parameters:
 #   $user
 ################################################################################
+# Structured "db:" fields for the General parameters tab (admin-only). Simple
+# text inputs; prefilled from the existing db record. db_pass shows the
+# $SECRET_KEEP sentinel when a value exists (restored on save unless retyped).
+sub edit_table_db_fields_html {
+    my ($records) = @_;
+    my %v;
+    for my $r (@$records) {
+        next unless $r->{kind} eq 'db';
+        for my $pair (@{ $r->{opts} || [] }) { $v{ $pair->[0] } = $pair->[1]; }
+        last;
+    }
+    my $pass_shown = (defined $v{db_pass} && $v{db_pass} ne '') ? $SECRET_KEEP : '';
+    # One row per field, styled like the option rows in the email card
+    # (monospace key label + input), so it reads as part of the same editor.
+    my $field = sub {
+        my ($name, $val, $ph) = @_;
+        return qq{<div class="opt-field"><label>} . esc($name) . qq{</label>}
+             . qq{<input type="text" name="} . esc($name) . qq{" value="} . esc(defined $val ? $val : '')
+             . qq{" placeholder="} . esc($ph // '') . qq{" size="42"></div>\n};
+    };
+    # Numeric fields: a real number input (whole, non-negative). The server
+    # re-validates on save (see reconstruct_records_from_form).
+    my $num = sub {
+        my ($name, $val, $ph) = @_;
+        return qq{<div class="opt-field"><label>} . esc($name) . qq{</label>}
+             . qq{<input type="number" min="0" step="1" name="} . esc($name) . qq{" value="} . esc(defined $val ? $val : '')
+             . qq{" placeholder="} . esc($ph // '') . qq{"></div>\n};
+    };
+    # db_sslmode: a dropdown of the libpq sslmode values (blank = libpq default).
+    my $ssl = do {
+        my $cur   = defined $v{db_sslmode} ? $v{db_sslmode} : '';
+        my @modes = ('', qw(disable allow prefer require verify-ca verify-full));
+        my $opts  = '';
+        for my $m (@modes) {
+            my $sel = ($m eq $cur) ? ' selected' : '';
+            my $lbl = ($m eq '') ? '(default)' : $m;
+            $opts .= qq{<option value="} . esc($m) . qq{"$sel>} . esc($lbl) . qq{</option>};
+        }
+        # Keep an unrecognized stored value rather than silently dropping it.
+        unless (grep { $_ eq $cur } @modes) {
+            $opts = qq{<option value="} . esc($cur) . qq{" selected>} . esc($cur) . qq{ (custom)</option>} . $opts;
+        }
+        qq{<div class="opt-field"><label>db_sslmode</label>}
+          . qq{<select name="db_sslmode">$opts</select></div>\n};
+    };
+    # White card, matching the email: notification-settings box in the same tab.
+    my $h = qq{<div class="rec-card db-params">\n}
+          . qq{<input type="hidden" name="db_section" value="1">\n}
+          . qq{<div class="rec-head"><strong>db:</strong> dashboard database</div>\n}
+          . qq{<p class="muted" style="margin:0 0 0.6em">Where the fetchconfig engine writes backup history for the dashboard (the fleet-wide <code>default:</code>-level <code>db:</code> line). Leave every field empty to remove it. The schema and writer role are created by <code>fetchconfig-web-dbsetup.pl --upgrade</code>.</p>\n}
+          . qq{<div class="opt-list">\n}
+          . $field->('db_inst',            $v{db_inst}, 'fetchconfig')
+          . $field->('db_host',            $v{db_host}, 'localhost')
+          . $field->('db_user',            $v{db_user}, 'fetchconfig_dashboard')
+          . $field->('db_pass',            $pass_shown, '')
+          . $num->('db_connect_timeout',   $v{db_connect_timeout}, '5')
+          . $ssl
+          . $num->('db_max_outbox_days',   $v{db_max_outbox_days}, '90')
+          . qq{</div>\n}
+          . qq{</div>\n};
+    return $h;
+}
+
 sub show_edit_table {
     my ($user) = @_;
     my $render_t0 = [Time::HiRes::gettimeofday()];
@@ -17793,6 +19278,7 @@ sub show_edit_table {
     # (all tabs, bulk edit); a site-limited user gets the Devices tab only (their
     # devices), a read-only Defaults tab, and no Email/Reporting or Bulk edit.
     my $unrestricted = $dbh ? user_is_unrestricted($dbh, $user) : 1;
+    my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
     site_ctx_init($dbh, $user);
     my $site_acc = user_site_access($dbh, $user);
     $dbh->disconnect if $dbh;
@@ -17941,7 +19427,7 @@ sub show_edit_table {
         . qq{<button type="button" class="tab" data-tab="defaults">Defaults (per model)}
         . ($unrestricted ? '' : ' &mdash; view only') . qq{</button>}
         . ($unrestricted
-            ? qq{<button type="button" class="tab" data-tab="email">Email notification and reporting</button>}
+            ? qq{<button type="button" class="tab" data-tab="email">General parameters</button>}
             : '')
         . qq{</div>\n};
 
@@ -18104,6 +19590,9 @@ sub show_edit_table {
     # Email tab
     print qq{<div class="tab-panel" data-panel="email" style="display:none;">\n};
     print join('', @email_html);
+    # Dashboard "db:" fields live in this (renamed "General parameters") tab,
+    # admin-only. db_pass is masked; the record round-trips via reconstruct/serialize.
+    print edit_table_db_fields_html($records) if $is_admin;
     print qq{</div>\n};
 
     print $cgi->end_form;
@@ -18331,6 +19820,61 @@ sub reconstruct_records_from_form {
             $dev{_was_expanded} = 1 if $cgi->param("${rk}_open");
             $dev{_edited}       = 1 if $cgi->param("${rk}_edited");
             push @records, \%dev;
+        }
+    }
+
+    # db: dashboard history line (General parameters tab, admin-only). Present
+    # only when that section was in the form (the db_section marker). Rebuilt
+    # from fixed-name fields; db_pass restores from $orig when left at the mask.
+    # An all-empty set drops the line (not emitted by serialize_records).
+    if (defined $cgi->param('db_section')) {
+        my %f;
+        for my $k (qw(db_inst db_user db_pass db_host db_connect_timeout db_sslmode db_max_outbox_days)) {
+            my $val = $cgi->param($k);
+            $val = '' unless defined $val;
+            $val =~ s/^\s+|\s+$//g;
+            $f{$k} = $val;
+        }
+        if ($f{db_pass} eq $SECRET_KEEP) {
+            my $ov = '';
+            for my $r (@$orig) {
+                next unless $r->{kind} eq 'db';
+                for my $p (@{ $r->{opts} || [] }) {
+                    $ov = $p->[1] if defined $p->[0] && $p->[0] eq 'db_pass';
+                }
+                last;
+            }
+            $f{db_pass} = defined $ov ? $ov : '';
+        }
+        # Numeric fields must be a non-negative whole number. Drop a bad value
+        # (with a warning) so the db: line never carries a non-numeric setting.
+        for my $nk (qw(db_connect_timeout db_max_outbox_days)) {
+            if ($f{$nk} ne '' && $f{$nk} !~ /^\d+\z/) {
+                push @warnings, "db: $nk must be a whole number -- '" . $f{$nk}
+                    . "' was ignored.";
+                $f{$nk} = '';
+            }
+        }
+        my @map = (
+            ['db_inst',            'db_inst'],
+            ['db_user',            'db_user'],
+            ['db_pass',            'db_pass'],
+            ['db_host',            'db_host'],
+            ['db_connect_timeout', 'db_connect_timeout'],
+            ['db_sslmode',         'db_sslmode'],
+            ['db_max_outbox_days', 'db_max_outbox_days'],
+        );
+        my @dopts;
+        for my $m (@map) {
+            my ($fld, $key) = @$m;
+            push @dopts, [$key, $f{$fld}] if defined $f{$fld} && $f{$fld} ne '';
+        }
+        if (@dopts) {
+            if ($f{db_host} ne '' && !db_host_valid($f{db_host})) {
+                push @warnings, "db: db_host '" . $f{db_host}
+                    . "' looks invalid (expected host, host:port, or [IPv6]:port).";
+            }
+            push @records, { kind => 'db', opts => \@dopts };
         }
     }
 
@@ -20987,11 +22531,12 @@ sub host_sort_key {
 #   $filter_user
 ################################################################################
 sub read_device_ids {
-    my ($filter_user) = @_;
+    my ($filter_user, $acc) = @_;
     # When a user is given and is site-limited, only their visible devices are
-    # returned (central enforcement for the device list / status).
-    my $acc;
-    if (defined $filter_user) {
+    # returned (central enforcement for the device list / status). A caller that
+    # already holds the access hashref (from user_site_access) may pass it to skip
+    # an extra DB connection; otherwise one is opened just for that lookup.
+    if (defined $filter_user && !$acc) {
         my $dbh = db_connect();
         $acc = $dbh ? user_site_access($dbh, $filter_user) : { unrestricted => 1 };
         $dbh->disconnect if $dbh;
@@ -22097,6 +23642,69 @@ sub template_path_ok {
 }
 
 ################################################################################
+# template_integrity_manifest / template_status
+#
+# A template directory may ship an "integrity.sha1" manifest (delivered ONLY by
+# fetchconfig, which owns the templates): lines of "<sha1>  <name.tmpl>". It lets
+# the Templates page classify each file by its hash:
+#   - hash listed and matches   -> "original" (pristine shipped template)
+#   - hash listed but differs   -> "edited"   (shipped template modified locally;
+#                                   it will be overwritten on the next update)
+#   - no hash for this file      -> "custom"   (the admin's own template -- the
+#                                   name is not in the manifest, OR the directory
+#                                   has no manifest at all, e.g. an additional
+#                                   template directory the admin set up)
+#
+# The manifest is parsed once per (path, mtime, size) and cached, so repeated
+# calls within a request -- and across requests under FastCGI -- are cheap and
+# still pick up a refreshed manifest. The hash is computed over the file with
+# CRLF/CR newlines normalised to LF, matching how the manifest is generated, so
+# a checkout that changed line endings is not misreported as "edited".
+################################################################################
+{
+    my %manifest_cache;
+    sub template_integrity_manifest {
+        my ($dir) = @_;
+        return undef unless defined $dir && $dir ne '';
+        my $mf = "$dir/integrity.sha1";
+        my @st = stat($mf);
+        return undef unless @st;                      # no manifest in this dir
+        my $key = "$mf\0$st[9]\0$st[7]";
+        return $manifest_cache{$key} if exists $manifest_cache{$key};
+        my %want;
+        if (open(my $fh, '<', $mf)) {
+            while (my $line = <$fh>) {
+                my ($h, $n) = $line =~ /^(\S+)\s+(.+?)\s*$/ or next;
+                $want{$n} = lc $h;
+            }
+            close($fh);
+        }
+        return $manifest_cache{$key} = \%want;
+    }
+}
+
+# Returns 'original' | 'edited' | 'custom' for a template file. "No hash
+# available" (the name is not in the manifest, or the directory has no manifest
+# at all) is "custom". The manifest directory is taken from the template's own
+# path (where integrity.sha1 sits, beside the .tmpl files) -- NOT from the
+# directory field that "fetchconfig.pl -t" reports, which is the device-table
+# template_dir value and need not equal the on-disk directory.
+sub template_status {
+    my ($path) = @_;
+    (my $dir  = $path) =~ s{/[^/]*$}{};               # directory holding the .tmpl
+    (my $base = $path) =~ s{.*/}{};                   # "<name>.tmpl"
+    my $want = template_integrity_manifest($dir);
+    # No hash for this file (no manifest, or name not listed) -> the admin's own.
+    return 'custom' unless defined $want && exists $want->{$base};
+    open(my $fh, '<', $path) or return 'edited';      # listed but unreadable now
+    binmode($fh); local $/; my $data = <$fh>; close($fh);
+    $data = '' unless defined $data;
+    $data =~ s/\r\n/\n/g; $data =~ s/\r/\n/g;
+    require Digest::SHA;
+    return Digest::SHA::sha1_hex($data) eq $want->{$base} ? 'original' : 'edited';
+}
+
+################################################################################
 # template_used_paths / template_is_used
 #
 # The set of template files actually referenced by a device, so the Templates
@@ -23063,6 +24671,12 @@ sub mask_secrets {
     # separated by commas, e.g. "user=admin,pass=X,enable=Y").
     $text =~ s/\b(pass\w*=)[^\s,;]+/$1?***?/gi;
     $text =~ s/\b(enable\w*=)[^\s,;]+/$1?***?/gi;
+    # fetchconfig-web "db:" option password on the device_table "default:" line.
+    # The generic pass\w*= rule above does NOT catch db_pass= (the "_" before
+    # "pass" is a word char, so there is no \b word boundary there), so match it
+    # explicitly -- quoted first (may hold spaces/commas), then bare.
+    $text =~ s/\b(db_pass=)"[^"]*"/$1?***?/gi;
+    $text =~ s/\b(db_pass=)[^\s,;]+/$1?***?/gi;
     # SNMP community, device-table option form "community=".
     $text =~ s/\b(community=)[^\s,;]+/$1?***?/gi;
     # SNMP community in a switch config (space form). Two grammars differ in
@@ -23386,11 +25000,15 @@ sub page_head {
         # page.
         my $tools_menu = '';
         if ($is_admin) {
-            $tools_menu = $group->('Tools',
+            my @tool_items = (
                 $su->('Audit log',                                    '?action=tool_audit'),
                 $su->('Login failures',                               '?action=tool_login_failures'),
                 $su->('Check devices for consistent backup suffixes', '?action=tool_suffix'),
                 $su->('Check site assignment',                        '?action=check_site_assignment'),
+            );
+            push @tool_items, $su->('Cleanup dashboard', '?action=dashboard_cleanup')
+                if $ENABLE_DASHBOARD;
+            push @tool_items,
                 $su->('Device debug logs',                            '?action=tool_debug'),
                 $su->('Devices without backups',                      '?action=tool_nobackup'),
                 $su->('Disk space',                                   '?action=tool_diskspace'),
@@ -23404,7 +25022,8 @@ sub page_head {
                 $su->('Verify email setup',                          '?action=tool_verify_email'),
                 $su->('Templates',                                    '?action=view_templates'),
                 $su->('Upload report logo',                           '?action=tool_logo'),
-                $su->('View last fetchconfig schedule log',           '?action=view_log'));
+                $su->('View last fetchconfig schedule log',           '?action=view_log');
+            $tools_menu = $group->('Tools', @tool_items);
         }
 
         # User: Change your password for all; admin extras. Each is its own page.
@@ -23415,6 +25034,17 @@ sub page_head {
         push @user_items, $su->('Change your email',    '?action=change_email_form');
         push @user_items, $su->('Sites', '?action=sites') if $is_admin;
         my $user_menu = $group->('User', @user_items);
+
+        # Dashboard (only when ENABLE_DASHBOARD = 1), placed just before Help.
+        # Overview ("Backup health") is a fleet-wide aggregate view available to
+        # every user; the All-devices table is admin-only.
+        my $dashboard_menu = '';
+        if ($ENABLE_DASHBOARD) {
+            my @dash_items = ( $su->('Overview', '?action=dashboard_overview') );
+            push @dash_items, $su->('All devices', '?action=dashboard_devices')
+                if $is_admin;
+            $dashboard_menu = $group->('Dashboard', @dash_items);
+        }
 
         # Help dropdown. Fixed structure:
         #     Help                               (the help.html page)
@@ -23474,6 +25104,7 @@ sub page_head {
               . $setup_menu
               . $tools_menu
               . $user_menu
+              . $dashboard_menu
               . $help_menu
               . qq{</nav>}
               . qq{<div class="user-info">$u &nbsp;|&nbsp; }

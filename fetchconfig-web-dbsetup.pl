@@ -48,6 +48,7 @@ use strict;
 use warnings;
 use DBI;
 use Digest::MD5 ();
+use FindBin;
 
 # -------------------------------------------------------------------------
 # Fixed settings
@@ -223,6 +224,286 @@ sub read_htpasswd {
 # =========================================================================
 # Main
 # =========================================================================
+
+# =========================================================================
+# Dashboard history schema -- "--upgrade" mode
+# =========================================================================
+# Creates/upgrades the Backup Dashboard history schema (schema_migrations +
+# backup_current / backup_runs / backup_versions), the writer role, and the
+# grants. Connection parameters come from the existing fetchconfig-web config
+# (so you do not retype them); you are prompted only for a DB superuser (to run
+# DDL / CREATE ROLE / GRANT) and the writer user name. 8.2-safe, idempotent.
+
+my $CFG_PATH = '/etc/fetchconfig-web.cfg';   # default; -f overrides (arg handling below)
+
+# Every versioned dbupdate this release knows, OLDEST FIRST. Each entry:
+#   [ id, sql-file, signature-check ]
+# --upgrade applies, in order, every id not already in schema_migrations: if its
+# signature is already present (applied by hand before the ledger existed) it is
+# just recorded; otherwise the .sql is applied via DBI (run_sql_file_dbi -- no
+# external psql, no binary dependency) and then recorded. Append a line per
+# new release.
+my @UPDATES = (
+    [ '1.50', 'fetchconfig-web-dbupdate-1.50.sql', sub { tbl_exists($_[0], 'sites') } ],
+    [ '1.51', 'fetchconfig-web-dbupdate-1.51.sql', sub { tbl_exists($_[0], 'audit_log') } ],
+    [ '1.60', 'fetchconfig-web-dbupdate-1.60.sql', sub { tbl_exists($_[0], 'login_attempts') } ],
+    [ '1.62', 'fetchconfig-web-dbupdate-1.62.sql', sub { tbl_exists($_[0], 'device_notes') } ],
+    [ '2.08', 'fetchconfig-web-dbupdate-2.08.sql', sub { col_exists($_[0], 'users', 'read_debug') } ],
+    [ '2.11', 'fetchconfig-web-dbupdate-2.11.sql', sub { tbl_exists($_[0], 'backup_current') } ],
+);
+
+sub tbl_exists {
+    my ($dbh, $t) = @_;
+    my ($x) = $dbh->selectrow_array(
+        q{SELECT 1 FROM information_schema.tables
+           WHERE table_schema = 'public' AND table_name = ?}, undef, $t);
+    return $x;
+}
+
+sub col_exists {
+    my ($dbh, $t, $c) = @_;
+    my ($x) = $dbh->selectrow_array(
+        q{SELECT 1 FROM information_schema.columns
+           WHERE table_schema = 'public' AND table_name = ? AND column_name = ?},
+        undef, $t, $c);
+    return $x;
+}
+
+sub migration_applied {
+    my ($dbh, $id) = @_;
+    my ($x) = $dbh->selectrow_array(
+        'SELECT 1 FROM schema_migrations WHERE id = ?', undef, $id);
+    return $x;
+}
+
+sub record_migration {
+    my ($dbh, $id) = @_;
+    # idempotent (8.2-safe: no ON CONFLICT)
+    $dbh->do(q{INSERT INTO schema_migrations (id, applied_at)
+               SELECT ?, ? WHERE NOT EXISTS
+                   (SELECT 1 FROM schema_migrations WHERE id = ?)},
+             undef, $id, time(), $id);
+}
+
+sub ensure_ledger {
+    my ($dbh) = @_;
+    return if tbl_exists($dbh, 'schema_migrations');
+    $dbh->do(q{CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at BIGINT)})
+        or die_clean("CREATE TABLE schema_migrations failed: " . $dbh->errstr);
+    print "Created schema_migrations ledger.\n";
+}
+
+# Apply a dbupdate .sql file via DBI -- NO external psql, no binary dependency.
+# Strips psql backslash meta-command lines (\set ...), runs any "CREATE LANGUAGE
+# plpgsql" on its own (tolerating "already exists"), then executes the rest (the
+# script's own BEGIN;...COMMIT; with the idempotent PL/pgSQL temp function) as a
+# single multi-statement do() -- with no placeholders, DBD::Pg uses PQexec, which
+# runs several statements and handles $tag$ dollar-quoting server-side. The .sql
+# files are 8.2-safe and self-record in schema_migrations.
+sub run_sql_file_dbi {
+    my ($dbh, $file) = @_;
+    my $path = "$FindBin::Bin/$file";
+    open(my $fh, '<', $path) or die_clean("update script not found: $path ($!)");
+    local $/; my $sql = <$fh>; close $fh;
+    # Drop psql meta-command lines (\set ON_ERROR_STOP ..., etc.).
+    $sql =~ s/^[ \t]*\\[^\n]*\n?//mg;
+    # CREATE LANGUAGE plpgsql on its own; tolerate "already exists" (PG >= 9.0
+    # ships it; 8.2 may need it). RaiseError is off, so a failure here is harmless
+    # and does not poison the connection (AutoCommit = 1).
+    while ($sql =~ s/^[ \t]*CREATE\s+LANGUAGE\s+plpgsql\s*;//im) {
+        $dbh->do('CREATE LANGUAGE plpgsql');
+    }
+    return unless $sql =~ /\S/;
+    $dbh->do($sql)
+        or die_clean("applying $file via DBI failed: " . ($dbh->errstr // 'unknown'));
+}
+
+# Read key=value settings from the fetchconfig-web config file.
+sub read_cfg {
+    my ($path) = @_;
+    open(my $fh, '<', $path)
+        or die_clean("cannot read config $path: $! (use -f <path> to point elsewhere)");
+    my %cfg;
+    while (my $line = <$fh>) {
+        chomp $line;
+        $line =~ s/^\s+//;
+        next if $line eq '' || $line =~ /^#/;
+        my ($k, $v) = split(/=/, $line, 2);
+        next unless defined $k && defined $v;
+        $k =~ s/\s+$//; $v =~ s/^\s+//; $v =~ s/\s+$//;
+        $cfg{$k} = $v;
+    }
+    close($fh);
+    return \%cfg;
+}
+
+# Connect as a DB superuser/CREATEROLE account, with a (r)e-enter/(a)bort loop
+# on failure (bad login, or connected but lacking the privilege to migrate).
+sub connect_super {
+    my ($dsn, $dbname, $dbhost) = @_;
+    while (1) {
+        print "\n-- DB superuser login (to run DDL, CREATE ROLE, GRANT) --\n";
+        my $user = prompt('DB superuser name', 'postgres');
+        my $pass = prompt_secret('DB superuser password');
+        my $dbh  = DBI->connect($dsn, $user, $pass,
+            { RaiseError => 0, PrintError => 0, AutoCommit => 1 });
+        if (!$dbh) {
+            print "  Connection failed: " . ($DBI::errstr // 'unknown') . "\n";
+        }
+        else {
+            my ($super, $createrole) = $dbh->selectrow_array(
+                'SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user');
+            if ($super || $createrole) { return ($dbh, $user, $pass); }
+            print "  Role \"$user\" lacks SUPERUSER / CREATEROLE -- cannot create the writer role or grant.\n";
+            $dbh->disconnect;
+        }
+        my $c = prompt('(r)e-enter / (a)bort', 'r');
+        die_clean("aborted by user.") if $c =~ /^a/i;
+    }
+}
+
+sub do_grants {
+    my ($dbh, $webuser, $writer, $writerpass, $writer_exists) = @_;
+    if (!$writer_exists) {
+        my $q  = $dbh->quote_identifier($writer);
+        my $qp = $writerpass; $qp =~ s/'/''/g;
+        $dbh->do(qq{CREATE ROLE $q LOGIN PASSWORD '$qp'})
+            or die_clean("CREATE ROLE failed: " . $dbh->errstr);
+        print "Created writer role \"$writer\".\n";
+    }
+    else {
+        print "Writer role \"$writer\" already exists -- leaving it (grants refreshed).\n";
+    }
+    my $qw = $dbh->quote_identifier($writer);
+    my $qu = $dbh->quote_identifier($webuser);
+    # Ownership: the history tables are owned by the writer role (the fetchconfig
+    # engine), so the engine can maintain its own data -- including the future
+    # cleanup DELETE -- without a superuser, while the web user stays SELECT-only.
+    # (The writer owning them is why the GRANTs below are, for the writer,
+    # belt-and-suspenders.) The migration ledger schema_migrations is deliberately
+    # left owned by the superuser that runs --upgrade: neither the web app nor the
+    # writer should be able to alter the record of which migrations ran. Future
+    # schema changes run as the superuser here, which can ALTER regardless of owner.
+    for my $t (qw(backup_current backup_runs backup_versions)) {
+        next unless tbl_exists($dbh, $t);
+        $dbh->do("ALTER TABLE $t OWNER TO $qw")
+            or die_clean("ALTER TABLE $t OWNER TO failed: " . $dbh->errstr);
+    }
+    print "Owner: backup_current/backup_runs/backup_versions -> \"$writer\".\n";
+    # Web (read) user: SELECT only.
+    $dbh->do("GRANT SELECT ON backup_current, backup_runs, backup_versions TO $qu");
+    # Writer: SELECT + INSERT on all three (SELECT is required by the pre-9.5
+    # DML), UPDATE on backup_current, UPDATE(expired, expired_at) on backup_versions.
+    $dbh->do("GRANT SELECT, INSERT ON backup_current, backup_runs, backup_versions TO $qw");
+    $dbh->do("GRANT UPDATE ON backup_current TO $qw");
+    $dbh->do("GRANT UPDATE (expired, expired_at) ON backup_versions TO $qw");
+    print "Granted: web user \"$webuser\" SELECT; writer \"$writer\" SELECT+INSERT+UPDATE.\n";
+}
+
+sub do_upgrade {
+    print "=" x 70, "\n";
+    print "fetchconfig-web -- Dashboard history schema upgrade\n";
+    print "=" x 70, "\n\n";
+
+    my $cfg     = read_cfg($CFG_PATH);
+    my $dbname  = $cfg->{DBinst} or die_clean("DBinst not found in $CFG_PATH");
+    my $webuser = $cfg->{DBuser} or die_clean("DBuser not found in $CFG_PATH");
+    my $dbhost  = $cfg->{DBhost} // 'localhost';
+    print "Config $CFG_PATH: database=$dbname host=$dbhost web user=$webuser\n";
+
+    my $dsn = "dbi:Pg:dbname=$dbname;host=$dbhost";
+    my ($dbh) = connect_super($dsn, $dbname, $dbhost);
+
+    ensure_ledger($dbh);
+
+    # Apply every pending versioned update, oldest first (older .sql scripts
+    # included), bringing any prior DB fully up to date.
+    for my $u (@UPDATES) {
+        my ($id, $file, $sig) = @$u;
+        if (migration_applied($dbh, $id)) { print "Migration $id: already applied.\n"; next; }
+        if ($sig->($dbh)) {
+            record_migration($dbh, $id);
+            print "Migration $id: already present -- recorded in ledger.\n";
+            next;
+        }
+        print "Applying migration $id ($file) ...\n";
+        run_sql_file_dbi($dbh, $file);                                   # via DBI, no external psql
+        record_migration($dbh, $id);
+        print "  done.\n";
+    }
+
+    # Writer role: reuse the name recorded on a previous --upgrade (app_state),
+    # so the operator is asked for it only the first time.
+    my $writer;
+    if (tbl_exists($dbh, 'app_state')) {
+        ($writer) = $dbh->selectrow_array(
+            q{SELECT value FROM app_state WHERE key = 'dashboard_writer'});
+    }
+    if (defined $writer && $writer ne '') {
+        print "\nWriter role: using \"$writer\" (recorded by a previous --upgrade).\n";
+    }
+    else {
+        print "\n-- Writer role (the fetchconfig engine's db: db_user) --\n";
+        $writer = prompt('fetchconfig writer DB user', 'fetchconfig_dashboard');
+        die_clean("writer user name is required.") if $writer eq '';
+        if ($writer !~ /^[A-Za-z_][A-Za-z0-9_]*\z/) {
+            print "WARNING: \"$writer\" contains non-ASCII or SQL-unsafe characters; it will be\n";
+            print "         double-quoted as an identifier everywhere. The default\n";
+            print "         fetchconfig_dashboard avoids quoting.\n";
+        }
+        if ($writer eq $webuser) {
+            print "WARNING: the writer equals the fetchconfig-web DB user (\"$webuser\"); the\n";
+            print "         least-privilege separation is lost -- the web role would also gain\n";
+            print "         INSERT/UPDATE on the history tables.\n";
+        }
+    }
+    my ($writer_exists) = $dbh->selectrow_array(
+        'SELECT 1 FROM pg_roles WHERE rolname = ?', undef, $writer);
+    my $writerpass;
+    if (!$writer_exists) {
+        $writerpass = prompt_secret("Password for new writer role \"$writer\"");
+        die_clean("writer password is required to create the role.") if $writerpass eq '';
+    }
+    do_grants($dbh, $webuser, $writer, $writerpass, $writer_exists);
+
+    # Record the chosen writer name so the dashboard's "tables empty" info panel
+    # can print the exact db: string (the web app otherwise cannot know which
+    # role name was chosen here). Pre-9.5 upsert (UPDATE then INSERT).
+    if (tbl_exists($dbh, 'app_state')) {
+        my $rows = $dbh->do(q{UPDATE app_state SET value = ?, ts = now() WHERE key = 'dashboard_writer'},
+                            undef, $writer);
+        if (!$rows || $rows == 0) {
+            $dbh->do(q{INSERT INTO app_state (key, value, ts) VALUES ('dashboard_writer', ?, now())},
+                     undef, $writer);
+        }
+        print "Recorded writer name in app_state (for the dashboard info panel).\n";
+    }
+
+    $dbh->disconnect;
+
+    print "\n", "=" x 70, "\n";
+    print "Done. Next:\n";
+    print "  1. Set ENABLE_DASHBOARD = 1 in $CFG_PATH\n";
+    print "  2. Configure the fetchconfig engine (device_table default: line):\n";
+    print "       db: db_inst=$dbname,db_user=$writer,db_pass=<writer password>,db_host=$dbhost\n";
+    print "=" x 70, "\n";
+}
+
+# -------------------------------------------------------------------------
+# Argument handling
+# -------------------------------------------------------------------------
+my $UPGRADE  = 0;
+{
+    my @args = @ARGV;
+    while (@args) {
+        my $a = shift @args;
+        if    ($a eq '--upgrade')              { $UPGRADE = 1; }
+        elsif ($a eq '-f' || $a eq '--config') { $CFG_PATH = shift @args // die_clean("$a needs a path argument"); }
+        else  { die_clean("unknown argument: $a (usage: $0 [--upgrade] [-f <config>])"); }
+    }
+}
+
+if ($UPGRADE) { do_upgrade(); exit 0; }
 
 print "=" x 70, "\n";
 print "fetchconfig-web -- PostgreSQL user database setup\n";
@@ -567,7 +848,7 @@ $dbh->disconnect;
 # written at their defaults for you to review/adjust. The file holds the DB
 # password in clear text, so it is created mode 0600.
 
-my $CFG_PATH = '/etc/fetchconfig-web.cfg';
+# $CFG_PATH is set in the argument-handling block near the top.
 
 sub cfg_body {
     my ($dbname, $dbuser, $dbpass, $dbhost) = @_;
@@ -701,6 +982,13 @@ SHOW_RENDER_TIME        = 0
 # commented out so the application reports its own version.
 #APP_VERSION            = 2.07
 COPYRIGHT               = 2026 (c) Rainer Tammer
+
+# --- Dashboard ---
+# Enable the Backup Dashboard, which reads the backup-history tables written by
+# the fetchconfig engine's optional DB writer. 0 = hidden (default), 1 = shown.
+# Requires the history schema -- run "fetchconfig-web-dbsetup.pl --upgrade" -- and
+# the engine's "db:" option set on the device_table "default:" line.
+ENABLE_DASHBOARD        = 0
 
 # --- PostgreSQL user database ---
 DBinst                  = $dbname

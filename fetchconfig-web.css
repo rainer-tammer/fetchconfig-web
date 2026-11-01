@@ -828,3 +828,67 @@ $backdrop_css
   .site-table td .site-code-in { width: 8em; }
   .site-table td .site-desc-in { width: 100%; min-width: 14em; box-sizing: border-box; }
   .site-table td { vertical-align: middle; }
+
+  /* ---- Backup Dashboard (2.11) ------------------------------------------ */
+  /* Single source of truth for the four status colours (segments, bars, donut
+     arcs, tile dots, legend swatches). The status badges keep their own
+     tint/shade pairs below. */
+  :root { --dash-fresh: #37a46b; --dash-stale: #e0a800; --dash-failed: #c0362c; --dash-never: #9aa1a9; }
+  .dash-h1 { margin: 0.2em 0 0.5em; }
+  .dash-h2 { font-size: 1.1em; margin: 0 0 0.8em; }
+  .dash-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.9em; margin-bottom: 1.2em; }
+  .dash-tile { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 0.9em 1em; }
+  .dash-tile-label { font-size: 0.85em; color: #555; }
+  .dash-tile-dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 0.4em; }
+  .dash-tile-value { font-family: Consolas, Menlo, monospace; font-size: 1.8em; margin-top: 0.2em; }
+  .dash-tile-sub { font-size: 0.82em; color: #888; margin-top: 0.2em; }
+  .dash-panel { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 1em 1.1em; margin-bottom: 1.2em; }
+  .dash-panel-last { margin-top: 1.2em; margin-bottom: 0; }
+  .dash-panel-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.6em; margin: 0 0 0.9em; }
+  .dash-panel-head h2 { font-size: 1.1em; margin: 0; }
+  .dash-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0.9em; }
+  .dash-charts .dash-panel { margin-bottom: 0; }
+  .dash-bar { display: flex; height: 26px; border-radius: 4px; overflow: hidden; border: 1px solid #e3e8ee; }
+  .dash-bar-sm { height: 16px; }
+  .dash-seg-fresh  { background: var(--dash-fresh); }
+  .dash-seg-stale  { background: var(--dash-stale); }
+  .dash-seg-failed { background: var(--dash-failed); }
+  .dash-seg-never  { background: var(--dash-never); min-width: 2px; }
+  .dash-tally { display: flex; flex-wrap: wrap; gap: 1.3em; margin-top: 0.8em; font-size: 0.9em; }
+  .dash-tally strong { font-family: Consolas, Menlo, monospace; }
+  .dash-legend { display: flex; flex-wrap: wrap; gap: 0.9em; font-size: 0.82em; color: #555; }
+  .dash-legend span { display: inline-flex; align-items: center; gap: 0.35em; }
+  .dash-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; }
+  .dash-arc-fresh  { stroke: var(--dash-fresh); }
+  .dash-arc-stale  { stroke: var(--dash-stale); }
+  .dash-arc-failed { stroke: var(--dash-failed); }
+  .dash-arc-never  { stroke: var(--dash-never); }
+  .dash-arc-track  { stroke: #eceef1; }
+  .dash-donut-pct  { fill: #222; }
+  .dash-donut-cap  { fill: #888; }
+  .dash-ok  { color: #1a7f37; }
+  .dash-bad { color: var(--dash-failed); }
+  .dash-num { font-family: Consolas, Menlo, monospace; }
+  .dash-donut-row { display: flex; align-items: center; gap: 1.2em; }
+  .dash-donut-key { font-size: 0.9em; line-height: 1.8; }
+  .dash-age { display: flex; flex-direction: column; gap: 0.6em; }
+  .dash-age-head { display: flex; justify-content: space-between; font-size: 0.85em; margin-bottom: 0.2em; }
+  .dash-age-head span:first-child { color: #555; }
+  .dash-age-track { height: 9px; background: #eef0f2; border-radius: 4px; overflow: hidden; }
+  .dash-age-fill { height: 100%; }
+  .dash-trend-rate { font-family: Consolas, Menlo, monospace; font-size: 1.5em; }
+  .dash-trend-line { stroke: var(--dash-fresh); fill: none; stroke-width: 2; }
+  .dash-sites { display: flex; flex-direction: column; gap: 0.9em; }
+  .dash-sites-scroll { max-height: 440px; overflow-y: auto; padding-right: 0.3em; }
+  .dash-site-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.3em; }
+  .dash-site-name { font-weight: 600; }
+  /* Status badges (pill tint + shade per status). */
+  .dash-badge { display: inline-block; border-radius: 4px; padding: 0.1em 0.6em; font-size: 0.85em; border: 1px solid; }
+  .dash-badge-fresh  { background: #e6ffec; border-color: #9bd9a8; color: #1a7f37; }
+  .dash-badge-stale  { background: #fff3cd; border-color: #e0a800; color: #7a5c00; }
+  .dash-badge-failed { background: #ffddd6; border-color: #c0362c; color: #7a1c14; }
+  .dash-badge-never  { background: #f1f1f1; border-color: #ccc;    color: #777; }
+  .dash-badge-nodata { background: #eef2f7; border-color: #c3cfe0; color: #5a6b85; }
+  /* Per-backup SHA1 copy button (a darker gray than .btn-gray). */
+  .sha1-btn { background: #6c757d; }
+  .sha1-btn:hover { background: #596069; }
