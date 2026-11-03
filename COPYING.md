@@ -1,4 +1,4 @@
-# Third-Party Licenses
+# fetchconfig-web -- Third-Party Licenses
 
 fetchconfig-web itself is distributed under the GNU General Public License,
 Version 3 (see `LICENSE`), with the additional terms in `LICENSE-ADDITIONS`.
@@ -42,11 +42,13 @@ licenses -- MIT, ISC, BSD-2-Clause, BSD-3-Clause and Apache-2.0. Their copyright
 and permission notices are retained inside the file. See
 https://github.com/mermaid-js/mermaid for the authoritative component list.
 
-## IBM Plex Sans -- SIL Open Font License, Version 1.1
+## IBM Plex Sans & IBM Plex Mono -- SIL Open Font License, Version 1.1
 
-Bundled as `fonts/IBMPlexSans-Regular.woff2` and
-`fonts/IBMPlexSans-SemiBold.woff2`. Used so the state-machine diagram's labels
-are sized and fit correctly.
+Bundled as `fonts/IBMPlexSans-Regular.woff2`, `fonts/IBMPlexSans-SemiBold.woff2`,
+`fonts/IBMPlexMono-Regular.woff2` and `fonts/IBMPlexMono-SemiBold.woff2`. IBM Plex
+Sans is the application UI font (and sizes the state-machine diagram's labels);
+IBM Plex Mono is the configuration / diff / log view font. Both degrade to the
+platform's own fonts if the files are not installed in `WEB_DIR/fonts`.
 
 ```
 Copyright 2019 IBM Corp. All rights reserved.

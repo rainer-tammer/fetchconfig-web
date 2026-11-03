@@ -140,6 +140,17 @@ my $src = do { open(my $fh, '<', cgi_path()) or die $!; local $/; <$fh> };
            'the stylesheet cache-buster is NOT tied to the overridable APP_VERSION');
 }
 
+# --- the static stylesheet carries no unexpanded template placeholders --------
+# fetchconfig-web.css is served verbatim (no Perl interpolation), so a leftover
+# $name is invalid CSS -- the browser drops that ruleset. (Regression: a stray
+# $backdrop_css had leaked into the file top.)
+{
+    (my $css = cgi_path()) =~ s/\.cgi\z/.css/;
+    my $txt = do { open(my $fh, '<', $css) or die "$css: $!"; local $/; <$fh> };
+    unlike($txt, qr/\$[A-Za-z_]\w*/,
+           'fetchconfig-web.css has no unexpanded $placeholder');
+}
+
 
 # --- fetchconfig-web-dbsetup.pl's generated config covers every registered key -------------------
 # (SMTP_USER/SMTP_PASS are commented out unless EMAIL_AUTH=1; APP_VERSION is

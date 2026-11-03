@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>render-doc.py &mdash; Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#fbfbf9;
+    --surface:#f1f4f4;
+    --surface-2:#e9edee;
+    --border:#dde3e3;
+    --text:#141a1f;
+    --text-muted:#5b6770;
+    --text-faint:#8a949b;
+    --accent:#0e7c8c;
+    --accent-bright:#22aabb;
+    --accent-soft:#e3f3f5;
+    --danger:#c4432b;
+    --danger-soft:#fbeae6;
+    --success:#1c8a5b;
+    --success-soft:#e8f5ee;
+    --changed:#2451c4;
+    --changed-soft:#e8edfb;
+    --code-bg:#10171c;
+    --code-text:#dce8ec;
+    --code-accent:#7fe0cc;
+    --code-muted:#7f929b;
+    --radius:6px;
+    --font-sans:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    --font-mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Consolas,monospace;
+    --sidebar-w:280px;
+  }
+
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    font-family:var(--font-sans);
+    color:var(--text);
+    background:var(--bg);
+    font-size:16px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  a{color:var(--accent);text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  a:focus-visible,button:focus-visible,input:focus-visible,summary:focus-visible{
+    outline:2px solid var(--accent-bright);
+    outline-offset:2px;
+  }
+
+  code, kbd{
+    font-family:var(--font-mono);
+    font-size:0.88em;
+    background:var(--surface-2);
+    border:1px solid var(--border);
+    border-radius:4px;
+    padding:0.1em 0.4em;
+    color:var(--text);
+    white-space:nowrap;
+  }
+
+  pre{
+    font-family:var(--font-mono);
+    background:var(--code-bg);
+    color:var(--code-text);
+    border-radius:var(--radius);
+    padding:16px 18px;
+    overflow-x:auto;
+    font-size:0.86rem;
+    line-height:1.65;
+    margin:16px 0;
+    border:1px solid #05090c;
+  }
+  pre code{
+    background:none;
+    border:none;
+    padding:0;
+    white-space:pre;
+    color:inherit;
+    font-size:1em;
+  }
+  pre .c{color:var(--code-muted);} /* comment */
+  pre .s{color:var(--code-accent);} /* string / value */
+  pre .k{color:#e8b95f;} /* keyword / flag */
+
+  h1,h2,h3,h4{
+    font-family:var(--font-sans);
+    font-weight:600;
+    line-height:1.25;
+    color:var(--text);
+    letter-spacing:-0.01em;
+  }
+
+  /* ---------- Layout ---------- */
+  .layout{
+    display:flex;
+    align-items:flex-start;
+    max-width:1600px;
+    margin:0 auto;
+  }
+
+  .sidebar{
+    position:sticky;
+    top:0;
+    height:100vh;
+    width:var(--sidebar-w);
+    flex:0 0 var(--sidebar-w);
+    overflow-y:auto;
+    padding:28px 22px 40px;
+    border-right:1px solid var(--border);
+    background:var(--surface);
+  }
+
+  .brand{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin-bottom:4px;
+  }
+  .brand-mark{
+    width:30px;height:30px;border-radius:7px;
+    background:linear-gradient(155deg,var(--accent-bright),var(--accent));
+    display:flex;align-items:center;justify-content:center;
+    flex:0 0 auto;
+  }
+  .brand-mark svg{width:17px;height:17px;}
+  .brand-name{font-weight:700;font-size:1.05rem;letter-spacing:-0.01em;}
+
+  .brand-meta{
+    font-family:var(--font-mono);
+    font-size:0.72rem;
+    color:var(--text-muted);
+    margin:6px 0 22px;
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .pill{
+    display:inline-block;
+    padding:2px 8px;
+    border-radius:99px;
+    background:var(--surface-2);
+    border:1px solid var(--border);
+    color:var(--text-muted);
+  }
+
+  .nav-group{margin-bottom:4px;}
+  .nav-group-label{
+    font-size:0.68rem;
+    text-transform:uppercase;
+    letter-spacing:0.08em;
+    color:var(--text-faint);
+    margin:20px 0 6px;
+    font-weight:600;
+  }
+  .nav-group:first-of-type .nav-group-label{margin-top:0;}
+
+  .sidebar nav a{
+    display:block;
+    color:var(--text-muted);
+    font-size:0.885rem;
+    padding:6px 10px;
+    border-radius:5px;
+    text-decoration:none;
+    border-left:2px solid transparent;
+    transition:background 0.12s ease, color 0.12s ease;
+  }
+  .sidebar nav a:hover{background:var(--surface-2);color:var(--text);}
+  .sidebar nav a.active{
+    color:var(--accent);
+    background:var(--accent-soft);
+    border-left-color:var(--accent-bright);
+    font-weight:500;
+  }
+
+  .main-col{
+    flex:1 1 auto;
+    min-width:0;
+    padding:0 0 120px;
+  }
+
+  .content{
+    max-width:1200px;
+    margin:0 auto;
+    padding:0 48px;
+  }
+  /* Keep flowing prose at a comfortable reading measure, but let wide
+     elements (tables, code blocks, diagrams) use the full content width so
+     they don't need a horizontal scrollbar on a wide screen. */
+  .content > p,
+  .content > ul,
+  .content > ol,
+  .content > h2,
+  .content > h3,
+  .content > h4,
+  .content > blockquote{
+    max-width:820px;
+  }
+  .content > .table-wrap,
+  .content > pre,
+  .content > .callout{
+    max-width:100%;
+  }
+
+  /* ---------- Hero ---------- */
+  .hero{
+    padding:64px 48px 48px;
+    max-width:1200px;
+    margin:0 auto;
+    border-bottom:1px solid var(--border);
+  }
+  .hero-eyebrow{
+    font-family:var(--font-mono);
+    font-size:0.78rem;
+    color:var(--accent);
+    margin-bottom:14px;
+  }
+  .hero h1{
+    font-size:2.6rem;
+    margin:0 0 14px;
+    letter-spacing:-0.02em;
+    color:var(--accent);
+  }
+  .mermaid{
+    /* A mermaid block is a <pre>, so it would otherwise inherit the dark code
+       background/border/padding. Render the diagram on the page background. */
+    margin:1.5rem 0;
+    text-align:center;
+    background:transparent;
+    color:inherit;
+    border:0;
+    padding:0;
+    overflow-x:auto;
+  }
+  /* Until mermaid.js has rendered a block (it stamps data-processed on success),
+     keep the raw diagram source hidden so it is never shown as a wall of text --
+     during the CDN load, or if the runtime is blocked/unavailable. mermaid still
+     measures and renders normally while it is hidden; the element reveals itself
+     the moment it is processed. */
+  .mermaid:not([data-processed]){
+    visibility:hidden;
+    height:0;
+    overflow:hidden;
+  }
+  .hero p.lede{
+    font-size:1.13rem;
+    color:var(--text-muted);
+    max-width:640px;
+    margin:0 0 28px;
+    line-height:1.6;
+  }
+  .hero-stats{
+    display:flex;
+    gap:36px;
+    flex-wrap:wrap;
+    margin-top:8px;
+  }
+  .hero-stat .num{
+    font-family:var(--font-mono);
+    font-size:1.6rem;
+    font-weight:600;
+    color:var(--text);
+    display:block;
+  }
+  .hero-stat .label{
+    font-size:0.8rem;
+    color:var(--text-muted);
+  }
+
+  /* ---------- Sections ---------- */
+  section{
+    padding:56px 0 8px;
+    border-bottom:1px solid var(--border);
+  }
+  section:last-of-type{border-bottom:none;}
+
+  .section-kicker{
+    font-family:var(--font-mono);
+    font-size:0.75rem;
+    color:var(--text-faint);
+    margin-bottom:8px;
+  }
+  h2{
+    font-size:1.65rem;
+    margin:0 0 18px;
+    scroll-margin-top:24px;
+  }
+  h3{
+    font-size:1.18rem;
+    margin:34px 0 12px;
+    scroll-margin-top:24px;
+  }
+  h4{
+    font-size:0.98rem;
+    margin:22px 0 8px;
+    color:var(--text);
+    scroll-margin-top:24px;
+  }
+  p{margin:0 0 14px;color:var(--text);}
+  section p, section li{color:var(--text);}
+  ul,ol{padding-left:1.3em;margin:0 0 16px;}
+  li{margin-bottom:6px;}
+  .prose-muted{color:var(--text-muted);}
+
+  .file-label{
+    font-family:var(--font-mono);
+    font-size:0.72rem;
+    color:var(--text-faint);
+    margin:18px 0 -8px;
+    display:block;
+  }
+
+  /* ---------- Callouts ---------- */
+  .callout{
+    border-radius:var(--radius);
+    padding:16px 18px;
+    margin:18px 0;
+    border:1px solid var(--border);
+    background:var(--surface);
+    font-size:0.93rem;
+  }
+  .callout-title{
+    font-weight:600;
+    font-size:0.82rem;
+    text-transform:uppercase;
+    letter-spacing:0.05em;
+    margin-bottom:6px;
+    display:flex;
+    align-items:center;
+    gap:7px;
+  }
+  .callout.warn{background:var(--danger-soft);border-color:#f0c9bd;}
+  .callout.warn .callout-title{color:var(--danger);}
+  .callout.note{background:var(--accent-soft);border-color:#bfe4e9;}
+  .callout.note .callout-title{color:var(--accent);}
+  .callout p:last-child{margin-bottom:0;}
+
+  /* ---------- Tables ---------- */
+  .table-wrap{overflow-x:auto;margin:18px 0 26px;border:1px solid var(--border);border-radius:var(--radius);}
+  hr{border:0;border-top:1px solid var(--border);margin:34px 0 30px;}
+  table{
+    border-collapse:collapse;
+    width:100%;
+    font-size:0.87rem;
+  }
+  caption{
+    text-align:left;
+    font-size:0.78rem;
+    color:var(--text-muted);
+    padding:8px 14px;
+    background:var(--surface);
+    border-bottom:1px solid var(--border);
+    caption-side:top;
+  }
+  th,td{
+    text-align:left;
+    padding:9px 14px;
+    border-bottom:1px solid var(--border);
+    vertical-align:top;
+  }
+  thead th{
+    background:var(--surface);
+    font-weight:600;
+    font-size:0.76rem;
+    text-transform:uppercase;
+    letter-spacing:0.04em;
+    color:var(--text-muted);
+    white-space:nowrap;
+  }
+  tbody tr:last-child td{border-bottom:none;}
+  tbody tr:hover{background:var(--surface);}
+  td code, th code{white-space:nowrap;}
+  .req-yes{color:var(--danger);font-weight:600;font-size:0.82rem;}
+  .req-opt{color:var(--text-faint);font-size:0.82rem;}
+  .req-dash{color:var(--border);}
+  .matrix th, .matrix td{text-align:center;}
+  .matrix td:first-child, .matrix th:first-child{text-align:left;}
+  .matrix{font-size:0.8rem;}
+  .matrix code{white-space:nowrap;}
+
+  /* ---------- Flag reference ---------- */
+  .flag-card{
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:16px 18px;
+    margin:14px 0;
+    background:var(--bg);
+  }
+  .flag-card + .flag-card{margin-top:10px;}
+  .flag-head{
+    display:flex;
+    align-items:baseline;
+    gap:10px;
+    flex-wrap:wrap;
+    margin-bottom:8px;
+  }
+  .flag-tag{
+    font-family:var(--font-mono);
+    font-weight:600;
+    background:var(--code-bg);
+    color:var(--code-accent);
+    border-radius:4px;
+    padding:3px 9px;
+    font-size:0.86rem;
+  }
+  .flag-req{
+    font-size:0.72rem;
+    font-family:var(--font-mono);
+    color:var(--text-faint);
+  }
+  .flag-card p{margin-bottom:8px;font-size:0.92rem;color:var(--text-muted);}
+  .flag-card p:last-child{margin-bottom:0;}
+  .exit-list{list-style:none;padding:0;margin:8px 0 0;font-family:var(--font-mono);font-size:0.82rem;}
+  .exit-list li{display:flex;gap:10px;margin-bottom:3px;}
+  .exit-list .code{color:var(--text);font-weight:600;min-width:1.6em;}
+
+  /* ---------- Color swatches (email notif) ---------- */
+  .swatches{display:flex;gap:14px;flex-wrap:wrap;margin:18px 0 22px;}
+  .swatch{
+    display:flex;align-items:center;gap:9px;
+    border:1px solid var(--border);border-radius:99px;
+    padding:5px 12px 5px 6px;font-size:0.82rem;background:var(--surface);
+  }
+  .swatch .dot{width:16px;height:16px;border-radius:50%;flex:0 0 auto;border:1px solid rgba(0,0,0,0.12);}
+
+  /* ---------- Toggle tabs (Installation) ---------- */
+  .tabs{margin:18px 0;}
+  input.tab-input{position:absolute;opacity:0;pointer-events:none;}
+  .tab-labels{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:20px;}
+  .tab-labels label{
+    font-size:0.88rem;font-weight:500;color:var(--text-muted);
+    padding:9px 16px;cursor:pointer;border-bottom:2px solid transparent;
+    margin-bottom:-1px;
+  }
+  .tab-panel{display:none;}
+  #tab-unix:checked ~ .tab-labels label[for="tab-unix"],
+  #tab-win:checked ~ .tab-labels label[for="tab-win"]{
+    color:var(--accent);border-bottom-color:var(--accent-bright);
+  }
+  #tab-unix:checked ~ .tab-panels #panel-unix,
+  #tab-win:checked ~ .tab-panels #panel-win{display:block;}
+
+  /* ---------- Device support grid ---------- */
+  .device-grid td:first-child code{font-weight:600;}
+
+  /* ---------- Footer ---------- */
+  .page-footer{
+    max-width:1200px;margin:0 auto;padding:40px 48px 60px;
+    color:var(--text-faint);font-size:0.82rem;
+  }
+  .page-footer a{color:var(--text-muted);}
+
+  /* ---------- Mobile nav ---------- */
+  .nav-toggle{display:none;}
+  .mobile-bar{display:none;}
+
+  @media (max-width: 900px){
+    .sidebar{
+      position:fixed;
+      inset:0 auto 0 0;
+      z-index:40;
+      transform:translateX(-100%);
+      transition:transform 0.2s ease;
+      box-shadow:2px 0 24px rgba(0,0,0,0.15);
+    }
+    .nav-toggle:checked ~ .layout .sidebar{transform:translateX(0);}
+    .mobile-bar{
+      display:flex;align-items:center;justify-content:space-between;
+      position:sticky;top:0;z-index:30;
+      background:var(--bg);border-bottom:1px solid var(--border);
+      padding:14px 20px;
+    }
+    .mobile-bar .brand{margin:0;}
+    .mobile-bar label{
+      font-family:var(--font-mono);font-size:0.8rem;
+      border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;
+    }
+    .content{padding:0 22px;}
+    .hero{padding:36px 22px 32px;}
+    .hero h1{font-size:2rem;}
+    .page-footer{padding:32px 22px 48px;}
+  }
+  @media (min-width:901px){
+    .mobile-bar{display:none !important;}
+  }
+
+  @media print{
+    .sidebar,.mobile-bar{display:none !important;}
+    .layout{display:block;}
+    a{color:inherit;text-decoration:none;}
+    pre{white-space:pre-wrap;}
+  }
+</style>
+
+</head>
+<body>
+
+<input type="checkbox" id="nav-toggle" class="nav-toggle">
+
+<div class="mobile-bar">
+  <div class="brand">
+    <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none"><path d="M4 12h16M4 6h10M4 18h7" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></span>
+    <span class="brand-name">fetchconfig-web</span>
+  </div>
+  <label for="nav-toggle">Menu</label>
+</div>
+
+<div class="layout">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none"><path d="M4 12h16M4 6h10M4 18h7" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></span>
+      <span class="brand-name">fetchconfig-web</span>
+    </div>
+    <div class="brand-meta">
+      <span class="pill">v2.12.27</span>
+      <span class="pill">GPL&#8209;3.0+</span>
+    </div>
+
+    <nav>
+<div class="nav-group"><a href="#usage">Usage</a></div>
+<div class="nav-group"><a href="#styles-chosen-automatically">Styles (chosen automatically)</a></div>
+<div class="nav-group"><a href="#markdown-it-understands">Markdown it understands</a></div>
+<div class="nav-group"><a href="#requirements">Requirements</a></div>
+    </nav>
+  </aside>
+
+  <div class="main-col">
+
+    <div class="hero">
+      <h1 class="hero-title">render-doc.py &mdash; Documentation</h1>
+      <p class="lede">Build tool that renders the project&#x27;s Markdown documents to styled, self-contained <strong>HTML</strong> and a plain-text <strong>ASCII</strong> version. It is a development/build helper -- it is <strong>not</strong> needed at runtime by fetchconfig-web itself. It absorbs the former <code>render-changes.py</code>: there is now one renderer for every document.</p>
+      
+      
+    </div>
+
+    <div class="content">
+
+<section id="usage">
+<div class="section-kicker">01</div>
+<h2>Usage</h2>
+<span class="file-label">shell</span>
+<pre><code>python render-doc.py [input.md] [output.html]</code></pre>
+<p>The <strong>script name comes first</strong>. A common mistake is to omit it, e.g. <code>python INSTALL.md INSTALL.html</code> -- that asks Python to execute the Markdown and fails with a <code>SyntaxError</code>. Always run <code>python render-doc.py &lt;input&gt; &lt;output&gt;</code>.</p>
+<p>For a Markdown input it writes <strong>two</strong> files:</p>
+<ul><li>the HTML page (<code>output.html</code>), and</li><li>an <strong>ASCII</strong> plain-text rendering, named after the input with the <code>.md</code>/<code>.markdown</code> suffix stripped (an input without one of those suffixes gets <code>.txt</code> appended instead, so the source is never overwritten).</li></ul>
+<p>The one exception is the <strong>license</strong> style below: a <code>LICENSE</code> input writes the HTML and a <code>.md</code>, and no plain-text file -- the input already <em>is</em> plain text.</p>
+<p>Output names: the HTML argument is optional and defaults from the input -- <code>README.md</code> keeps its historical name <code>fetchconfig-web-documentation.html</code>, and any other <code>X.md</code> defaults to <code>X.html</code>. The ASCII name is the input without <code>.md</code>:</p>
+<div class="table-wrap"><table><thead><tr><th>Input</th><th>HTML</th><th>ASCII</th></tr></thead><tbody><tr><td><code>README.md</code></td><td><code>fetchconfig-web-documentation.html</code></td><td><code>README</code></td></tr><tr><td><code>INSTALL.md</code></td><td><code>INSTALL.html</code></td><td><code>INSTALL</code></td></tr><tr><td><code>CHANGES.md</code></td><td><code>CHANGES.html</code></td><td><code>CHANGES</code></td></tr><tr><td><code>DEVELOPER.md</code></td><td><code>DEVELOPER.html</code></td><td><code>DEVELOPER</code></td></tr><tr><td><code>LICENSE-ADDITIONS.md</code></td><td><code>LICENSE-ADDITIONS.html</code></td><td><code>LICENSE-ADDITIONS</code></td></tr><tr><td><code>PRIVACY.md</code></td><td><code>PRIVACY.html</code></td><td><code>PRIVACY</code></td></tr><tr><td><code>README.imageconvert.md</code></td><td><code>README.imageconvert.html</code></td><td><code>README.imageconvert</code></td></tr></tbody></table></div>
+<p>Run it from the project directory after editing a document:</p>
+<span class="file-label">shell</span>
+<pre><code>python3 render-doc.py                          # README.md -&gt; manual + README
+python3 render-doc.py INSTALL.md               # -&gt; INSTALL.html + INSTALL
+python3 render-doc.py CHANGES.md               # -&gt; CHANGES.html + CHANGES
+python3 render-doc.py DEVELOPER.md             # -&gt; DEVELOPER.html + DEVELOPER
+python3 render-doc.py README.imageconvert.md   # -&gt; .html + README.imageconvert</code></pre>
+</section>
+<section id="styles-chosen-automatically">
+<div class="section-kicker">02</div>
+<h2>Styles (chosen automatically)</h2>
+<ul><li><strong>manual</strong> -- the full sidebar/hero manual, used for <strong>every</strong> Markdown document (README, INSTALL, CHANGES, DEVELOPER, LICENSE-ADDITIONS, PRIVACY, and any other <code>.md</code>). The hero shows a single turquoise (<code>--accent</code>) <code>&lt;h1&gt;</code> built from the H1 as <code>fetchconfig-web &amp;mdash; &lt;Subtitle&gt;</code> (a bare <code>fetchconfig-web</code> H1 falls back to &quot;Documentation&quot;), followed by the lede; the sidebar is built from the <code>##</code> sections and their <code>###</code> subsections, each section carrying a numbered kicker. A document whose H1 starts with <code>fetchconfig-web</code> is treated as an <em>app document</em> and additionally gets the app version/stat tiles; any other document (e.g. <code>README.imageconvert.md</code>) gets a clean hero titled from its own H1 (<code>&lt;Program&gt; &amp;mdash; &lt;Subtitle&gt;</code>). The fetchconfig-specific <strong>warning callouts</strong> are narrower still: they are emitted only for <code>README.md</code> and <code>INSTALL.md</code>, the two operational documents, so the changelog, developer and legal pages do not carry runtime warnings. A ```<code> </code>`<code>mermaid </code>``` fenced block is rendered as a diagram (DEVELOPER.md); the Mermaid runtime is loaded from a CDN <strong>only</strong> on pages that contain one.</li><li><strong>license</strong> -- a verbatim <code>&lt;pre&gt;</code> of a <code>LICENSE</code> file; the legal text is reproduced exactly and is not reflowed, under the same turquoise <code>fetchconfig-web &amp;mdash; &lt;title&gt;</code> heading. <code>render-doc.py LICENSE LICENSE.html</code> also writes <code>LICENSE.md</code> (the text in a fenced block), and writes no plain-text file. Note the selector is broad: this style is chosen for a basename starting <code>LICENSE</code> with no dot <strong>or for any input whose name does not end in <code>.md</code>, <code>.markdown</code>, <code>.html</code> or <code>.htm</code></strong> -- so an extensionless input is always treated as a license.</li></ul>
+</section>
+<section id="markdown-it-understands">
+<div class="section-kicker">03</div>
+<h2>Markdown it understands</h2>
+<p>Top-level <code>##</code> headings (sections), <code>###</code>/<code>####</code> sub-headings, GitHub-style pipe tables, fenced code blocks, ordered/unordered lists (with wrapped continuation lines), blockquote callouts, and inline code / bold / italic / links. A blockquote whose first line is a GitHub alert marker (<code>&gt; [!CAUTION]</code>, <code>&gt; [!WARNING]</code>) renders as a red warning callout; <code>[!NOTE]</code>, <code>[!TIP]</code>, <code>[!IMPORTANT]</code> or no marker render as the normal note callout.</p>
+<p>Two behaviours worth knowing when editing a document:</p>
+<ul><li><strong>Diagram / ASCII twins.</strong> A ```<code> </code>`<code>text </code>``<code> fence placed immediately after a </code>``<code> </code>`<code>mermaid </code>``` fence is treated as that diagram&#x27;s plain-text twin: the HTML shows only the rendered diagram (the text block is dropped), and the ASCII rendering shows only the text block (the mermaid source is dropped). This is how DEVELOPER.md carries both a diagram and a readable ASCII flow without either output showing the same thing twice. Keep the two fences adjacent, and keep them saying the same thing.</li><li><strong>Horizontal rules.</strong> A line of <code>---</code>, <code>***</code> or <code>___</code> on its own is a thematic break: an 80-column rule in the ASCII output and an <code>&lt;hr&gt;</code> in the HTML. A pipe table&#x27;s separator row is never mistaken for one (it always contains <code>|</code>), and the rule that follows a document&#x27;s lede is absorbed into the hero rather than emitted twice.</li></ul>
+<p>The ASCII renderer wraps prose to 80 columns, underlines headings, renders pipe tables as aligned columns (falling back to one <code>Header: value</code> record per row when a table is too wide to fit), keeps fenced code verbatim (indented), indents blockquotes, and strips inline markup and common HTML entities.</p>
+<p>The HTML version/stat values (sidebar pill, hero tile, the &quot;requires fetchconfig&quot; warning) are read from the <code>APP_VERSION_INTERNAL</code> and <code>MIN_FETCHCONFIG_VERSION</code> constants in <code>fetchconfig-web.cgi</code> (same directory as <code>render-doc.py</code>), so they cannot drift from the code; <code>?</code> is shown with a stderr warning if the file or a constant is missing.</p>
+</section>
+<section id="requirements">
+<div class="section-kicker">04</div>
+<h2>Requirements</h2>
+<ul><li>Standard library only (<code>sys</code>, <code>re</code>, <code>io</code>, <code>os</code>, <code>textwrap</code>, and <code>html</code>/<code>cgi</code>); no third-party packages.</li><li>Runs unchanged on <strong>Python 3 and Python 2.7.18</strong>.</li></ul>
+<p>The embedded stylesheet means the generated HTML has no external assets other than Google Fonts -- and, on a document that uses a ```<code> </code>`<code>mermaid </code>``<code> block, the Mermaid runtime (loaded from </code>cdn.jsdelivr.net` only for those pages). The script needs no companion files. The HTML output itself is 7-bit ASCII (typography is emitted as HTML entities); the generated plain-text file is UTF-8.</p>
+</section>
+
+    </div>
+
+    <div class="page-footer">
+      Generated from the fetchconfig-web README &middot; Rainer Tammer &middot; GPL&#8209;3.0-or-later
+    </div>
+
+  </div>
+</div>
+
+<script>
+  // Scroll-spy: highlight the sidebar link matching the section in view.
+  (function(){
+    var links = Array.prototype.slice.call(document.querySelectorAll('.sidebar nav a'));
+    // Resolve by id, not by CSS selector: section ids can start with a digit
+    // (version numbers in CHANGES, numbered sections in DEVELOPER), which is a
+    // valid HTML id but an invalid CSS id selector, so passing the href to
+    // querySelector would throw. getElementById has no such restriction.
+    var sections = links.map(function(a){ return document.getElementById(a.getAttribute('href').slice(1)); }).filter(Boolean);
+    if (!('IntersectionObserver' in window) || !sections.length) return;
+    var current = null;
+    function setActive(id){
+      if (id === current) return;
+      current = id;
+      links.forEach(function(a){ a.classList.toggle('active', a.getAttribute('href') === '#' + id); });
+    }
+    var observer = new IntersectionObserver(function(entries){
+      var visible = entries.filter(function(e){ return e.isIntersecting; });
+      if (visible.length){
+        visible.sort(function(a,b){ return a.boundingClientRect.top - b.boundingClientRect.top; });
+        setActive(visible[0].target.id);
+      }
+    }, { rootMargin: '-10% 0px -70% 0px', threshold: 0 });
+    sections.forEach(function(s){ observer.observe(s); });
+    setActive(sections[0].id);
+    var toggle = document.getElementById('nav-toggle');
+    links.forEach(function(a){ a.addEventListener('click', function(){ if (toggle) toggle.checked = false; }); });
+  })();
+</script>
+
+</body>
+</html>

@@ -386,9 +386,13 @@ my ($cfg) = make_config(); load_cgi($cfg); main::read_config();
     like($ctl, qr/width:\s*[\d.]+em/,  '... an explicit width, not 100%');
     like($ctl, qr/height:\s*[\d.]+em/, '... an explicit height, so a select and an input match');
     like($ctl, qr/padding:\s*0\.5em 0\.7em/, '... the same padding the Devices row uses');
-    # The controls sit inside a 0.9em label; without cancelling that they
-    # render smaller than their counterparts on the Devices page.
-    like($ctl, qr/font-size:\s*1\.0556em/, '... and a font size that cancels the label');
+    # The 0.9em caption lives in its own .filter-caption span, so the label is
+    # 1em and the controls take 0.95em directly -- same rendered size as the
+    # Devices row, with no cancelling factor.
+    like($ctl, qr/font-size:\s*0\.95em/, '... and the same 0.95em font the Devices row uses');
+    my ($cap) = $css =~ /\.filter-caption \{([^}]*)\}/s;
+    ok(defined $cap, '.filter-caption has a rule');
+    like($cap, qr/font-size:\s*0\.9em/, '... which carries the small caption text, not the label');
 }
 
 # Per page offers the same ladder and default as the device list. A cookie
@@ -420,7 +424,7 @@ my ($cfg) = make_config(); load_cgi($cfg); main::read_config();
     my ($sp) = $src =~ /\nsub show_status_page \{(.*?)\n\}\n/s;
 
     my @order;
-    while ($sp =~ /(?:filter-label">([A-Za-z\- ]+?)\s*\}|id="status-clear"[^>]*>(Clear filter))/g) {
+    while ($sp =~ /(?:filter-caption">([A-Za-z\- ]+?)<\/span>|id="status-clear"[^>]*>(Clear filter))/g) {
         push @order, defined $1 ? $1 : $2;
     }
     is_deeply(\@order, ['State', 'Changed', 'Site', 'Device-ID', 'Clear filter'],

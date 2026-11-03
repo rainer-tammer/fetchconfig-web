@@ -250,6 +250,7 @@ my @UPDATES = (
     [ '1.62', 'fetchconfig-web-dbupdate-1.62.sql', sub { tbl_exists($_[0], 'device_notes') } ],
     [ '2.08', 'fetchconfig-web-dbupdate-2.08.sql', sub { col_exists($_[0], 'users', 'read_debug') } ],
     [ '2.11', 'fetchconfig-web-dbupdate-2.11.sql', sub { tbl_exists($_[0], 'backup_current') } ],
+    [ '2.12', 'fetchconfig-web-dbupdate-2.12.sql', sub { col_exists($_[0], 'backup_versions', 'lines_added') } ],
 );
 
 sub tbl_exists {
@@ -392,11 +393,21 @@ sub do_grants {
     print "Owner: backup_current/backup_runs/backup_versions -> \"$writer\".\n";
     # Web (read) user: SELECT only.
     $dbh->do("GRANT SELECT ON backup_current, backup_runs, backup_versions TO $qu");
+    # The schema_migrations ledger is superuser-owned (write-protected from the web);
+    # grant the web user SELECT so the About dialog can report the applied DB schema
+    # version. Without this the table is invisible to the web role and About shows
+    # "not installed" even on a fully-upgraded database.
+    $dbh->do("GRANT SELECT ON schema_migrations TO $qu") if tbl_exists($dbh, 'schema_migrations');
     # Writer: SELECT + INSERT on all three (SELECT is required by the pre-9.5
     # DML), UPDATE on backup_current, UPDATE(expired, expired_at) on backup_versions.
     $dbh->do("GRANT SELECT, INSERT ON backup_current, backup_runs, backup_versions TO $qw");
     $dbh->do("GRANT UPDATE ON backup_current TO $qw");
-    $dbh->do("GRANT UPDATE (expired, expired_at) ON backup_versions TO $qw");
+    # Writer UPDATE on backup_versions: expiry always; the 2.12 line-count columns
+    # (for --db-backfill) when present. --upgrade applies migrations before grants,
+    # so the columns normally exist by now; guarded for a schema that predates 2.12.
+    my $bv_cols = col_exists($dbh, 'backup_versions', 'lines_added')
+                ? 'expired, expired_at, lines_added, lines_removed' : 'expired, expired_at';
+    $dbh->do("GRANT UPDATE ($bv_cols) ON backup_versions TO $qw");
     print "Granted: web user \"$webuser\" SELECT; writer \"$writer\" SELECT+INSERT+UPDATE.\n";
 }
 

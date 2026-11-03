@@ -119,6 +119,11 @@ no warnings 'once';
     local $main::RUN_MODE = 'FCGI';
     like(main::about_modal_html(), qr{<th>Run mode</th><td>FCGI</td>},
          'About dialog shows Run mode: FCGI when set');
+
+    # DB schema row: no database in the test env, so the ledger is unreachable
+    # and the dialog reports "not installed".
+    like($html, qr{<th>DB schema</th><td>not installed</td>},
+         'About dialog shows the DB schema version (not installed without a DB)');
 }
 
 done_testing();

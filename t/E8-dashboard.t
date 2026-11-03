@@ -135,10 +135,14 @@ is(main::dashboard_schema_state(undef), 'missing', 'no dbh -> missing');
     is_deeply(\@oids, ['ghost'], 'orphans: only the history-only device (configured ones excluded)');
 
     my $d = main::dashboard_overview_data($dbh, undef);
-    is($d->{total}, 3, 'overview total counts current-status rows');
+    # 3 current-status rows (rtrcore01, fw01, ghost) + the configured-but-never-run
+    # "orphan" device (in the device table, no backup_current row) counted as never.
+    is($d->{total}, 4, 'overview total = current-status rows + configured-not-yet-run');
+    is($d->{never}, 1, 'overview: the configured-but-no-row device counts as never');
     my %site = map { $_->{site} => $_ } @{ $d->{by_site} };
-    is($site{'gop / Goeppingen'}{total},   1, 'by_site: label is "code / description"');
+    is($site{'gop / Goeppingen'}{total},   2, 'by_site: gop = rtrcore01 (fresh) + orphan (never)');
     is($site{'gop / Goeppingen'}{fresh},   1, 'by_site: Goeppingen 1 fresh');
+    is($site{'gop / Goeppingen'}{never},   1, 'by_site: Goeppingen 1 never (configured, no row yet)');
     is($site{'can / Canton, MI'}{failed},  1, 'by_site: Canton 1 failed');
     ok(exists $site{'(no site)'},             'by_site: history-only device bucketed as (no site)');
     is($site{'(no site)'}{stale},          1, 'by_site: (no site) 1 stale');

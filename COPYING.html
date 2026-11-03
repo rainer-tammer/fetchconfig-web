@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Third-Party Licenses &mdash; Documentation</title>
+<title>fetchconfig-web &mdash; Third-Party Licenses</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -519,13 +519,13 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v2.09</span>
+      <span class="pill">v2.12.27</span>
       <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
     <nav>
 <div class="nav-group"><a href="#mermaid----mit-license">Mermaid -- MIT License</a></div>
-<div class="nav-group"><a href="#ibm-plex-sans----sil-open-font-license-version-11">IBM Plex Sans -- SIL Open Font License, Version 1.1</a></div>
+<div class="nav-group"><a href="#ibm-plex-sans--ibm-plex-mono----sil-open-font-license-version-11">IBM Plex Sans &amp; IBM Plex Mono -- SIL Open Font License, Version 1.1</a></div>
 <div class="nav-group"><a href="#components-not-redistributed-here">Components not redistributed here</a></div>
     </nav>
   </aside>
@@ -533,10 +533,15 @@
   <div class="main-col">
 
     <div class="hero">
-      <h1 class="hero-title">Third-Party Licenses &mdash; Documentation</h1>
+      <h1 class="hero-title">fetchconfig-web &mdash; Third-Party Licenses</h1>
       <p class="lede">fetchconfig-web itself is distributed under the GNU General Public License, Version 3 (see <code>LICENSE</code>), with the additional terms in <code>LICENSE-ADDITIONS</code>.</p>
       
-      
+      <div class="hero-stats">
+        <div class="hero-stat"><span class="num">2.12.27</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">Perl FCGI/CGI</span><span class="label">language</span></div>
+        <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
+        <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
+      </div>
     </div>
 
     <div class="content">
@@ -569,10 +574,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.</code></pre>
 <p><code>js/mermaid.min.js</code> is a pre-built bundle that also incorporates additional open-source components (among them d3, dagre and others) under permissive licenses -- MIT, ISC, BSD-2-Clause, BSD-3-Clause and Apache-2.0. Their copyright and permission notices are retained inside the file. See https://github.com/mermaid-js/mermaid for the authoritative component list.</p>
 </section>
-<section id="ibm-plex-sans----sil-open-font-license-version-11">
+<section id="ibm-plex-sans--ibm-plex-mono----sil-open-font-license-version-11">
 <div class="section-kicker">02</div>
-<h2>IBM Plex Sans -- SIL Open Font License, Version 1.1</h2>
-<p>Bundled as <code>fonts/IBMPlexSans-Regular.woff2</code> and <code>fonts/IBMPlexSans-SemiBold.woff2</code>. Used so the state-machine diagram&#x27;s labels are sized and fit correctly.</p>
+<h2>IBM Plex Sans &amp; IBM Plex Mono -- SIL Open Font License, Version 1.1</h2>
+<p>Bundled as <code>fonts/IBMPlexSans-Regular.woff2</code>, <code>fonts/IBMPlexSans-SemiBold.woff2</code>, <code>fonts/IBMPlexMono-Regular.woff2</code> and <code>fonts/IBMPlexMono-SemiBold.woff2</code>. IBM Plex Sans is the application UI font (and sizes the state-machine diagram&#x27;s labels); IBM Plex Mono is the configuration / diff / log view font. Both degrade to the platform&#x27;s own fonts if the files are not installed in <code>WEB_DIR/fonts</code>.</p>
 <span class="file-label">code</span>
 <pre><code>Copyright 2019 IBM Corp. All rights reserved.
 

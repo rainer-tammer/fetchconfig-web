@@ -7,9 +7,9 @@ alongside it and served statically. It shows a "fetchconfig-web" title bar and
 logo on every page, and a Devices / Status / User / Help menu (plus a Setup item
 for accounts with the edit or admin right) in the title bar's nav row:
 
-    Requires fetchconfig 9.74 or newer. fetchconfig-web reads the installed
+    Requires fetchconfig 9.77 or newer. fetchconfig-web reads the installed
     version from <FETCHCONFIG_PATH>/fetchconfig/Constants.pm and shows a warning
-    banner (on every page, after login) if it is older than 9.74 or cannot be
+    banner (on every page, after login) if it is older than 9.77 or cannot be
     determined. The minimum is set by the MIN_FETCHCONFIG_VERSION constant in
     fetchconfig-web.cgi.
 
@@ -124,7 +124,8 @@ Clicking the program icon in the title bar opens an About dialog showing the
 internal (shipped) version APP_VERSION_INTERNAL, the configured/effective
 version (APP_VERSION, overridable in the config), the copyright (the config
 COPYRIGHT, or the built-in default Copyright (c) 2026, Rainer Tammer), the
-installed fetchconfig.pl version, and the GPLv3 notice.
+installed fetchconfig.pl version, the applied DB schema version, the run mode,
+and the GPLv3 notice.
 
 What fetchconfig-web is
 -----------------------
@@ -217,7 +218,7 @@ Quick start
 For an experienced operator, the shortest path to a running instance:
 
 1. Install the prerequisites -- Perl with DBI/DBD::Pg, CGI and Algorithm::Diff;
-   PostgreSQL; and fetchconfig 9.74+ (see Requirements).
+   PostgreSQL; and fetchconfig 9.77+ (see Requirements).
 2. Create the user database -- run perl fetchconfig-web-dbsetup.pl (see The user
    database).
 3. Write the configuration -- copy the sample in Configuration to
@@ -442,7 +443,7 @@ You can also create it by hand:
     GENERIC_SYNTAX          = auto
     TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
     #CRON_USER              = fetchconfig
-    APP_VERSION             = 2.11
+    APP_VERSION             = 2.12
     COPYRIGHT               = 2026 (c) Rainer Tammer
 
 Format and loading:
@@ -1058,7 +1059,9 @@ Backup reports, Device notes), Setup devices (Device table, Edit device table,
 Bulk edit devices -- shown only to users who may edit the table; a site-limited
 user sees only Edit device table), Tools (admin only, each tool on its own
 page), User (Change your password and Change your email for everyone; Users, Add
-user and Sites for admins), and Help. The post-login page is the device list.
+user and Sites for admins), Dashboard (Overview, Changes, All devices -- shown
+only when ENABLE_DASHBOARD is on), and Help. The post-login page is the device
+list (the Overview when the dashboard is enabled).
 
 Device notes
 ------------
@@ -1118,7 +1121,12 @@ fetchconfig engine (9.75+) writes to the database, so it is read-only and does
 not touch the device backups themselves. For how to enable it, see the Backup
 Dashboard section of INSTALL.md.
 
-The Dashboard menu has two entries:
+Every tile and panel on the Overview and Changes pages carries a small scope
+pill -- global (the whole fleet, for administrators / unrestricted users) or
+restricted (limited to the sites you may see) -- so a site-limited user can tell
+at a glance whether a number is their slice or the whole fleet.
+
+The Dashboard menu has three entries:
 
 - Overview ("Backup health") -- a fleet health page: tiles (total / fresh /
   stale / failed / never), a freshness bar, a status donut, a backup-age
@@ -1126,7 +1134,18 @@ The Dashboard menu has two entries:
   success-rate bars, labelled code / description). Every logged-in user may open
   it; a site-limited user sees only their own sites, an administrator the whole
   fleet. It is a read-only summary and is not interactively filtered. When the
-  dashboard is enabled, users land here after login.
+  dashboard is enabled, users land here after login. A compact Recently changed
+  -- last 24 h card links through to the Changes view.
+- Changes (configuration churn) -- how often devices actually change, separate
+  from backup freshness. Tiles (changes in 7 / 30 days, changed in 24 h, most-
+  changed device, stable > 1 year), a 16-week fleet churn chart (pre-cut-over
+  weeks marked, mass-change spikes highlighted), a 30-day most-changed
+  leaderboard, time-since-last-change buckets, and a Top N recently changed --
+  last D days feed (with N / days inputs) showing +added / -removed line counts
+  and a per-row View diff that opens exactly that version against its
+  predecessor. Open to every user and site-scoped like the Overview. The line
+  counts need the engine's per-version deltas (fetchconfig 9.77+); a version
+  with none shows --. All read-only, no file reads on page load.
 - All devices (administrators only) -- a table of every device: Device, Site
   (code / description), Model (the device type; generic devices show generic ·
   <template>), Last backup, Status, Size, and a View button to that device's
@@ -1149,13 +1168,13 @@ not a cryptographic signature).
 Setup devices and the device-table editor
 -----------------------------------------
 
-The Setup menu item -- shown in the title bar for the admin account
-($PROTECTED_USER) or any user granted the device-table edit right -- displays
-the raw contents of $DEVICE_TABLE exactly as fetchconfig.pl reads it (no parsing
-or filtering), using the same monospaced block and copy-to-clipboard button as
-the backup content view. It has an Edit device table button that opens the
-structured editor, and (for admins only) a Bulk Edit button -- see "Bulk edit"
-below.
+The Setup devices -> Device table view -- shown in the title bar for the admin
+account ($PROTECTED_USER) or any user granted the device-table edit right --
+displays the raw contents of $DEVICE_TABLE exactly as fetchconfig.pl reads it
+(no parsing or filtering), using the same monospaced block and copy-to-clipboard
+button as the backup content view. It has an Edit device table button that opens
+the structured editor, and (for admins only) a Bulk Edit button -- see "Bulk
+edit" below.
 
 Because the device table can carry device login credentials on its default:
 lines (the same class of secret the credential-masking on Backup Now exists to
@@ -1168,7 +1187,7 @@ The structured editor
 .....................
 
 The editor (action=edit_table, gated as above, POST + CSRF on save) works on the
-table as three tabs -- Devices, Defaults (per model), and Email notification --
+table as three tabs -- Devices, Defaults (per model), and General parameters --
 rather than as raw text:
 
 - Each device / default / email line is a card; its options are typed fields
@@ -1183,17 +1202,19 @@ rather than as raw text:
   email keys) that aren't already present; + Add device / + Add model defaults
   add new rows; each option and each row can be removed. A newly-added device is
   placed at the top of the Devices list (as the first entry), not the bottom.
-- The Email notification tab edits the email: line: from, to (;-separated
-  recipients) and smtp are mandatory; port, user, password (SMTP AUTH), footer
-  and tls are optional. The SMTP server's port can be given three ways --
-  smtp=host, smtp=host:port, or smtp=host plus a separate port=<n> -- and an
-  explicit port= wins over a port in the host, which wins over the default (25
-  for tls=off/starttls, 465 for tls=ssl). footer is the copyright / attribution
-  text shown in the summary e-mail's footer (the trailing " - Version <n>" is
-  appended automatically; the value must not contain a comma, since commas
-  separate options). tls is a drop-down selecting the SMTP transport security:
-  off (default, plain SMTP), starttls (upgrade an initially-clear connection,
-  typically port 25/587) or ssl (TLS from the start, typically port 465).
+- The General parameters tab (shown only to admin / unrestricted users) edits
+  the email: line -- from, to (;-separated recipients) and smtp are mandatory;
+  port, user, password (SMTP AUTH), footer and tls are optional -- and the
+  admin-only dashboard db: fields. The SMTP server's port can be given three
+  ways -- smtp=host, smtp=host:port, or smtp=host plus a separate port=<n> --
+  and an explicit port= wins over a port in the host, which wins over the
+  default (25 for tls=off/starttls, 465 for tls=ssl). footer is the copyright /
+  attribution text shown in the summary e-mail's footer (the trailing " -
+  Version <n>" is appended automatically; the value must not contain a comma,
+  since commas separate options). tls is a drop-down selecting the SMTP
+  transport security: off (default, plain SMTP), starttls (upgrade an initially-
+  clear connection, typically port 25/587) or ssl (TLS from the start, typically
+  port 465).
 - A device whose fields you have changed (not merely expanded) shows a small red
   dot after its Device-ID, so unsaved edits are easy to spot in the list. The
   marker survives a Preview -> Back to editor round-trip.
@@ -1592,15 +1613,16 @@ utilities, each in its own titled box. All actions re-check the admin
 requirement server-side (not just menu hiding), since they're reachable directly
 by URL.
 
-The full set of entries is: Orphaned configuration cleanup, Empty directory
-cleanup, Empty backup cleanup, Restore device table, Device debug logs, Devices
-without backups, Consistent backup suffixes, Check site assignment, Audit log,
-Login failures, Orphaned notes cleanup, Disk space, View last fetchconfig
-schedule log, Templates, Upload report logo, and Verify email setup. The
-sections below describe each in turn.
+The full set of entries is: Orphaned backup cleanup, Empty directory cleanup,
+Empty backup cleanup, Restore device table, Device debug logs, Devices without
+backups, Consistent backup suffixes, Check site assignment, Audit log, Login
+failures, Orphaned notes cleanup, Disk space, Show fetchconfig-web.cfg, Show
+schedule, View last fetchconfig schedule log, Templates, Upload report logo,
+Verify email setup, and (when the dashboard is enabled) Cleanup dashboard. The
+sections below describe the main ones in turn.
 
-Orphaned Configuration Cleanup
-..............................
+Orphaned Backup Cleanup
+.......................
 
 Orphaned backups are backed-up configurations on disk whose device is no longer
 in the device table (a decommissioned or renamed device leaving its old backups
@@ -2302,15 +2324,16 @@ access required.
 - Edit user page (?action=user_edit) -- one grouped form with Return / Cancel /
   Save changes: Identity (email), Permissions (Administrator, which supersedes
   and greys out the individual rights -- Edit device table, Download full
-  report, Download/copy unmasked config), a read-only Site access summary
-  (wrapped to a bounded width) with a button to the separate sites editor, and a
-  Reset-password button. Cancel and Return warn if there are unsaved changes.
+  report, Download/copy unmasked config, View device debug logs), a read-only
+  Site access summary (wrapped to a bounded width) with a button to the separate
+  sites editor, and a Reset-password button. Cancel and Return warn if there are
+  unsaved changes.
 - Saving -- one user_save writes email and all permission fields in a single
   UPDATE, and records one audit line per changed field (reusing the set_email /
   set_admin_right / set_edit_right / set_download_full_report /
-  set_download_full_config action names); an unchanged field produces no audit
-  entry. The built-in admin account's permissions are fixed (only its email is
-  editable there).
+  set_download_full_config / set_read_debug action names); an unchanged field
+  produces no audit entry. The built-in admin account's permissions are fixed
+  (only its email is editable there).
 - Reset another user's password -- the Reset password button next to each user.
   Sets a new password without the current one; refuses to target admin itself
   (admin's own password only changes through "Change your password").
@@ -2393,7 +2416,7 @@ by the browser with the site's host name.
 
 About. The bottom About entry opens the same dialog as the program icon in the
 title bar (internal and configured version, copyright, the detected
-fetchconfig.pl version, and the run mode).
+fetchconfig.pl version, the applied DB schema version, and the run mode).
 
 User-interface conveniences
 ---------------------------

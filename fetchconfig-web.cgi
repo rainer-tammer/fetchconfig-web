@@ -92,12 +92,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.11';
+use constant APP_VERSION => '2.12.27';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.11';
+use constant APP_VERSION_INTERNAL => '2.12.27';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -105,7 +105,7 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.74';
+use constant MIN_FETCHCONFIG_VERSION => '9.77';
 
 # --- Help menu "additional help" scan (see help_scan_dir / help_extract_title) ---
 # Each of the two help subdirectories (fetchconfig/, fetchconfig-web/) is
@@ -1583,6 +1583,10 @@ sub main {
             do_set_admin_right($user);
         } elsif ($action eq 'dashboard' || $action eq 'dashboard_overview') {
             show_dashboard_overview($user);
+        } elsif ($action eq 'dashboard_changes') {
+            show_dashboard_changes($user);
+        } elsif ($action eq 'changes_diff') {
+            show_changes_diff($user);
         } elsif ($action eq 'dashboard_devices') {
             show_dashboard_devices($user);
         } elsif ($action eq 'dashboard_devices_csv') {
@@ -4151,7 +4155,8 @@ sub dashboard_deny {
     my ($user, $msg) = @_;
     print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Dashboard', $user);
-    print qq{<h1>Dashboard</h1>\n<p class="error">} . esc($msg) . qq{</p>\n};
+    print qq{<div class="tool-section"><h2 class="tool-section-title">Dashboard</h2>\n};
+    print qq{<p class="error">} . esc($msg) . qq{</p></div>\n};
     print page_foot();
 }
 
@@ -4261,6 +4266,21 @@ sub dashboard_overview_data {
         $inscope{$id} = 1;
     }
 
+    # Devices present in the device table but with no backup_current row yet --
+    # typically just added, before the engine's first run. The dashboard knows
+    # them from the device table, so count them as "never" (no successful backup)
+    # instead of omitting them from the fleet totals and the by-site breakdown.
+    for my $dv (@$devs) {
+        my $id = $dv->{id};
+        next if $inscope{$id};               # already counted from backup_current
+        my $code = exists $site_of{$id} ? $site_of{$id} : SITE_ALL_CODE;
+        $d{total}++;
+        $d{never}++;
+        my $a = ($agg{$code} ||= { total => 0, fresh => 0, stale => 0, failed => 0, never => 0 });
+        $a->{total}++;
+        $a->{never}++;
+    }
+
     my @by_site;
     for my $code (keys %agg) {
         my $label;
@@ -4273,6 +4293,7 @@ sub dashboard_overview_data {
     }
     @by_site = sort { $b->{total} <=> $a->{total} || lc($a->{site}) cmp lc($b->{site}) } @by_site;
     $d{by_site} = \@by_site;
+    $d{unrestricted} = $unrestricted;   # for the KPI tiles' global/restricted pill
 
     # 14-day success-rate trend from backup_runs, bucketed by naive day. Scoped
     # to the user's devices when limited (a small IN-list); full-fleet otherwise.
@@ -4301,6 +4322,200 @@ sub dashboard_overview_data {
     return \%d;
 }
 
+use constant CHG_WEEKS => 16;        # weeks shown in the churn chart
+
+# Config-churn aggregates for the Changes view, all from backup_versions: one
+# row there = one stored config version = one CHANGE event, in BOTH eras (a
+# version file is written only when the config changed, so the back-filled rows
+# the 9.76 --db-backfill pass imported from disk are change events with real
+# historical file_timestamps -- directly comparable to live rows). The one
+# caveat is RETENTION: pruned/expired versions leave no row, so weeks before the
+# live cut-over (first backup_runs row with a real duration_sec) only count what
+# is still on disk and can undercount the deeper past -- the renderer marks that
+# region. Timestamps are the naive wall-clock epoch used across the dashboard.
+# Scoped to a site-limited caller's visible devices; whole fleet otherwise.
+# Pure SELECTs (no file access -- the feed's delta is a DB size delta), so this
+# is safe to unit-test against a mock handle.
+sub dashboard_changes_data {
+    my ($dbh, $user, %opt) = @_;
+    my $now = dash_naive_now();
+    my $W   = 86400;
+    my $feed_days = ($opt{feed_days} && $opt{feed_days} =~ /^\d+\z/) ? $opt{feed_days} : 7;
+    my $feed_n    = ($opt{feed_n}    && $opt{feed_n}    =~ /^\d+\z/) ? $opt{feed_n}    : 50;
+
+    my $acc = $user ? user_site_access($dbh, $user) : { unrestricted => 1 };
+    my $unrestricted = $acc->{unrestricted} ? 1 : 0;
+    my ($devs) = read_device_ids($user, $acc);
+    my %site_of;                     # device-table dev_id => site code
+    for my $dv (@$devs) {
+        my $code = (defined $dv->{site} && $dv->{site} ne '') ? $dv->{site} : SITE_ALL_CODE;
+        $site_of{ $dv->{id} } = $code;
+    }
+    my $name_of = site_name_map($dbh);
+    my $site_fields = sub {
+        my ($id) = @_;
+        my $code = exists $site_of{$id} ? $site_of{$id} : SITE_ALL_CODE;
+        return ('', '') if $code eq SITE_ALL_CODE;
+        my $desc = $name_of->{$code};
+        return ($code, (defined $desc && $desc ne '' && $desc ne $code) ? $desc : '');
+    };
+
+    # Site-limited users are restricted to an IN-list of their visible devices.
+    my ($scope, @sb) = ('');
+    if (!$unrestricted) {
+        my @ids = keys %site_of;
+        return _changes_zero($now, scalar @$devs) unless @ids;
+        $scope = ' AND dev_id IN (' . join(',', ('?') x @ids) . ')';
+        @sb = @ids;
+    }
+
+    my $since7     = $now -   7 * $W;
+    my $since30    = $now -  30 * $W;
+    my $sinceWk    = $now - CHG_WEEKS * 7 * $W;
+    my $since_feed = $now - $feed_days * $W;
+
+    # --- lifetime per-device: last change + version count (buckets / stable) ---
+    my $per = $dbh->selectall_arrayref(
+        qq{SELECT dev_id, count(*) AS n, max(file_timestamp) AS last_ts
+             FROM backup_versions WHERE 1=1$scope GROUP BY dev_id},
+        { Slice => {} }, @sb) || [];
+    my %last_of;                     # device-table dev_id => last change epoch
+    for my $r (@$per) {
+        next unless exists $site_of{ $r->{dev_id} };   # device-table devices only
+        $last_of{ $r->{dev_id} } = $r->{last_ts};
+    }
+
+    # --- windowed per-device (30d): leaderboard + most-changed + 30d total -----
+    my $per30 = $dbh->selectall_arrayref(
+        qq{SELECT dev_id, count(*) AS n
+             FROM backup_versions WHERE file_timestamp >= ?$scope
+            GROUP BY dev_id ORDER BY n DESC}, { Slice => {} }, $since30, @sb) || [];
+    my $changes_30d = 0; $changes_30d += $_->{n} for @$per30;
+    my @top;
+    for my $r (@$per30) {
+        next unless exists $site_of{ $r->{dev_id} };
+        my ($sc, $sd) = $site_fields->($r->{dev_id});
+        my $last = $last_of{ $r->{dev_id} };
+        push @top, { dev => $r->{dev_id}, site_code => $sc, site_desc => $sd,
+                     n => $r->{n}, last_ts => $last, age => dash_age($last, $now) };
+        last if @top >= 8;
+    }
+    my $most = @top ? $top[0] : undef;
+
+    # --- 7-day change count ---------------------------------------------------
+    my $c7 = $dbh->selectall_arrayref(
+        qq{SELECT count(*) AS n FROM backup_versions WHERE file_timestamp >= ?$scope},
+        { Slice => {} }, $since7, @sb) || [];
+    my $changes_7d = @$c7 ? ($c7->[0]{n} || 0) : 0;
+
+    # --- weekly churn (CHG_WEEKS buckets, zero-filled) ------------------------
+    my $wkrows = $dbh->selectall_arrayref(
+        qq{SELECT (file_timestamp / 604800) AS wk, count(*) AS n
+             FROM backup_versions WHERE file_timestamp >= ?$scope
+            GROUP BY (file_timestamp / 604800) ORDER BY wk},
+        { Slice => {} }, $sinceWk, @sb) || [];
+    my %wkn; $wkn{ $_->{wk} } = $_->{n} for @$wkrows;
+    my $cur_wk = int($now / 604800);
+
+    # Cut-over to live recording: the first backup_runs row with a real duration.
+    # Weeks ending at or before it are reconstructed-from-disk (retention-limited).
+    my $corows = $dbh->selectall_arrayref(
+        q{SELECT min(run_end) AS c FROM backup_runs WHERE duration_sec IS NOT NULL},
+        { Slice => {} }) || [];
+    my $cutover = (@$corows && defined $corows->[0]{c}) ? $corows->[0]{c} : undef;
+
+    my @weeks;
+    for my $i (reverse 0 .. CHG_WEEKS - 1) {       # oldest .. newest
+        my $wk  = $cur_wk - $i;
+        my $n   = $wkn{$wk} || 0;
+        my $end = ($wk + 1) * 604800;
+        my $bf  = (!defined $cutover) ? 1 : ($end <= $cutover ? 1 : 0);
+        push @weeks, { rel => -$i, n => $n, bf => $bf, spike => 0 };
+    }
+    # Spike = a week well above the usual rate (>= 3x the median of non-zero
+    # weeks, and at least 5): a mass-change window worth noticing.
+    my @nz = sort { $a <=> $b } grep { $_ > 0 } map { $_->{n} } @weeks;
+    if (@nz) {
+        my $med = $nz[int($#nz / 2)];
+        for my $wkc (@weeks) {
+            $wkc->{spike} = 1 if $wkc->{n} >= 5 && $wkc->{n} >= 3 * ($med || 1);
+        }
+    }
+
+    # --- change-age buckets + stable/24h, over device-table devices -----------
+    my %b = (le7=>0, d8_30=>0, d31_90=>0, d91_365=>0, y1_2=>0, gt2=>0);
+    my ($stable_1y, $changed_24h) = (0, 0);
+    for my $id (keys %site_of) {
+        my $last = $last_of{$id};
+        next unless defined $last && $last =~ /^\d+\z/;
+        my $age = $now - $last; $age = 0 if $age < 0;
+        $changed_24h++ if $age <      $W;
+        $stable_1y++   if $age >= 365*$W;
+        if    ($age <   7*$W) { $b{le7}++;     }
+        elsif ($age <  30*$W) { $b{d8_30}++;   }
+        elsif ($age <  90*$W) { $b{d31_90}++;  }
+        elsif ($age < 365*$W) { $b{d91_365}++; }
+        elsif ($age < 730*$W) { $b{y1_2}++;    }
+        else                  { $b{gt2}++;     }
+    }
+    my $total_dev    = scalar keys %site_of;
+    my $with_ver     = scalar grep { defined $last_of{$_} } keys %site_of;
+    $b{none}         = $total_dev - $with_ver;
+    $b{with_versions}= $with_ver;
+
+    # --- recently-changed feed (last feed_days, newest first; capped to feed_n).
+    # Line counts come straight from the DB (engine-written, ignore-aware). NULL
+    # means "no delta stored" -- the device's oldest RETAINED version (no on-disk
+    # predecessor to diff; earlier backups may have been pruned) or a row written
+    # before fetchconfig 9.77. All DB -- no file reads.
+    my $feedrows = $dbh->selectall_arrayref(
+        qq{SELECT dev_id, file_timestamp AS ts, lines_added AS la, lines_removed AS lr
+             FROM backup_versions WHERE file_timestamp >= ?$scope
+            ORDER BY file_timestamp DESC}, { Slice => {} }, $since_feed, @sb) || [];
+    my @feed;
+    for my $r (@$feedrows) {
+        next if !$unrestricted && !exists $site_of{ $r->{dev_id} };
+        my ($sc, $sd) = $site_fields->($r->{dev_id});
+        push @feed, { dev => $r->{dev_id}, site_code => $sc, site_desc => $sd,
+                      ts => $r->{ts}, age => dash_age($r->{ts}, $now),
+                      la => $r->{la}, lr => $r->{lr} };
+        last if @feed >= $feed_n;
+    }
+
+    return {
+        total_devices => $total_dev,
+        changes_7d    => $changes_7d,
+        changes_30d   => $changes_30d,
+        changed_24h   => $changed_24h,
+        stable_1y     => $stable_1y,
+        most_changed  => $most,
+        cutover       => $cutover,
+        weeks         => \@weeks,
+        top           => \@top,
+        buckets       => \%b,
+        feed          => \@feed,
+        unrestricted  => $unrestricted,   # for the KPI tiles' global/restricted pill
+    };
+}
+
+# Zero-valued Changes structure for a limited user with no visible devices.
+sub _changes_zero {
+    my ($now, $total) = @_;
+    my @weeks;
+    my $cur_wk = int($now / 604800);
+    for my $i (reverse 0 .. CHG_WEEKS - 1) {
+        push @weeks, { rel => -$i, n => 0, bf => 0, spike => 0 };
+    }
+    return {
+        total_devices => $total || 0, changes_7d => 0, changes_30d => 0,
+        changed_24h => 0, stable_1y => 0, most_changed => undef, cutover => undef,
+        weeks => \@weeks, top => [],
+        buckets => { le7=>0,d8_30=>0,d31_90=>0,d91_365=>0,y1_2=>0,gt2=>0,
+                     none => ($total || 0), with_versions => 0 },
+        feed => [], unrestricted => 0,
+    };
+}
+
 # Shared colour key for the status segments (By-site bars, fleet-freshness bar,
 # donut) and the status badges. Colours come from the .dash-seg-* classes.
 sub dash_status_legend {
@@ -4322,12 +4537,28 @@ sub _dash_group {
 
 # A simple stat tile. $status is a status key (fresh/stale/failed/never) for the
 # colour dot, or '' for no dot.
+# Scope pill: 'global' (whole fleet) or 'restricted' (limited to the viewer's
+# sites). Inline next to a panel heading, or pinned top-right inside a KPI tile.
+# '' / undef -> no pill.
+sub dash_scope_pill {
+    my ($scope) = @_;
+    return '' unless defined $scope && $scope ne '';
+    my $k = ($scope eq 'restricted') ? 'restricted' : 'global';
+    my %ttl = (global => 'whole fleet', restricted => 'limited to your sites');
+    return qq{<span class="dash-scope-pill dash-scope-$k" title="} . esc($ttl{$k}) . qq{">}
+         . esc($k) . qq{</span>};
+}
+
+# $scope (optional): adds dash_scope_pill() to the tile (top-right corner).
+# $valclass (optional): extra class on the value div (e.g. 'dash-tile-value-id'
+# for a long device id, so it shrinks and breaks instead of overflowing).
 sub dash_tile {
-    my ($label, $value, $sub, $status) = @_;
+    my ($label, $value, $sub, $status, $scope, $valclass) = @_;
     my $dot = $status ? qq{<span class="dash-tile-dot dash-seg-$status"></span>} : '';
-    return qq{<div class="dash-tile">}
+    my $vc  = (defined $valclass && $valclass ne '') ? " $valclass" : '';
+    return qq{<div class="dash-tile">} . dash_scope_pill($scope)
          . qq{<div class="dash-tile-label">$dot} . esc($label) . qq{</div>}
-         . qq{<div class="dash-tile-value">} . esc($value) . qq{</div>}
+         . qq{<div class="dash-tile-value$vc">} . esc($value) . qq{</div>}
          . ($sub ne '' ? qq{<div class="dash-tile-sub">} . esc($sub) . qq{</div>} : '')
          . qq{</div>};
 }
@@ -4380,19 +4611,45 @@ sub show_dashboard_overview {
     my $tot = $d->{total} || 1;
     my $pc  = sub { my ($n) = @_; sprintf('%.1f%%', 100 * $n / $tot); };
 
-    # KPI tiles
+    # KPI tiles. The pill marks whether these fleet numbers are global (admin /
+    # unrestricted) or restricted to the viewer's own sites.
+    my $scope = $d->{unrestricted} ? 'global' : 'restricted';
     print qq{<section class="dash-tiles">};
-    print dash_tile('Total devices', $d->{total}, 'across the fleet', '');
-    print dash_tile('Fresh (<=24h)', $d->{fresh}, $pc->($d->{fresh}) . ' of fleet', 'fresh');
-    print dash_tile('Stale (1-7d)',  $d->{stale}, $pc->($d->{stale}), 'stale');
-    print dash_tile('Failed last run', $d->{failed}, 'auth / timeout / unreachable', 'failed');
-    print dash_tile('Never backed up', $d->{never}, 'no successful backup yet', 'never');
+    print dash_tile('Total devices', $d->{total}, 'across the fleet', '', $scope);
+    print dash_tile('Fresh (<=24h)', $d->{fresh}, $pc->($d->{fresh}) . ' of fleet', 'fresh', $scope);
+    print dash_tile('Stale (1-7d)',  $d->{stale}, $pc->($d->{stale}), 'stale', $scope);
+    print dash_tile('Failed last run', $d->{failed}, 'auth / timeout / unreachable', 'failed', $scope);
+    print dash_tile('Never backed up', $d->{never}, 'no successful backup yet', 'never', $scope);
     print qq{</section>\n};
+
+    # Recently-changed card: the first thing checked after a maintenance night.
+    # Links through to the full Changes page.
+    {
+        my $rc = dashboard_recent_changed($dbh, $user, 86400, 4);
+        my $chg = esc(script_url() . '?action=dashboard_changes');
+        print qq{<section class="dash-panel dash-recent">};
+        print qq{<div class="dash-panel-head"><h2>Recently changed &middot; last 24 h} . dash_scope_pill($scope) . qq{</h2>}
+            . qq{<a class="dash-recent-link" href="$chg">Changes &rarr;</a></div>};
+        if ($rc->{count}) {
+            print qq{<div class="dash-recent-row">};
+            for my $x (@{ $rc->{devs} }) {
+                print qq{<span class="dash-recent-dev">} . esc($x->{dev})
+                    . qq{ <span class="muted">} . esc($x->{age}) . qq{</span></span>};
+            }
+            print qq{<span class="muted">} . esc($rc->{count}) . qq{ device}
+                . ($rc->{count} == 1 ? '' : 's') . qq{ changed</span>};
+            print qq{</div>};
+        }
+        else {
+            print qq{<p class="muted">No configuration changes in the last 24 hours.</p>};
+        }
+        print qq{</section>\n};
+    }
 
     # Fleet-freshness stacked bar
     my $w = sub { my ($n) = @_; sprintf('%.3f%%', 100 * $n / $tot); };
     print qq{<section class="dash-panel">};
-    print qq{<div class="dash-panel-head"><h2>Fleet freshness</h2>} . dash_status_legend() . qq{</div>};
+    print qq{<div class="dash-panel-head"><h2>Fleet freshness} . dash_scope_pill($scope) . qq{</h2>} . dash_status_legend() . qq{</div>};
     print qq{<div class="dash-bar">}
         . qq{<div class="dash-seg-fresh"  style="width:} . $w->($d->{fresh})  . qq{"></div>}
         . qq{<div class="dash-seg-stale"  style="width:} . $w->($d->{stale})  . qq{"></div>}
@@ -4410,7 +4667,7 @@ sub show_dashboard_overview {
 
     # donut
     print qq{<div class="dash-panel">}
-        . qq{<div class="dash-panel-head"><h2>Status breakdown</h2>} . dash_status_legend() . qq{</div>}
+        . qq{<div class="dash-panel-head"><h2>Status breakdown} . dash_scope_pill($scope) . qq{</h2>} . dash_status_legend() . qq{</div>}
         . qq{<div class="dash-donut-row">}
         . dash_donut($d->{fresh}, $d->{stale}, $d->{failed}, $d->{never}, $tot)
         . qq{<div class="dash-donut-key">}
@@ -4429,7 +4686,7 @@ sub show_dashboard_overview {
              . qq{<div class="dash-age-fill dash-seg-$seg" style="width:$pw"></div></div></div>};
     };
     print qq{<div class="dash-panel">}
-        . qq{<h2 class="dash-h2">Backup age</h2>}
+        . qq{<h2 class="dash-h2">Backup age} . dash_scope_pill($scope) . qq{</h2>}
         . qq{<div class="dash-age">}
         . $bar->('< 24h',    $d->{age_lt24}, 'fresh')
         . $bar->('1-3 days', $d->{age_1_3},  'stale')
@@ -4440,7 +4697,7 @@ sub show_dashboard_overview {
 
     # trend sparkline
     print qq{<div class="dash-panel">}
-        . qq{<h2 class="dash-h2">Success rate &middot; 14 days</h2>};
+        . qq{<h2 class="dash-h2">Success rate &middot; 14 days} . dash_scope_pill($scope) . qq{</h2>};
     my @pts;
     my $tr = $d->{trend};
     if (@$tr) {
@@ -4469,7 +4726,7 @@ sub show_dashboard_overview {
     # when a fleet has many sites so it does not swamp the page.
     my $sites = $d->{by_site} || [];
     print qq{<section class="dash-panel dash-panel-last">};
-    print qq{<div class="dash-panel-head"><h2>By site</h2>} . dash_status_legend() . qq{</div>};
+    print qq{<div class="dash-panel-head"><h2>By site} . dash_scope_pill($scope) . qq{</h2>} . dash_status_legend() . qq{</div>};
     if (@$sites) {
         my $many = (@$sites > 12);
         print qq{<div class="dash-sites} . ($many ? ' dash-sites-scroll' : '') . qq{">};
@@ -4502,6 +4759,333 @@ sub show_dashboard_overview {
     $dbh->disconnect;
     print top_bottom_nav();
     print page_foot();
+}
+
+# The Changes view (config churn) is an aggregate, site-scoped view with no
+# secrets -- available to any authenticated user whenever ENABLE_DASHBOARD = 1,
+# exactly like the Overview.
+sub dashboard_changes_allowed { return $ENABLE_DASHBOARD ? 1 : 0; }
+
+# Compact "recently changed" list for the Overview card: devices with a new
+# version in the last $secs, newest first. Scoped like the rest of the dashboard.
+sub dashboard_recent_changed {
+    my ($dbh, $user, $secs, $limit) = @_;
+    $secs  ||= 86400; $limit ||= 5;
+    my $now = dash_naive_now();
+    my $acc = $user ? user_site_access($dbh, $user) : { unrestricted => 1 };
+    my $unrestricted = $acc->{unrestricted} ? 1 : 0;
+    my ($devs) = read_device_ids($user, $acc);
+    my %ok = map { $_->{id} => 1 } @$devs;
+    my ($scope, @sb) = ('');
+    if (!$unrestricted) {
+        my @ids = keys %ok;
+        return { count => 0, devs => [] } unless @ids;
+        $scope = ' AND dev_id IN (' . join(',', ('?') x @ids) . ')';
+        @sb = @ids;
+    }
+    my $rows = $dbh->selectall_arrayref(
+        qq{SELECT dev_id, max(file_timestamp) AS ts FROM backup_versions
+            WHERE file_timestamp >= ?$scope GROUP BY dev_id ORDER BY ts DESC},
+        { Slice => {} }, $now - $secs, @sb) || [];
+    my @d;
+    for my $r (@$rows) {
+        next if !$unrestricted && !$ok{ $r->{dev_id} };
+        push @d, { dev => $r->{dev_id}, age => dash_age($r->{ts}, $now) };
+    }
+    my $count = scalar @d;
+    @d = @d[0 .. $limit - 1] if @d > $limit;
+    return { count => $count, devs => \@d };
+}
+
+sub show_dashboard_changes {
+    my ($user) = @_;
+    return dashboard_deny($user, 'The Backup Dashboard is not enabled.')
+        unless dashboard_changes_allowed();
+
+    my $dbh   = db_connect();
+    my $state = dashboard_schema_state($dbh);
+
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Dashboard - Changes', $user, 'full');
+    print qq{<h1 class="dash-h1">Configuration changes</h1>\n};
+    print qq{<p class="dash-sub">How often devices actually change &mdash; from the backup history }
+        . qq{(<code>backup_versions</code>), independent of backup freshness.</p>\n};
+
+    if ($state ne 'ok') {
+        print dashboard_state_block($dbh, $state);
+        $dbh->disconnect if $dbh;
+        print page_foot();
+        return;
+    }
+
+    # Feed controls: how many devices (rows) over how many days. Validated/clamped.
+    my $feed_n    = $cgi->param('n');
+    my $feed_days = $cgi->param('days');
+    $feed_n    = (defined $feed_n    && $feed_n    =~ /^\d+\z/ && $feed_n    >= 1) ? 0 + $feed_n    : 50;
+    $feed_days = (defined $feed_days && $feed_days =~ /^\d+\z/ && $feed_days >= 1) ? 0 + $feed_days : 7;
+    $feed_n    = 500 if $feed_n    > 500;
+    $feed_days = 365 if $feed_days > 365;
+
+    my $c = dashboard_changes_data($dbh, $user, feed_n => $feed_n, feed_days => $feed_days);
+
+    # Retention caveat for the back-filled region of the churn chart.
+    my @bf = grep { $_->{bf} } @{ $c->{weeks} };
+    if (@bf) {
+        my $cut = defined $c->{cutover} ? dash_fmt_ts($c->{cutover}) : '';
+        print qq{<div class="dash-note">&#9888; Weeks }
+            . ($cut ne '' ? qq{before the <strong>} . esc($cut) . qq{</strong> live cut-over } : qq{before live recording began })
+            . qq{are reconstructed from the backups still on disk: pruned/expired versions leave no row, so those }
+            . qq{(hatched) counts are a floor and can undercount the deeper past.</div>\n};
+    }
+
+    # --- KPI tiles --- (global vs restricted-to-your-sites pill)
+    my $scope = $c->{unrestricted} ? 'global' : 'restricted';
+    my $most = $c->{most_changed};
+    print qq{<section class="dash-tiles">};
+    print dash_tile('Changes - last 7 days',  $c->{changes_7d},  'version writes', '', $scope);
+    print dash_tile('Changes - last 30 days', $c->{changes_30d}, ($scope eq 'global' ? 'fleet total' : 'your sites'), '', $scope);
+    print dash_tile('Changed in last 24 h',   $c->{changed_24h}, 'distinct devices', '', $scope);
+    print dash_tile('Most-changed - 30 d',
+                    ($most ? $most->{dev} : '--'),
+                    ($most ? "$most->{n} changes" . ($most->{site_code} ? " \x{b7} $most->{site_code}" : '') : 'no changes'),
+                    '', $scope, ($most ? 'dash-tile-value-id' : ''));
+    print dash_tile('Stable > 1 year', $c->{stable_1y} . ' / ' . $c->{total_devices}, 'no change in >=365 d', '', $scope);
+    print qq{</section>\n};
+
+    # --- Weekly churn ---
+    my $max = 1; for (@{ $c->{weeks} }) { $max = $_->{n} if $_->{n} > $max; }
+    print qq{<section class="dash-panel">};
+    print qq{<div class="dash-panel-head"><h2>Changes per week &middot; fleet} . dash_scope_pill($scope) . qq{</h2></div>};
+    print qq{<div class="chg-wk">};
+    my $prev_bf = 1;
+    for my $wk (@{ $c->{weeks} }) {
+        my $cls = $wk->{spike} ? 'chg-bar chg-bar-spike'
+                : $wk->{bf}    ? 'chg-bar chg-bar-bf' : 'chg-bar';
+        my $colcls = (!$wk->{bf} && $prev_bf) ? 'chg-col chg-cut' : 'chg-col';
+        $prev_bf = $wk->{bf};
+        my $hpct = $wk->{n} > 0 ? (100 * $wk->{n} / $max) : 0;
+        $hpct = 4 if $wk->{n} > 0 && $hpct < 4;
+        my $lbl = $wk->{rel} == 0 ? 'now' : ($wk->{rel} % 4 == 0 ? $wk->{rel} : '');
+        print qq{<div class="$colcls">}
+            . qq{<div class="chg-cnt">} . ($wk->{n} ? $wk->{n} : '') . qq{</div>}
+            . qq{<div class="$cls" style="height:} . sprintf('%.1f', $hpct) . qq{%"></div>}
+            . qq{<div class="chg-wl">} . esc($lbl) . qq{</div></div>};
+    }
+    print qq{</div>};
+    print qq{<div class="chg-legend">}
+        . qq{<span><span class="chg-sw chg-sw-m"></span>measured (post cut-over)</span>}
+        . qq{<span><span class="chg-sw chg-sw-bf"></span>reconstructed from disk</span>}
+        . qq{<span><span class="chg-sw chg-sw-spike"></span>mass-change spike</span>}
+        . qq{<span class="muted" style="margin-left:auto">weeks ago &rarr;</span></div>};
+    print qq{</section>\n};
+
+    # --- Two columns: leaderboard + age buckets ---
+    print qq{<section class="dash-charts chg-two">};
+
+    # leaderboard
+    print qq{<div class="dash-panel"><h2 class="dash-h2">Most-changed devices &middot; 30 days} . dash_scope_pill($scope) . qq{</h2>};
+    my $top = $c->{top} || [];
+    if (@$top) {
+        my $lmax = 1; for (@$top) { $lmax = $_->{n} if $_->{n} > $lmax; }
+        print qq{<table class="chg-lb">};
+        print qq{<tr><th>Device</th><th>Site</th><th>Changes</th><th>Last change</th><th></th></tr>};
+        for my $r (@$top) {
+            my $bw = int(60 * $r->{n} / $lmax); $bw = 4 if $bw < 4;
+            my $pill = $r->{site_code} ne ''
+                ? qq{<span class="chg-site" title="} . esc($r->{site_code} . ($r->{site_desc} ne '' ? " / $r->{site_desc}" : '')) . qq{">} . esc($r->{site_code}) . qq{</span>}
+                : qq{<span class="muted">&mdash;</span>};
+            my $view = esc(script_url() . '?dev=' . CGI::escape($r->{dev}) . '&from=dashboard');
+            print qq{<tr>}
+                . qq{<td class="chg-dev">} . esc($r->{dev}) . qq{</td>}
+                . qq{<td>$pill</td>}
+                . qq{<td><span class="chg-cntbar" style="width:${bw}px"></span>} . esc($r->{n}) . qq{</td>}
+                . qq{<td class="muted">} . esc($r->{age} || '--') . qq{</td>}
+                . qq{<td><a class="btn btn-small" href="$view">Diff</a></td></tr>};
+        }
+        print qq{</table>};
+    }
+    else { print qq{<p class="muted">No changes recorded in the last 30 days.</p>}; }
+    print qq{</div>};
+
+    # age buckets
+    my $b = $c->{buckets};
+    my @rows = (['Changed <= 7 days','le7','chg-b1'], ['8 - 30 days','d8_30','chg-b2'],
+                ['31 - 90 days','d31_90','chg-b3'], ['91 - 365 days','d91_365','chg-b4'],
+                ['1 - 2 years','y1_2','chg-b5'], ['> 2 years','gt2','chg-b6']);
+    my $bmax = 1; for (@rows) { $bmax = $b->{$_->[1]} if $b->{$_->[1]} > $bmax; }
+    print qq{<div class="dash-panel"><h2 class="dash-h2">Time since last config change} . dash_scope_pill($scope) . qq{</h2>};
+    print qq{<p class="dash-psub">Stable &ne; broken: a device backed up nightly but unchanged for years is stable.</p>};
+    for my $r (@rows) {
+        my ($lbl, $k, $cls) = @$r;
+        my $n  = $b->{$k} || 0;
+        my $pw = sprintf('%.1f%%', 100 * $n / $bmax); $pw = '2px' if $n == 0;
+        my $tag = $k eq 'gt2' && $n ? qq{ <span class="chg-review">&#9873; review</span>} : '';
+        print qq{<div class="chg-bk"><div class="chg-bk-row"><span>} . esc($lbl) . qq{$tag</span><span>$n</span></div>}
+            . qq{<div class="chg-bk-track"><div class="chg-bk-fill $cls" style="width:$pw"></div></div></div>};
+    }
+    my $none = $b->{none} || 0;
+    print qq{<p class="chg-hint">Left (teal) = actively maintained; right (amber) = possibly abandoned &mdash; still polled, never changed.}
+        . ($none ? qq{ <br>$none device} . ($none == 1 ? '' : 's') . qq{ have no recorded change yet.} : '')
+        . qq{</p>};
+    print qq{</div>};
+    print qq{</section>\n};
+
+    # --- Recently changed feed (DB-only; line counts written by the engine) ---
+    my $feed = $c->{feed} || [];
+    my $dlabel = $feed_days == 1 ? 'day' : 'days';
+    print qq{<section class="dash-panel dash-panel-last">};
+    print qq{<div class="dash-panel-head">}
+        . qq{<h2>Top } . esc($feed_n) . qq{ recently changed &middot; last } . esc($feed_days) . qq{ $dlabel} . dash_scope_pill($scope) . qq{</h2>}
+        . qq{<form method="get" action="} . esc(script_url()) . qq{" class="chg-feed-filter">}
+        . qq{<input type="hidden" name="action" value="dashboard_changes">}
+        . qq{<label>Show <input type="number" name="n" min="1" max="500" value="} . esc($feed_n) . qq{"> devices</label>}
+        . qq{<label>over <input type="number" name="days" min="1" max="365" value="} . esc($feed_days) . qq{"> days</label>}
+        . qq{<button type="submit" class="btn btn-small">Apply</button></form></div>};
+    if (@$feed) {
+        print qq{<ul class="chg-feed">};
+        for my $r (@$feed) {
+            # Line delta straight from the DB. Defined -> "+a / -r" (0/0 = only
+            # ignored lines changed). NULL -> "--": no stored delta (the device's
+            # oldest retained version, or a row from before fetchconfig 9.77).
+            # Never "new" -- the oldest retained version cannot be distinguished
+            # from a genuine first-ever backup once earlier versions are pruned.
+            my $delta;
+            if (defined $r->{la} && defined $r->{lr}) {
+                if ($r->{la} == 0 && $r->{lr} == 0) {
+                    $delta = qq{<span class="chg-d muted" title="only ignored/volatile lines changed">&plusmn;0</span>};
+                }
+                else {
+                    $delta = qq{<span class="chg-d"><span class="p">+} . esc($r->{la})
+                           . qq{</span> / <span class="m">&minus;} . esc($r->{lr}) . qq{</span></span>};
+                }
+            }
+            else {
+                $delta = qq{<span class="chg-d muted" title="no line delta for this version (oldest retained, or written before fetchconfig 9.77)">&mdash;</span>};
+            }
+            my $pill = $r->{site_code} ne ''
+                ? qq{<span class="chg-site" title="} . esc($r->{site_code} . ($r->{site_desc} ne '' ? " / $r->{site_desc}" : '')) . qq{">} . esc($r->{site_code}) . qq{</span>}
+                : '';
+            # Direct diff of exactly this version vs its predecessor (dev + the
+            # version's file_timestamp), so a device listed several times in the
+            # feed jumps straight to the right two configs.
+            my $view = esc(script_url() . '?action=changes_diff&dev=' . CGI::escape($r->{dev})
+                           . '&ts=' . CGI::escape($r->{ts}));
+            print qq{<li><span class="chg-dev">} . esc($r->{dev}) . qq{</span>$pill}
+                . qq{<span class="chg-when muted">} . esc($r->{age}) . qq{</span>$delta}
+                . qq{<span class="chg-grow"></span><a class="btn btn-small" href="$view">View diff</a></li>};
+        }
+        print qq{</ul>};
+    }
+    else { print qq{<p class="muted">No configuration changes in the last } . esc($feed_days) . qq{ $dlabel.</p>}; }
+    print qq{</section>\n};
+
+    $dbh->disconnect;
+    print top_bottom_nav();
+    print page_foot();
+}
+
+# Direct diff for a Changes-feed row: compare exactly the stored version the user
+# clicked against its immediately-preceding on-disk backup, so a device that
+# appears several times in the feed doesn't force hunting for the right two files.
+# The feed link carries the stable (dev, file_timestamp); this resolves that to the
+# version's path (DB), maps the path to fetchconfig's own on-disk backup index via
+# list_backups (authoritative -- the index -m/-n expects, never a DB-derived one),
+# and diffs index N (this version) against N+1 (the previous). Oldest-retained
+# version (no earlier backup on disk) -> a note + a link to the device view.
+sub show_changes_diff {
+    my ($user) = @_;
+    my $dev = $cgi->param('dev') // '';
+    my $ts  = $cgi->param('ts')  // '';
+
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    unless (dashboard_changes_allowed()) {
+        return dashboard_deny($user, 'The Backup Dashboard is not enabled.');
+    }
+    unless (valid_id($dev) && $ts =~ /^\d+\z/) {
+        print page_head('Error', $user);
+        print qq{<p class="error">Invalid parameters.</p>\n};
+        print page_foot();
+        return;
+    }
+    unless (device_accessible($user, $dev)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">Device not found or not visible.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    print page_head("Diff: $dev", $user, 'full');
+    my $base = sub { my ($p) = @_; $p =~ m{([^/]+)\z} ? $1 : $p; };
+    print qq{<p class="breadcrumb">}
+        . qq{<a class="btn btn-green" href="} . esc(script_url() . '?action=dashboard_changes') . qq{">&larr; Changes</a>}
+        . qq{<span class="sep">/</span>}
+        . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">} . esc($dev) . qq{</a></p>\n};
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Configuration diff: } . esc($dev) . qq{</h2>\n};
+
+    my $dev_link = esc(script_url() . '?dev=' . CGI::escape($dev));
+    my $finish = sub { print qq{</div>\n}; print top_bottom_nav(); print page_foot(); };
+
+    # Resolve the clicked version's file path from the DB (trusted).
+    my $vpath;
+    my $dbh = db_connect();
+    if ($dbh) {
+        my $r = $dbh->selectall_arrayref(
+            q{SELECT path FROM backup_versions WHERE dev_id = ? AND file_timestamp = ?},
+            { Slice => {} }, $dev, $ts);
+        $vpath = ($r && @$r) ? $r->[0]{path} : undef;
+        $dbh->disconnect;
+    }
+
+    # Authoritative on-disk backup list (fetchconfig's own indices, 1 = latest).
+    my ($bks, $lerr) = list_backups($dev);
+    if ($lerr) {
+        print qq{<p class="error">Could not list backups: } . esc($lerr) . qq{</p>\n};
+        return $finish->();
+    }
+    my %by_idx = map { $_->{idx} => $_ } @$bks;
+
+    # Match the version to its on-disk index by file name (robust to path form).
+    my ($n, $want);
+    $want = $base->($vpath) if defined $vpath;
+    if (defined $want && $want ne '') {
+        for my $b (@$bks) { if ($base->($b->{path}) eq $want) { $n = $b->{idx}; last; } }
+    }
+    if (!defined $n) {
+        print qq{<p class="error">This backup is no longer on disk (it may have been pruned). }
+            . qq{<a href="$dev_link">Open the device view</a>.</p>\n};
+        return $finish->();
+    }
+
+    my $m = $n + 1;
+    if (!exists $by_idx{$m}) {
+        print qq{<p>This is the oldest retained backup for <code>} . esc($dev)
+            . qq{</code> &mdash; there is no earlier version to compare against. }
+            . qq{<a href="$dev_link">Open the device view</a>.</p>\n};
+        return $finish->();
+    }
+
+    my $bn = $by_idx{$n};
+    my $bm = $by_idx{$m};
+    my $when = sub { my ($b) = @_; my $d = join(' ', grep { defined && $_ ne '' } ($b->{date}, $b->{time})); $d ne '' ? $d : ('#' . $b->{idx}); };
+    print qq{<p>Comparing <strong>} . esc($when->($bn)) . qq{</strong> (newer) against <strong>}
+        . esc($when->($bm)) . qq{</strong> (older).</p>\n};
+
+    my ($diff_text, $status, $err) = compare_backups($dev, $n, $m);
+    if ($err) {
+        print qq{<p class="error">} . esc($err) . qq{</p>\n};
+    }
+    elsif ($status == 0) {
+        print qq{<p>The two backups are identical.</p>\n};
+    }
+    elsif ($status == 1) {
+        print diff_legend_unified();
+        print render_unified_diff($diff_text);
+    }
+    else {
+        print qq{<p class="error">fetchconfig.pl -m failed (exit $status): } . esc($diff_text) . qq{</p>\n};
+    }
+    return $finish->();
 }
 
 # All devices for the All-devices table, joining the DB status (backup_current)
@@ -4653,14 +5237,24 @@ sub show_dashboard_devices {
         . qq{<option value="never">Never</option>}
         . qq{<option value="nodata">No data</option></select>\n};
     print qq{<button type="button" id="dd-clear" class="btn">Clear filter</button>\n};
-    print qq{<label class="page-size-label">Rows }
+    print qq{<label class="page-size-label">Per page }
         . qq{<select id="dd-rows" class="filter-select">}
-        . qq{<option>50</option><option selected>100</option><option>250</option>}
-        . qq{<option>500</option><option value="0">All</option></select></label>\n};
+        . qq{<option value="0">All</option><option>10</option><option selected>20</option>}
+        . qq{<option>40</option><option>80</option><option>160</option></select></label>\n};
     print qq{<a class="btn" href="$csv_url">Export CSV</a>\n};
     print qq{</div>\n};
 
     # Table (all rows rendered; the script filters and paginates them).
+    # Pager (First / Prev / page info / Next / Last), left-aligned, shown above AND
+    # below the table like the Device notes page. Class-based so both instances
+    # share the one script (ids would collide between the two copies).
+    print qq{<div class="dev-pager dd-pager" style="display:none;margin:0 0 0.8em">}
+        . qq{<button type="button" class="btn btn-small dd-first">&laquo; First</button>}
+        . qq{<button type="button" class="btn btn-small dd-prev">&larr; Prev</button>}
+        . qq{<span class="dd-pageinfo pageinfo"></span>}
+        . qq{<button type="button" class="btn btn-small dd-next">Next &rarr;</button>}
+        . qq{<button type="button" class="btn btn-small dd-last">Last &raquo;</button>}
+        . qq{</div>\n};
     print qq{<table class="list" id="dd-table">\n<thead><tr>}
         . qq{<th>Device</th><th>Site</th><th>Model</th>}
         . qq{<th class="sortable" data-sort="lastbackup">Last backup <span class="sort-ind"></span></th>}
@@ -4705,12 +5299,12 @@ sub show_dashboard_devices {
 
     # Footer: the same pager as the Devices page (First / Prev / page info / Next /
     # Last), right-aligned. Shown by the script only when there is more than one page.
-    print qq{<div class="dev-pager" id="dd-pager" style="display:none;justify-content:flex-end;margin:0.8em 0 0">}
-        . qq{<button type="button" class="btn btn-small" id="dd-first">&laquo; First</button>}
-        . qq{<button type="button" class="btn btn-small" id="dd-prev">&larr; Prev</button>}
-        . qq{<span id="dd-pageinfo" class="pageinfo"></span>}
-        . qq{<button type="button" class="btn btn-small" id="dd-next">Next &rarr;</button>}
-        . qq{<button type="button" class="btn btn-small" id="dd-last">Last &raquo;</button>}
+    print qq{<div class="dev-pager dd-pager" style="display:none;margin:0.8em 0 0">}
+        . qq{<button type="button" class="btn btn-small dd-first">&laquo; First</button>}
+        . qq{<button type="button" class="btn btn-small dd-prev">&larr; Prev</button>}
+        . qq{<span class="dd-pageinfo pageinfo"></span>}
+        . qq{<button type="button" class="btn btn-small dd-next">Next &rarr;</button>}
+        . qq{<button type="button" class="btn btn-small dd-last">Last &raquo;</button>}
         . qq{</div>\n};
 
     print qq{</div>\n};   # .tool-section (All devices)
@@ -4759,13 +5353,17 @@ sub dashboard_devices_script {
       sEl=document.getElementById('dd-site'),
       stEl=document.getElementById('dd-status'),
       rEl=document.getElementById('dd-rows'),
-      pager=document.getElementById('dd-pager'),
-      pInfo=document.getElementById('dd-pageinfo'),
-      pFirst=document.getElementById('dd-first'),
-      pPrev=document.getElementById('dd-prev'),
-      pNext=document.getElementById('dd-next'),
-      pLast=document.getElementById('dd-last'),
       nomatch=document.getElementById('dd-nomatch');
+  var pagers=[].slice.call(document.querySelectorAll('.dd-pager'));
+  // Persist the filter + per-page selection in a cookie, like the Devices page.
+  var COOKIE='fcweb_ddfilter';
+  function setCookie(v){ document.cookie=COOKIE+'='+encodeURIComponent(v)+';path=/;max-age=31536000'; }
+  function getCookie(){ var m=document.cookie.match(/(?:^|;\s*)fcweb_ddfilter=([^;]*)/); return m?decodeURIComponent(m[1]):''; }
+  function saveFilters(){ setCookie([ (fEl?fEl.value:''),(sEl?sEl.value:''),(stEl?stEl.value:''),(rEl?rEl.value:'') ].map(encodeURIComponent).join('|')); }
+  function restoreFilters(){ var raw=getCookie(); if(!raw) return; var p=raw.split('|');
+    if(fEl&&p[0]!==undefined) fEl.value=decodeURIComponent(p[0]);
+    function setSel(el,v){ if(!el||v===undefined) return; v=decodeURIComponent(v); for(var i=0;i<el.options.length;i++){ if(el.options[i].value===v){ el.value=v; break; } } }
+    setSel(sEl,p[1]); setSel(stEl,p[2]); setSel(rEl,p[3]); }
   var page=1;
   var tbody=table.tBodies[0];
   var sortKey='lastbackup', sortDir=-1;                 // initial: Last backup, newest first
@@ -4810,30 +5408,32 @@ sub dashboard_devices_script {
     rows.forEach(function(tr){ tr.style.display='none'; });
     for(var i=start;i<end;i++) m[i].style.display='';
     nomatch.style.display=m.length?'none':'';
-    // Uniform pager (First / Prev / page info / Next / Last), same as other pages.
-    if(pager){
-      pager.style.display=(pages>1)?'flex':'none';
-      if(pInfo) pInfo.textContent='Page '+page+' of '+pages+
-        ' ('+m.length+' match'+(m.length===1?'':'es')+')';
-      if(pFirst) pFirst.disabled=(page<=1);
-      if(pPrev)  pPrev.disabled =(page<=1);
-      if(pNext)  pNext.disabled =(page>=pages);
-      if(pLast)  pLast.disabled =(page>=pages);
-    }
+    // Uniform pager (First / Prev / page info / Next / Last) shown top and bottom.
+    pagers.forEach(function(p){
+      p.style.display=(pages>1)?'flex':'none';
+      var pi=p.querySelector('.dd-pageinfo');
+      if(pi) pi.textContent='Page '+page+' of '+pages+' ('+m.length+' match'+(m.length===1?'':'es')+')';
+      var b;
+      if(b=p.querySelector('.dd-first')) b.disabled=(page<=1);
+      if(b=p.querySelector('.dd-prev'))  b.disabled=(page<=1);
+      if(b=p.querySelector('.dd-next'))  b.disabled=(page>=pages);
+      if(b=p.querySelector('.dd-last'))  b.disabled=(page>=pages);
+    });
   }
-  if(pFirst) pFirst.addEventListener('click',function(){ page=1; render(); });
-  if(pPrev)  pPrev.addEventListener('click',function(){ if(page>1){ page--; render(); } });
-  if(pNext)  pNext.addEventListener('click',function(){ if(page<pagesNow()){ page++; render(); } });
-  if(pLast)  pLast.addEventListener('click',function(){ page=pagesNow(); render(); });
+  function bindAll(sel,fn){ [].forEach.call(document.querySelectorAll(sel),function(b){ b.addEventListener('click',fn); }); }
+  bindAll('.dd-first',function(){ page=1; render(); });
+  bindAll('.dd-prev', function(){ if(page>1){ page--; render(); } });
+  bindAll('.dd-next', function(){ if(page<pagesNow()){ page++; render(); } });
+  bindAll('.dd-last', function(){ page=pagesNow(); render(); });
   [fEl,sEl,stEl,rEl].forEach(function(el){
     if(!el) return;
-    el.addEventListener('input',function(){page=1;render();});
-    el.addEventListener('change',function(){page=1;render();});
+    el.addEventListener('input',function(){page=1;render();saveFilters();});
+    el.addEventListener('change',function(){page=1;render();saveFilters();});
   });
   var clrEl=document.getElementById('dd-clear');
   if(clrEl) clrEl.addEventListener('click',function(){
     if(fEl) fEl.value=''; if(sEl) sEl.value=''; if(stEl) stEl.value='';
-    page=1; render();
+    page=1; render(); saveFilters();
   });
   var thsort=table.tHead?table.tHead.querySelectorAll('th[data-sort]'):[];
   [].forEach.call(thsort,function(th){
@@ -4844,6 +5444,7 @@ sub dashboard_devices_script {
       applySort(); page=1; render();
     });
   });
+  restoreFilters();
   applySort();
   render();
 })();
@@ -5310,8 +5911,8 @@ sub show_login_form {
                 . qq{required password-hashing module Crypt::Bcrypt is not installed }
                 . qq{(REQUIRE_BCRYPT=1). Contact the administrator.</div>\n};
         } else {
-            print qq{<p class="error" style="background:#fff8e6;border:1px solid #d29922;}
-                . qq{color:#7a5b00;padding:0.5em 0.7em;border-radius:4px">Warning: }
+            print qq{<p class="error" style="background:var(--color-warn-bg);border:1px solid var(--color-warn-border);}
+                . qq{color:var(--color-warn);padding:0.5em 0.7em;border-radius:4px">Warning: }
                 . qq{Crypt::Bcrypt is not installed; passwords use the weaker Apache MD5 }
                 . qq{hash. Install Crypt::Bcrypt and set REQUIRE_BCRYPT=1.</p>\n};
         }
@@ -5699,12 +6300,12 @@ sub show_device_list {
 
         # Pager (Prev / page info / Next). Hidden by JS when everything fits
         # on one page.
-        print qq{<div id="devlist-pager" class="dev-pager" style="display:none;">}
-            . qq{<button type="button" class="btn btn-small" id="devlist-first">&laquo; First</button>}
-            . qq{<button type="button" class="btn btn-small" id="devlist-prev">&larr; Prev</button>}
-            . qq{<span id="devlist-pageinfo" class="pageinfo"></span>}
-            . qq{<button type="button" class="btn btn-small" id="devlist-next">Next &rarr;</button>}
-            . qq{<button type="button" class="btn btn-small" id="devlist-last">Last &raquo;</button>}
+        print qq{<div class="dev-pager devlist-pager" style="display:none;margin:0 0 0.8em">}
+            . qq{<button type="button" class="btn btn-small devlist-first">&laquo; First</button>}
+            . qq{<button type="button" class="btn btn-small devlist-prev">&larr; Prev</button>}
+            . qq{<span class="devlist-pageinfo pageinfo"></span>}
+            . qq{<button type="button" class="btn btn-small devlist-next">Next &rarr;</button>}
+            . qq{<button type="button" class="btn btn-small devlist-last">Last &raquo;</button>}
             . qq{</div>\n};
 
         print qq{<div id="dev-table-scroll">\n};
@@ -5744,6 +6345,13 @@ sub show_device_list {
         print qq{</div>\n};   # #dev-table-scroll
         print qq{<p class="no-match" id="dev-no-match" style="display:none;">}
             . qq{No devices match your filter.</p>\n};
+        print qq{<div class="dev-pager devlist-pager" style="display:none;margin:0.8em 0 0">}
+            . qq{<button type="button" class="btn btn-small devlist-first">&laquo; First</button>}
+            . qq{<button type="button" class="btn btn-small devlist-prev">&larr; Prev</button>}
+            . qq{<span class="devlist-pageinfo pageinfo"></span>}
+            . qq{<button type="button" class="btn btn-small devlist-next">Next &rarr;</button>}
+            . qq{<button type="button" class="btn btn-small devlist-last">Last &raquo;</button>}
+            . qq{</div>\n};
         print qq{</div>\n};   # .tool-section-blue
         print qq{</div>\n};   # .dev-main
 
@@ -5803,12 +6411,7 @@ sub device_filter_script {
     var pageSizeSel  = document.getElementById('dev-page-size');
     var table        = document.getElementById('dev-table');
     var noMatch      = document.getElementById('dev-no-match');
-    var pager        = document.getElementById('devlist-pager');
-    var pagerFirst   = document.getElementById('devlist-first');
-    var pagerPrev    = document.getElementById('devlist-prev');
-    var pagerNext    = document.getElementById('devlist-next');
-    var pagerLast    = document.getElementById('devlist-last');
-    var pagerInfo    = document.getElementById('devlist-pageinfo');
+    var pagers       = [].slice.call(document.querySelectorAll('.devlist-pager'));
     if (!table) return;
     var rows = Array.prototype.slice.call(table.querySelectorAll('tr')).slice(1); // skip header
     var container = rows.length ? rows[0].parentNode : null;
@@ -5906,19 +6509,17 @@ sub device_filter_script {
         if (noMatch) noMatch.style.display = (total === 0) ? '' : 'none';
 
         // Pager: shown only when there's more than one page.
-        if (pager) {
-            pager.style.display = (pages > 1) ? '' : 'none';
-            if (pagerInfo) {
-                pagerInfo.textContent = 'Page ' + (page + 1) + ' of ' + pages +
-                    ' (' + total + ' match' + (total === 1 ? '' : 'es') + ')';
-            }
-            if (pagerFirst) pagerFirst.disabled = (page <= 0);
-            if (pagerPrev)  pagerPrev.disabled  = (page <= 0);
-            if (pagerNext)  pagerNext.disabled  = (page >= pages - 1);
-            if (pagerLast)  pagerLast.disabled  = (page >= pages - 1);
-            // Remember the last page so the Last button can jump to it.
-            pager.setAttribute('data-pages', pages);
-        }
+        pagers.forEach(function (p) {
+            p.style.display = (pages > 1) ? '' : 'none';
+            var pi = p.querySelector('.devlist-pageinfo');
+            if (pi) pi.textContent = 'Page ' + (page + 1) + ' of ' + pages +
+                ' (' + total + ' match' + (total === 1 ? '' : 'es') + ')';
+            var b;
+            if (b = p.querySelector('.devlist-first')) b.disabled = (page <= 0);
+            if (b = p.querySelector('.devlist-prev'))  b.disabled = (page <= 0);
+            if (b = p.querySelector('.devlist-next'))  b.disabled = (page >= pages - 1);
+            if (b = p.querySelector('.devlist-last'))  b.disabled = (page >= pages - 1);
+        });
 
         // Statistics "devices filtered" line = total matched (all pages).
         var fc = document.getElementById('dev-filtered-count');
@@ -5958,11 +6559,12 @@ sub device_filter_script {
             if (devInput) devInput.focus();
         });
     }
-    if (pagerFirst) pagerFirst.addEventListener('click', function () { page = 0; render(); });
-    if (pagerPrev) pagerPrev.addEventListener('click', function () { page--; render(); });
-    if (pagerNext) pagerNext.addEventListener('click', function () { page++; render(); });
+    function bindAll(sel, fn) { [].forEach.call(document.querySelectorAll(sel), function (b) { b.addEventListener('click', fn); }); }
+    bindAll('.devlist-first', function () { page = 0; render(); });
+    bindAll('.devlist-prev',  function () { page--; render(); });
+    bindAll('.devlist-next',  function () { page++; render(); });
     // A very large page number; render() clamps it to the last valid page.
-    if (pagerLast) pagerLast.addEventListener('click', function () { page = 1e9; render(); });
+    bindAll('.devlist-last',  function () { page = 1e9; render(); });
 
     // --- Column sorting (Model / Device-ID / Hostname) -------------------
     var headers = Array.prototype.slice.call(table.querySelectorAll('th.sortable'));
@@ -6914,7 +7516,7 @@ sub show_status_page {
     my $have_untagged = grep { !defined $_->{site} || $_->{site} eq '' } @$rows;
 
     print qq{<div class="dev-filter-row">\n};
-    print qq{<label class="filter-label">State }
+    print qq{<label class="filter-label"><span class="filter-caption">State</span> }
         . qq{<select id="status-state-filter" class="filter-select">}
         . qq{<option value="">All states</option>}
         . qq{<option value="success">success</option>}
@@ -6922,7 +7524,7 @@ sub show_status_page {
         . qq{<option value="skipped">skipped</option>}
         . qq{<option value="n/a">N/A</option>}
         . qq{</select></label>\n};
-    print qq{<label class="filter-label">Changed }
+    print qq{<label class="filter-label"><span class="filter-caption">Changed</span> }
         . qq{<select id="status-changed-filter" class="filter-select">}
         . qq{<option value="">All changed</option>}
         . qq{<option value="unchanged">unchanged</option>}
@@ -6931,7 +7533,7 @@ sub show_status_page {
         . qq{<option value="unknown">unknown</option>}
         . qq{<option value="n/a">N/A</option>}
         . qq{</select></label>\n};
-    print qq{<label class="filter-label">Site }
+    print qq{<label class="filter-label"><span class="filter-caption">Site</span> }
         . qq{<select id="status-site-filter" class="filter-select">}
         . qq{<option value="">All sites</option>};
     for my $sc (sort keys %by_site) {
@@ -6941,7 +7543,7 @@ sub show_status_page {
     # convention as the device list), so plain equality covers this option.
     print qq{<option value="\0none">(no site)</option>} if $have_untagged;
     print qq{</select></label>\n};
-    print qq{<label class="filter-label">Device-ID }
+    print qq{<label class="filter-label"><span class="filter-caption">Device-ID</span> }
         . qq{<input type="text" id="status-dev-filter" class="filter-box" }
         . qq{placeholder="Filter device&hellip;" autocomplete="off"></label>\n};
     # Plain .btn, not .btn-small: this row's controls are sized to match the
@@ -6963,12 +7565,12 @@ sub show_status_page {
     print qq{</div>\n};
 
     # Pager
-    print qq{<div id="status-pager" class="dev-pager" style="display:none;">}
-        . qq{<button type="button" class="btn btn-small" id="status-first">&laquo; First</button>}
-        . qq{<button type="button" class="btn btn-small" id="status-prev">&larr; Prev</button>}
-        . qq{<span id="status-pageinfo" class="pageinfo"></span>}
-        . qq{<button type="button" class="btn btn-small" id="status-next">Next &rarr;</button>}
-        . qq{<button type="button" class="btn btn-small" id="status-last">Last &raquo;</button>}
+    print qq{<div class="dev-pager status-pager" style="display:none;margin:0 0 0.8em">}
+        . qq{<button type="button" class="btn btn-small status-first">&laquo; First</button>}
+        . qq{<button type="button" class="btn btn-small status-prev">&larr; Prev</button>}
+        . qq{<span class="status-pageinfo pageinfo"></span>}
+        . qq{<button type="button" class="btn btn-small status-next">Next &rarr;</button>}
+        . qq{<button type="button" class="btn btn-small status-last">Last &raquo;</button>}
         . qq{</div>\n};
 
     print qq{<table class="list" id="status-table">\n}
@@ -7046,6 +7648,13 @@ sub show_status_page {
     }
     print qq{</table>\n};
     print qq{<p id="status-no-match" class="muted" style="display:none;">No devices match the current filter.</p>\n};
+    print qq{<div class="dev-pager status-pager" style="display:none;margin:0.8em 0 0">}
+        . qq{<button type="button" class="btn btn-small status-first">&laquo; First</button>}
+        . qq{<button type="button" class="btn btn-small status-prev">&larr; Prev</button>}
+        . qq{<span class="status-pageinfo pageinfo"></span>}
+        . qq{<button type="button" class="btn btn-small status-next">Next &rarr;</button>}
+        . qq{<button type="button" class="btn btn-small status-last">Last &raquo;</button>}
+        . qq{</div>\n};
 
     my $load_str = $load_secs < 1
         ? sprintf('%dms', int($load_secs * 1000 + 0.5))
@@ -7115,12 +7724,7 @@ sub status_page_script {
   var clearBtn = document.getElementById('status-clear');
   var sizeSel  = document.getElementById('status-page-size');
   var noMatch  = document.getElementById('status-no-match');
-  var pager    = document.getElementById('status-pager');
-  var pFirst   = document.getElementById('status-first');
-  var pPrev    = document.getElementById('status-prev');
-  var pNext    = document.getElementById('status-next');
-  var pLast    = document.getElementById('status-last');
-  var pInfo    = document.getElementById('status-pageinfo');
+  var pagers   = [].slice.call(document.querySelectorAll('.status-pager'));
 
   var rows = Array.prototype.slice.call(table.querySelectorAll('tr')).filter(function (r) {
     return !r.querySelector('th');
@@ -7180,14 +7784,16 @@ sub status_page_script {
     rows.forEach(function(r){ r.style.display='none'; });
     for (var i=start;i<end && i<total;i++) matched[i].style.display='';
     if (noMatch) noMatch.style.display = total===0 ? '' : 'none';
-    if (pager) {
-      pager.style.display = pages>1 ? '' : 'none';
-      if (pInfo) pInfo.textContent = 'Page '+(page+1)+' of '+pages+' ('+total+' device'+(total===1?'':'s')+')';
-      if (pFirst) pFirst.disabled = page<=0;
-      if (pPrev)  pPrev.disabled  = page<=0;
-      if (pNext)  pNext.disabled  = page>=pages-1;
-      if (pLast)  pLast.disabled  = page>=pages-1;
-    }
+    pagers.forEach(function(p){
+      p.style.display = pages>1 ? '' : 'none';
+      var pi=p.querySelector('.status-pageinfo');
+      if (pi) pi.textContent = 'Page '+(page+1)+' of '+pages+' ('+total+' device'+(total===1?'':'s')+')';
+      var b;
+      if (b=p.querySelector('.status-first')) b.disabled = page<=0;
+      if (b=p.querySelector('.status-prev'))  b.disabled = page<=0;
+      if (b=p.querySelector('.status-next'))  b.disabled = page>=pages-1;
+      if (b=p.querySelector('.status-last'))  b.disabled = page>=pages-1;
+    });
   }
 
   function onFilter(){ page=0; render(); save(); }
@@ -7203,10 +7809,11 @@ sub status_page_script {
     if (devBox)   devBox.value='';
     page=0; render(); save();
   });
-  if (pFirst) pFirst.addEventListener('click', function(){ page=0; render(); });
-  if (pPrev)  pPrev.addEventListener('click', function(){ page--; render(); });
-  if (pNext)  pNext.addEventListener('click', function(){ page++; render(); });
-  if (pLast)  pLast.addEventListener('click', function(){ page=1e9; render(); });
+  function bindAll(sel,fn){ [].forEach.call(document.querySelectorAll(sel),function(b){ b.addEventListener('click',fn); }); }
+  bindAll('.status-first', function(){ page=0; render(); });
+  bindAll('.status-prev',  function(){ page--; render(); });
+  bindAll('.status-next',  function(){ page++; render(); });
+  bindAll('.status-last',  function(){ page=1e9; render(); });
 
   // Column sorting
   var headers = Array.prototype.slice.call(table.querySelectorAll('th.sortable'));
@@ -10740,7 +11347,7 @@ sub show_tool_logo {
         print page_foot();
         return;
     }
-    print page_head('Upload report logo', $user);
+    print page_head('Upload report logo', $user, 'full');
     print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">Upload report logo</h2>\n};
     if ($msg) { print qq{<p class="msg">} . esc($msg) . qq{</p>\n}; }
@@ -10750,7 +11357,7 @@ sub show_tool_logo {
     if (!defined $dir) {
         print qq{<p>No usable <code>report_dir</code> is configured. Set and save a }
             . qq{valid <code>report_dir</code> on the <code>email:</code> line }
-            . qq{(Setup devices &rarr; Edit device table &rarr; Email notification) first; }
+            . qq{(Setup devices &rarr; Edit device table &rarr; General parameters) first; }
             . qq{logos are stored in that directory.</p>\n};
         print qq{</div>\n};
         print page_foot();
@@ -11342,7 +11949,7 @@ sub show_tool_diskspace {
         print page_foot();
         return;
     }
-    print page_head('Disk space', $user);
+    print page_head('Disk space', $user, 'full');
     print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">Disk space</h2>\n};
 
@@ -11895,9 +12502,9 @@ sub show_notes {
   </label>
   <label>From <input type="date" id="nt-from"></label>
   <label>To <input type="date" id="nt-to"></label>
-  <button type="button" class="btn btn-small" id="nt-apply">Filter</button>
-  <button type="button" class="btn btn-small" id="nt-clear">Clear</button>
-  <button type="button" class="btn btn-small" id="nt-reload">Reload</button>
+  <button type="button" class="btn" id="nt-apply">Filter</button>
+  <button type="button" class="btn" id="nt-clear">Clear</button>
+  <button type="button" class="btn" id="nt-reload">Reload</button>
 </div>
 <div class="audit-pager">
   <button type="button" class="btn btn-small ap-first">&laquo; First</button>
@@ -12115,7 +12722,7 @@ sub show_login_failures {
         . qq{data-confirm-danger="y">\n};
     print qq{<input type="hidden" name="action" value="clear_login_failures">\n};
     print csrf_field();
-    print qq{<button type="submit" class="btn btn-small btn-danger">Clear all</button>\n};
+    print qq{<button type="submit" class="btn btn-danger">Clear all</button>\n};
     print qq{</form>\n};
 
     my $su = script_url();
@@ -12130,9 +12737,9 @@ sub show_login_failures {
   </label>
   <label>From <input type="date" id="lf-from"></label>
   <label>To <input type="date" id="lf-to"></label>
-  <button type="button" class="btn btn-small" id="lf-apply">Filter</button>
-  <button type="button" class="btn btn-small" id="lf-clear">Clear</button>
-  <button type="button" class="btn btn-small" id="lf-reload">Reload</button>
+  <button type="button" class="btn" id="lf-apply">Filter</button>
+  <button type="button" class="btn" id="lf-clear">Clear</button>
+  <button type="button" class="btn" id="lf-reload">Reload</button>
 </div>
 <div class="audit-pager">
   <button type="button" class="btn btn-small ap-first">&laquo; First</button>
@@ -12289,19 +12896,35 @@ sub show_tool_audit {
     print qq{<h2 class="tool-section-title">Audit log</h2>\n};
     print qq{<p class="muted">Immutable record of changes. Newest first, }
         . AUDIT_PAGE_SIZE . qq{ per page.</p>\n};
+    # Distinct action values for the Action filter drop-down. Server-side the
+    # action filter is an exact match (action = ?), so the options are the exact
+    # values present in the log.
+    my $action_opts = '';
+    {
+        my $adbh = db_connect();
+        if ($adbh) {
+            my $acts = $adbh->selectcol_arrayref(
+                'SELECT DISTINCT action FROM audit_log WHERE action IS NOT NULL ORDER BY action');
+            $adbh->disconnect;
+            for my $a (@{ $acts || [] }) {
+                next unless defined $a && $a ne '';
+                $action_opts .= '<option value="' . esc($a) . '">' . esc($a) . '</option>';
+            }
+        }
+    }
     my $su = script_url();
     print <<"HTML";
 <div class="audit-filters">
   <label>User <input type="text" id="af-user" size="10"></label>
-  <label>Action <input type="text" id="af-action" size="12"></label>
+  <label>Action <select id="af-action"><option value="">(any)</option>$action_opts</select></label>
   <label>Object <input type="text" id="af-object" size="12"></label>
-  <label>Text <input type="text" id="af-text" size="14"></label>
+  <label>Search <input type="text" id="af-text" size="14"></label>
   <label>From <input type="date" id="af-from"></label>
   <label>To <input type="date" id="af-to"></label>
-  <button type="button" class="btn btn-small" id="af-apply">Filter</button>
-  <button type="button" class="btn btn-small" id="af-clear">Clear</button>
-  <button type="button" class="btn btn-small" id="af-reload">Reload</button>
-  <a class="btn btn-small" id="af-csv" href="#">Export CSV</a>
+  <button type="button" class="btn" id="af-apply">Filter</button>
+  <button type="button" class="btn" id="af-clear">Clear</button>
+  <button type="button" class="btn" id="af-reload">Reload</button>
+  <a class="btn" id="af-csv" href="#">Export CSV</a>
 </div>
 <div class="audit-pager">
   <button type="button" class="btn btn-small ap-first">&laquo; First</button>
@@ -13566,7 +14189,7 @@ sub show_view_templates {
             . qq{directories.</p>\n};
         print template_t_raw_html($t);
     } else {
-        print qq{<table class="list">\n<tr><th>Template</th><th>Full Template Name</th>}
+        print qq{<table class="list tpl-table">\n<tr><th>Template</th><th>Full Template Name</th>}
             . qq{<th>Size</th><th>Modified</th><th>Used</th><th>Orig</th><th></th></tr>\n};
         for my $f (@$files) {
             my $view = esc(script_url() . '?action=view_template&path='
@@ -13610,7 +14233,7 @@ sub show_view_templates {
                 $actions = qq{<div class="row-actions">}
                          . qq{<a class="btn" href="$view">View</a>\n}
                          . qq{<span class="btn" disabled title="Shipped template &mdash; use Copy to edit a custom version">Edit</span>\n}
-                         . qq{<a class="btn btn-green" href="$copy" style="min-width:5.5em">Copy</a>\n}
+                         . qq{<a class="btn btn-green" href="$copy">Copy</a>\n}
                          . qq{<a class="btn" href="$dl">Download</a>\n}
                          . qq{<span class="btn btn-danger" disabled title="Shipped template &mdash; replaced on update, cannot delete">Delete</span>}
                          . qq{</div>};
@@ -13620,7 +14243,6 @@ sub show_view_templates {
                 my $rename;
                 if ($used) {
                     $rename = qq{<button type="button" class="btn" disabled }
-                            . qq{style="min-width:5.5em" }
                             . qq{title="In use by a device &mdash; cannot rename">Rename</button>};
                 } else {
                     my $path_h = esc($f->{path});
@@ -13634,7 +14256,7 @@ sub show_view_templates {
                             . qq{<input type="hidden" name="path" value="$path_h">}
                             . qq{<input type="hidden" name="newname" value="">}
                             . csrf_field()
-                            . qq{<button type="submit" class="btn" style="min-width:5.5em">Rename</button></form>};
+                            . qq{<button type="submit" class="btn">Rename</button></form>};
                 }
                 my $del;
                 if ($used) {
@@ -13932,8 +14554,8 @@ sub show_view_template {
 #template-diagram-section .mermaid .edgeLabel p { background-color: #e8faf1; }
 #template-diagram-section .mermaid .edgeLabel rect { fill: #e8faf1; }
 #template-diagram-section .diagram-note { margin: 0.5em 0; padding: 0.6em 0.8em;
-  border: 1px solid #d0d7de; border-left: 4px solid #d29922; background: #fff8e6;
-  border-radius: 4px; color: #4a4a4a; font-size: 0.92em; }
+  border: 1px solid var(--color-border); border-left: 4px solid var(--color-warn-border); background: var(--color-warn-bg);
+  border-radius: 4px; color: var(--color-label); font-size: 0.92em; }
 </style>
 CSS
 
@@ -14031,8 +14653,8 @@ sub show_edit_template {
     unless (template_path_ok($path)) {
         print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
             . esc(script_url() . '?action=view_templates') . qq{">&larr; Templates</a></p>\n};
-        print qq{<h1>Edit template</h1>\n};
-        print qq{<p class="error">} . esc(template_refusal_message($path)) . qq{</p>\n};
+        print qq{<div class="tool-section"><h2 class="tool-section-title">Edit template</h2>\n};
+        print qq{<p class="error">} . esc(template_refusal_message($path)) . qq{</p></div>\n};
         print page_foot();
         return;
     }
@@ -15460,9 +16082,11 @@ sub show_view_backup {
     print page_head('View backup', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=tool_restore') . qq{">&larr; Restore device table</a></p>\n};
-    print qq{<h1>Backup: } . esc($name) . qq{</h1>\n};
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Backup: } . esc($name) . qq{</h2>\n};
     unless ($path) {
         print qq{<p class="error">No such backup.</p>\n};
+        print qq{</div>\n};   # .tool-section
         print page_foot();
         return;
     }
@@ -15479,6 +16103,7 @@ sub show_view_backup {
     print qq{<pre class="config" id="config-content">} . $body . qq{</pre>\n};
     print qq{</div>\n};
     print copy_button_script();
+    print qq{</div>\n};   # .tool-section
     print top_bottom_nav();
     print page_foot();
 }
@@ -16216,7 +16841,7 @@ sub show_sites_page {
     print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
     print qq{<p class="error">}   . esc($err) . qq{</p>\n} if defined $err && $err ne '';
 
-    print qq{<div class="user-section">\n};
+    print qq{<div class="tool-section sites-page">\n};
     print qq{<h2 class="tool-section-title">Sites</h2>\n};
     print qq{<h3>Add a site</h3>\n};
     print $cgi->start_form(-method=>'POST', -action=>script_url(), -class=>'inline-form');
@@ -16283,14 +16908,19 @@ sub show_sites_page {
         print qq{</div></td></tr>\n};
     }
     print qq{</table>\n};
-    print qq{</div>\n};   # .user-section
+    print qq{</div>\n};   # .tool-section
     # Filter: hide rows that don't match (reserved row always visible).
     print qq{<script>
 (function(){var f=document.getElementById('site-mgmt-filter');if(!f)return;
  f.addEventListener('input',function(){var q=f.value.toLowerCase();
   var rows=document.querySelectorAll('#site-mgmt-table .site-row');
-  for(var i=0;i<rows.length;i++){var t=rows[i].textContent.toLowerCase();
-   rows[i].style.display=(t.indexOf(q)>=0)?'':'none';}});})();
+  for(var i=0;i<rows.length;i++){
+    var inps=rows[i].querySelectorAll('input[type="text"]');
+    if(!inps.length){ rows[i].style.display=''; continue; }   // reserved "any site" row: always shown
+    var t='';
+    for(var j=0;j<inps.length;j++){ t+=' '+inps[j].value.toLowerCase(); }
+    rows[i].style.display=(t.indexOf(q)>=0)?'':'none';
+  }});})();
 </script>\n};
     $dbh->disconnect if $dbh;
     print page_foot();
@@ -16446,7 +17076,7 @@ sub show_user_sites_form {
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=user_edit&username=' . CGI::escape($target)) . qq{">&larr; Edit user</a></p>\n};
 
-    print qq{<div class="user-section"><h2 class="tool-section-title">Sites for } . esc($target) . qq{</h2>\n};
+    print qq{<div class="tool-section"><h2 class="tool-section-title">Sites for } . esc($target) . qq{</h2>\n};
 
     if ($target eq $PROTECTED_USER) {
         print qq{<p class="muted">The built-in <strong>admin</strong> account always has }
@@ -16653,7 +17283,7 @@ sub show_user_page {
     }
 
     if ($only eq 'password') {
-    print qq{<div class="user-section">\n};
+    print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">Change your password</h2>\n};
     print qq{<div class="form-narrow">\n};
     print $cgi->start_form(-method => 'POST', -action => script_url());
@@ -16672,7 +17302,7 @@ sub show_user_page {
     print qq{<p><button type="submit" class="btn">Change password</button></p>\n};
     print $cgi->end_form;
     print qq{</div>\n};
-    print qq{</div>\n};   # .user-section (Change your password)
+    print qq{</div>\n};   # .tool-section (Change your password)
     $admin_dbh->disconnect if $admin_dbh;
     print page_foot();
     return;
@@ -16685,15 +17315,15 @@ sub show_user_page {
             my $me = db_get_user($admin_dbh, $user);
             $cur = $me->{email} if $me && defined $me->{email};
         }
-        print qq{<div class="user-section">\n};
+        print qq{<div class="tool-section">\n};
         print qq{<h2 class="tool-section-title">Change your email</h2>\n};
-        print qq{<p class="muted">Email address, used for password reset; }
-            . qq{leave blank to remove.</p>\n};
         print qq{<div class="form-narrow">\n};
         print $cgi->start_form(-method => 'POST', -action => script_url());
         print qq{<input type="hidden" name="action" value="change_email">\n};
         print csrf_field();
+        print qq{<label>Email <span class="muted">(used for password reset; leave blank to remove)</span><br>};
         print $cgi->textfield(-name => 'email', -value => $cur, -autocomplete => 'off', -size => 32);
+        print qq{</label>\n};
         print qq{<p><button type="submit" class="btn">Save email</button></p>\n};
         print $cgi->end_form;
         print qq{</div>\n};   # .form-narrow
@@ -16709,14 +17339,14 @@ sub show_user_page {
         } elsif ($EMAIL) {
             print qq{<p class="muted">Save an email address above, then you can send yourself a test message.</p>\n};
         }
-        print qq{</div>\n};   # .user-section (Change your email)
+        print qq{</div>\n};   # .tool-section (Change your email)
         $admin_dbh->disconnect if $admin_dbh;
         print page_foot();
         return;
     }
 
     if ($only eq 'users' && $is_admin) {
-        print qq{<div class="user-section">\n};
+        print qq{<div class="tool-section">\n};
         print qq{<h2 class="tool-section-title">Users</h2>\n};
         if (!$admin_dbh) {
             print qq{<p class="error">Cannot reach the user database.</p>\n};
@@ -16772,11 +17402,11 @@ sub show_user_page {
                 print qq{</table>\n};
             }
         }
-        print qq{</div>\n};   # .user-section (Users)
+        print qq{</div>\n};   # .tool-section (Users)
     }
 
     if ($only eq 'add' && $is_admin) {
-        print qq{<div class="user-section">\n};
+        print qq{<div class="tool-section">\n};
         print qq{<h2 class="tool-section-title">Add user</h2>\n};
         print qq{<div class="form-narrow">\n};
         print $cgi->start_form(-method => 'POST', -action => script_url());
@@ -16799,7 +17429,7 @@ sub show_user_page {
         print qq{<p><button type="submit" class="btn">Add user</button></p>\n};
         print $cgi->end_form;
         print qq{</div>\n};
-        print qq{</div>\n};   # .user-section (Add user)
+        print qq{</div>\n};   # .tool-section (Add user)
     }
     $admin_dbh->disconnect if $admin_dbh;
 
@@ -17566,9 +18196,10 @@ sub show_reset_password_form {
     }
 
     print std_header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head("Change password: $target", $user);
+    print page_head("Change password: $target", $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url() . '?action=user_edit&username=' . CGI::escape($target)) . qq{">&larr; Edit user</a></p>\n};
-    print qq{<h1>Set a new password for } . esc($target) . qq{</h1>\n};
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">Set a new password for } . esc($target) . qq{</h2>\n};
     print qq{<p class="muted">As an admin you can set a new password for another }
         . qq{user without knowing their current one.</p>\n};
     print qq{<div class="form-narrow">\n};
@@ -17584,7 +18215,8 @@ sub show_reset_password_form {
     print qq{</label>\n};
     print qq{<p><button type="submit" class="btn">Set password</button></p>\n};
     print $cgi->end_form;
-    print qq{</div>\n};
+    print qq{</div>\n};   # .form-narrow
+    print qq{</div>\n};   # .tool-section
     print page_foot();
 }
 
@@ -19322,7 +19954,10 @@ sub show_edit_table {
     my $msg = $cgi->param('msg');
     my $eerr = $cgi->param('err');
 
-    print page_head('Edit device table', $user, 'wide');
+    # Full-width green box (page_head 'full', 5% side gutters) -- the same layout
+    # Login failures, Audit log and the other tool pages use, so the editor matches
+    # them and all three tabs (Devices / Defaults / General parameters) share it.
+    print page_head('Edit device table', $user, 'full');
     print qq{<div class="tool-section" id="edit-table-section">\n};
     print qq{<h2 class="tool-section-title">Edit device table</h2>\n};
 
@@ -19531,7 +20166,7 @@ sub show_edit_table {
         . qq{<input type="text" id="edit-dev-filter" class="filter-box" placeholder="Filter Device-ID&hellip;" autocomplete="off">}
         . qq{<select id="edit-site-filter" class="filter-box">$site_filter_opts</select>}
         . qq{<input type="text" id="edit-comment-filter" class="filter-box" placeholder="Filter comment&hellip;" autocomplete="off">}
-        . qq{<button type="button" class="btn btn-small" id="edit-clear-filter">Clear</button>}
+        . qq{<button type="button" class="btn" id="edit-clear-filter">Clear</button>}
         . qq{</span>}
         . qq{</div>\n};
     # Pager shown both above and below the list; the JS updates every .dev-pager
@@ -19621,14 +20256,27 @@ sub show_edit_table {
 ################################################################################
 sub model_opts_script {
     my @parts;
+    my %types;   # option name -> catalog type, for the client "+ add option" menu
+    my $note = sub {
+        my ($k, $sp) = @_;
+        my $t = ($sp && $sp->{type}) ? $sp->{type} : 'text';
+        # A real type wins over a prior 'text' (e.g. generic's model=enum_template
+        # must not be shadowed by another model that lists 'model' as plain text).
+        $types{$k} = $t if !exists $types{$k} || $types{$k} eq 'text';
+    };
     for my $m (known_models()) {
         my @keys = model_option_keys($m);
         push @parts, qq{"$m":[} . join(',', map { qq{"$_"} } @keys) . qq{]};
+        $note->($_, option_spec($m, $_)) for @keys;
     }
     my @common = sort keys %COMMON_OPTS;
     push @parts, qq{"__common__":[} . join(',', map { qq{"$_"} } @common) . qq{]};
-    my $obj = '{' . join(',', @parts) . '}';
-    return qq{<script>window.__FCWEB_MODEL_OPTS = $obj;</script>\n};
+    $note->($_, $COMMON_OPTS{$_}) for @common;
+    $note->($_, $EMAIL_OPTS{$_}) for sort keys %EMAIL_OPTS;
+    my $obj  = '{' . join(',', @parts) . '}';
+    my $tobj = '{' . join(',', map { qq{"$_":"$types{$_}"} } sort keys %types) . '}';
+    return qq{<script>window.__FCWEB_MODEL_OPTS = $obj;\n}
+         . qq{window.__FCWEB_OPT_TYPES = $tobj;</script>\n};
 }
 
 ################################################################################
@@ -20910,7 +21558,9 @@ sub show_bulk_edit {
         $text = devices_to_text(parse_device_table($content));
     }
 
-    print page_head('Bulk edit devices', $user, 'wide');
+    # Full-width tool-page green box, same as the device-table editor and the
+    # other tool pages (Login failures, Audit log, ...).
+    print page_head('Bulk edit devices', $user, 'full');
     print qq{<div class="tool-section" id="bulk-edit-section">\n};
     print qq{<h2 class="tool-section-title">Bulk edit devices</h2>\n};
 
@@ -21637,6 +22287,27 @@ sub edit_table_script {
   }
   var form = document.getElementById('edit-form');
   if (!form) return;
+
+  // --- warn before leaving the editor with unsaved changes -----------------
+  // editorDirty flips true on any mutation (field edit, add or delete record).
+  // A form submit (Preview raw table / Save changes) or the "Reject all changes"
+  // link is a deliberate navigation and suppresses the prompt. Edits carried
+  // back from a Preview round-trip (the server re-emits r{n}_edited / r{n}_deleted
+  // hidden inputs) count as unsaved too, so the warning survives that round-trip.
+  var editorDirty = !!form.querySelector('input[name$="_edited"], input[name$="_deleted"]');
+  var formLeaving = false;
+  form.addEventListener('submit', function () { formLeaving = true; });
+  form.addEventListener('click', function (e) {
+    // "Reject all changes" is an <a class="btn"> with its own confirm dialog.
+    if (e.target.closest && e.target.closest('a.btn[href]')) formLeaving = true;
+  });
+  window.addEventListener('beforeunload', function (e) {
+    if (!editorDirty || formLeaving) return;
+    e.preventDefault();
+    e.returnValue = '';   // modern browsers show their own generic message
+    return '';
+  });
+
   // Resolve a template_dir field value to a path: a $alias via the allow-list
   // map, else the value as-is (a literal path when there is no allow-list).
   function dirToPath(v) {
@@ -21825,6 +22496,7 @@ sub edit_table_script {
       if (card) {
         var sels = card.querySelectorAll('.dir-alias-select');
         for (var i = 0; i < sels.length; i++) updateDefaultAlias(sels[i]);
+        ensureGenericModelOption(card);   // generic -> add the "model template" dropdown
       }
     }
   });
@@ -21890,15 +22562,23 @@ sub edit_table_script {
     if (e.target.classList.contains('rec-del')) {
       var card = e.target.closest('.rec-card');
       if (!card) return;
-      var removeCard = function () {
+      var devRow = card.closest ? card.closest('.dev-row') : null;
+      var applyDelete = function () {
         var rk = card.getAttribute('data-rk');
-        var mark = document.createElement('input');
-        mark.type = 'hidden'; mark.name = rk + '_deleted'; mark.value = '1';
-        card.parentNode.insertBefore(mark, card);
-        card.parentNode.removeChild(card);
+        if (devRow) {
+          // An existing device: keep its row but mark it deleted (reversible
+          // until save). deleteRow() sets the _deleted marker + red "Undelete".
+          deleteRow(devRow);
+        } else {
+          // A new (unsaved) device or a defaults/email card: just remove it.
+          var mark = document.createElement('input');
+          mark.type = 'hidden'; mark.name = rk + '_deleted'; mark.value = '1';
+          card.parentNode.insertBefore(mark, card);
+          card.parentNode.removeChild(card);
+        }
       };
-      if (window.fcConfirm) window.fcConfirm('Delete this entry?', removeCard, { danger: true });
-      else if (window.confirm('Delete this entry?')) removeCard();
+      if (window.fcConfirm) window.fcConfirm('Delete this entry?', applyDelete, { danger: true });
+      else if (window.confirm('Delete this entry?')) applyDelete();
     }
   });
 
@@ -22040,6 +22720,27 @@ sub edit_table_script {
     return '<select name="' + rk + '_model" class="rec-model">' +
            modelTemplate.innerHTML + '</select>';
   }
+  // A generic device's template is chosen via the mandatory model= option. Add
+  // it automatically (as the populated "model template" dropdown) as soon as a
+  // row's model is generic -- mirroring the auto-added site= field -- so it is
+  // there without hunting in "+ add option". Reuses the normal add-option code
+  // path (a synthetic change on the row's "+ add option" select) so the field,
+  // its "model template" label and its populated template list are identical to
+  // a manually added one. No-op if the row is not generic or already has it.
+  function ensureGenericModelOption(card) {
+    if (!card) return;
+    var mSel = card.querySelector('.rec-model');
+    if (!mSel || mSel.value !== 'generic') return;
+    if (card.querySelector('.tpl-model-select')) return;          // already present
+    var addSel = card.querySelector('.add-opt-select');
+    if (!addSel || !addSel.querySelector('option[value="model"]')) return;
+    addSel.value = 'model';
+    var ev;
+    try { ev = new Event('change', { bubbles: true }); }
+    catch (e) { ev = document.createEvent('HTMLEvents'); ev.initEvent('change', true, false); }
+    addSel.dispatchEvent(ev);
+  }
+
   function addRecord(kind, panelName) {
     var rk = nextRk();
     var card = document.createElement('div');
@@ -22102,9 +22803,11 @@ sub edit_table_script {
     // A newly added record is, by definition, a change.
     card.setAttribute('data-edited', '1');
     card.classList.add('dev-edited');
+    editorDirty = true; formLeaving = false;   // re-arm the leave-editor warning
     // populate the add-option select for the initially-selected model
     refreshAddOptions(card);
     card.querySelector('.rec-model').addEventListener('change', function(){ refreshAddOptions(card); });
+    ensureGenericModelOption(card);   // a new generic device gets its model-template dropdown
   }
   var addDev = document.getElementById('add-device');
   if (addDev) addDev.addEventListener('click', function(){ addRecord('device','devices'); });
@@ -22279,6 +22982,7 @@ sub edit_table_script {
       inp.type = 'hidden'; inp.name = rk + '_edited'; inp.value = '1';
       row.appendChild(inp);
     }
+    editorDirty = true; formLeaving = false;   // re-arm the leave-editor warning
   }
   // Re-filter live as the user edits a Device-ID or comment field, and flag the
   // row as edited on any field change within a device card.
@@ -22402,12 +23106,51 @@ sub edit_table_script {
       el.parentNode.removeChild(el);
     }
   }
+  // Mark an existing device row for deletion. The row stays visible but struck
+  // through and collapsed; the actual removal happens when the table is saved
+  // (the server skips any record carrying an r{n}_deleted marker). The toggle
+  // becomes a red "Undelete" that reverses this until save.
+  function deleteRow(row) {
+    if (!row) return;
+    var rk = row.getAttribute('data-rk');
+    if (rk && !row.querySelector('input[name="' + rk + '_deleted"]')) {
+      var m = document.createElement('input');
+      m.type = 'hidden'; m.name = rk + '_deleted'; m.value = '1';
+      row.appendChild(m);
+    }
+    row.classList.remove('dev-row-open');
+    row.classList.add('dev-row-collapsed', 'dev-row-deleted');
+    setRowOpenFlag(row, false);
+    var btn = row.querySelector('.dev-row-edit');
+    // Red, not disabled: a disabled .btn is forced grey by the stylesheet, so
+    // the toggle keeps its click handler and reads "Undelete".
+    if (btn) { btn.textContent = 'Undelete'; btn.classList.add('btn-danger'); }
+    markRowEdited(row);
+  }
+  // Reverse a pending deletion: drop the _deleted marker and restore the normal
+  // collapsed Edit toggle. Available until the table is saved.
+  function undeleteRow(row) {
+    if (!row) return;
+    var rk = row.getAttribute('data-rk');
+    if (rk) {
+      var m = row.querySelector('input[name="' + rk + '_deleted"]');
+      if (m) m.parentNode.removeChild(m);
+    }
+    row.classList.remove('dev-row-deleted');
+    var btn = row.querySelector('.dev-row-edit');
+    if (btn) {
+      btn.classList.remove('btn-danger');
+      btn.textContent = row.classList.contains('dev-row-open') ? 'Collapse' : 'Edit';
+    }
+  }
   if (devCards) {
     devCards.addEventListener('click', function (e) {
       // The summary Edit button toggles: expand if collapsed, collapse if open.
       var editBtn = e.target.closest && e.target.closest('.dev-row-edit');
       if (editBtn) {
         var row = editBtn.closest('.dev-row');
+        // A deleted row's toggle is the red "Undelete" control.
+        if (row.classList.contains('dev-row-deleted')) { undeleteRow(row); return; }
         if (row.classList.contains('dev-row-open')) collapseRow(row);
         else expandRow(row);
         return;
@@ -22448,6 +23191,7 @@ sub edit_table_script {
   // Per-model option lists, provided by the server for the add-option menu
   // on newly-added rows and when a row's model changes.
   var MODEL_OPTS = window.__FCWEB_MODEL_OPTS || {};
+  var OPT_TYPES  = window.__FCWEB_OPT_TYPES  || {};
   function refreshAddOptions(card) {
     var sel = card.querySelector('.add-opt-select');
     if (!sel) return;
@@ -22460,7 +23204,14 @@ sub edit_table_script {
     });
     var keys = MODEL_OPTS[model] || MODEL_OPTS['__common__'] || [];
     var html = '<option value="">+ add option\u2026</option>';
-    keys.forEach(function(k){ if (!present[k]) html += '<option value="'+k+'">'+k+'</option>'; });
+    // Carry each option's catalog type as data-type, exactly as the server does:
+    // the add-option handler reads it to build the right control (the generic
+    // model= template dropdown, enum drop-downs, etc.) instead of a text field.
+    keys.forEach(function(k){
+      if (present[k]) return;
+      var t = OPT_TYPES[k] || 'text';
+      html += '<option value="'+k+'" data-type="'+t+'">'+k+'</option>';
+    });
     sel.innerHTML = html;
   }
 })();
@@ -25040,7 +25791,8 @@ sub page_head {
         # every user; the All-devices table is admin-only.
         my $dashboard_menu = '';
         if ($ENABLE_DASHBOARD) {
-            my @dash_items = ( $su->('Overview', '?action=dashboard_overview') );
+            my @dash_items = ( $su->('Overview', '?action=dashboard_overview'),
+                               $su->('Changes',  '?action=dashboard_changes') );
             push @dash_items, $su->('All devices', '?action=dashboard_devices')
                 if $is_admin;
             $dashboard_menu = $group->('Dashboard', @dash_items);
@@ -25165,11 +25917,15 @@ sub page_head {
                 # change -- so the user is editing the current on-disk table,
                 # not a stale copy, and saving will build on it.
                 my $here = ($title eq 'Edit device table' || $title eq 'Bulk edit devices')
-                    ? ' The editor below has loaded the externally updated table,'
+                    ? 'The editor below has loaded the externally updated table,'
                       . ' so you are currently editing the latest contents.'
                     : '';
+                # The editor sentence starts on its own line, so the "modified
+                # outside" fact and the "you're editing the latest" reassurance
+                # read as two distinct points.
                 $external = qq{<div class="ext-change-warning">&#9888; } . esc($ext)
-                    . esc($here) . $review . qq{</div>};
+                    . ($here ne '' ? '<br>' . esc($here) : '')
+                    . $review . qq{</div>};
             }
         }
 
@@ -25207,7 +25963,7 @@ sub page_head {
     # have no backdrop.
     my $body_class = defined $user ? 'app-body' : 'login-body';
     my $backdrop_css = defined $user ? '' : qq{
-  body.login-body { background: #23303d url('$BASE_URL$IMAGE_BASE_URL/back.jpg') center center / cover no-repeat fixed;
+  body.login-body { background: var(--color-heading) url('$BASE_URL$IMAGE_BASE_URL/back.jpg') center center / cover no-repeat fixed;
                     min-width: 0; }
   /* The login page must fit the viewport without scrollbars (down to
      1024x768). The body is a full-height flex column (header, main, footer);
@@ -25222,13 +25978,31 @@ sub page_head {
   body.login-body footer.app-footer { position: fixed; left: 0; right: 0; bottom: 0; text-align: center;
                          background: rgba(0,0,0,0.55); color: #fff; padding: 0.7em 1em; margin: 0; }
 };
+
+    # App-wide webfonts: IBM Plex Sans (UI) and IBM Plex Mono (config / diff /
+    # log views). Emitted inline, not in the static stylesheet, because the src
+    # URL needs the configured BASE_URL/FONT_BASE_URL, which fetchconfig-web.css
+    # (served verbatim) cannot interpolate. font-display:swap plus the
+    # system-font fallback baked into the CSS --font-ui / --font-mono tokens mean
+    # an uninstalled file simply degrades to the platform font -- no blocking
+    # fetch, no layout break. (The Template viewer's diagram keeps its own scoped
+    # copy of the Sans faces so it works even if page_head's markup changes.)
+    my $font_faces = <<"FONTCSS";
+<style>
+\@font-face { font-family: 'IBM Plex Sans'; font-weight: 400; font-style: normal; font-display: swap; src: url('$BASE_URL$FONT_BASE_URL/IBMPlexSans-Regular.woff2') format('woff2'); }
+\@font-face { font-family: 'IBM Plex Sans'; font-weight: 600; font-style: normal; font-display: swap; src: url('$BASE_URL$FONT_BASE_URL/IBMPlexSans-SemiBold.woff2') format('woff2'); }
+\@font-face { font-family: 'IBM Plex Mono'; font-weight: 400; font-style: normal; font-display: swap; src: url('$BASE_URL$FONT_BASE_URL/IBMPlexMono-Regular.woff2') format('woff2'); }
+\@font-face { font-family: 'IBM Plex Mono'; font-weight: 600; font-style: normal; font-display: swap; src: url('$BASE_URL$FONT_BASE_URL/IBMPlexMono-SemiBold.woff2') format('woff2'); }
+</style>
+FONTCSS
+
     return <<"HTML";
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>$t</title>
-<link rel="stylesheet" href="$css_href">
+$font_faces<link rel="stylesheet" href="$css_href">
 <style>$backdrop_css</style>
 </head>
 <body class="$body_class">
@@ -25379,11 +26153,34 @@ sub page_foot {
 ################################################################################
 # about_modal_html
 #
+# Latest applied DB schema version for the About dialog: the highest id in the
+# schema_migrations ledger (ids like '1.50' .. '2.12'), ordered by version.
+# Cached per process; undef when the ledger is absent or the DB is unreachable.
+my $_db_schema_version;
+my $_db_schema_version_set = 0;
+sub db_schema_version_cached {
+    return $_db_schema_version if $_db_schema_version_set;
+    $_db_schema_version_set = 1;
+    $_db_schema_version = eval {
+        my $dbh = db_connect() or return undef;
+        my ($have) = $dbh->selectrow_array(
+            q{SELECT 1 FROM information_schema.tables
+               WHERE table_schema = 'public' AND table_name = 'schema_migrations'});
+        if (!$have) { $dbh->disconnect; return undef; }
+        my $ids = $dbh->selectcol_arrayref('SELECT id FROM schema_migrations');
+        $dbh->disconnect;
+        return undef unless $ids && @$ids;
+        my @s = sort { version_cmp($a, $b) } @$ids;
+        return $s[-1];
+    };
+    return $_db_schema_version;
+}
+
 # About dialog: reached from the title-bar program icon. Shows the internal
 # (shipped) version, the configured/effective version (overridable via the
 # config APP_VERSION key), the copyright (config COPYRIGHT or the built-in
-# default), the installed fetchconfig.pl version, and the GPLv3 note. Styled
-# like the confirm modal; OK / x / Esc / backdrop all close it.
+# default), the installed fetchconfig.pl version, the applied DB schema version,
+# and the GPLv3 note. Styled like the confirm modal; OK / x / Esc / backdrop close.
 #
 # Parameters: none
 ################################################################################
@@ -25394,6 +26191,8 @@ sub about_modal_html {
     $cr = esc($cr);
     my $fc = fetchconfig_version_cached();
     $fc = (defined $fc && $fc ne '') ? esc($fc) : 'unknown';
+    my $schema = db_schema_version_cached();
+    $schema = (defined $schema && $schema ne '') ? esc($schema) : 'not installed';
     my $run_mode = esc($RUN_MODE);
     my $name = esc($APP_TITLE);
     return <<"HTML";
@@ -25407,6 +26206,7 @@ sub about_modal_html {
       <tr><th>Configured version</th><td>$effective</td></tr>
       <tr><th>Copyright</th><td>$cr</td></tr>
       <tr><th>fetchconfig.pl</th><td>$fc</td></tr>
+      <tr><th>DB schema</th><td>$schema</td></tr>
       <tr><th>Run mode</th><td>$run_mode</td></tr>
     </table>
     <p class="fc-about-license">Licensed under the GNU General Public License

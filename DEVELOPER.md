@@ -3,9 +3,9 @@
 **Audience:** engineers extending or maintaining fetchconfig-web.
 **Scope:** architecture, request lifecycle, data structures, the PostgreSQL
 schema, the security model, and step-by-step recipes for adding functionality.
-**Version:** this document tracks fetchconfig-web 2.11 (requires fetchconfig
-9.74+; the optional Backup Dashboard needs the engine's DB writer, fetchconfig
-9.75+).
+**Version:** this document tracks fetchconfig-web 2.12 (requires fetchconfig
+9.77+; the optional Backup Dashboard needs the engine's DB writer, fetchconfig
+9.75+, and per-version line counts need 9.77+).
 
 ---
 
@@ -193,7 +193,7 @@ flowchart TD
   [[ render: page_head .. page_foot ]]
 ```
 
-The dispatch is a long `if/elsif` chain on `$action` (~100 actions). Each branch
+The dispatch is a long `if/elsif` chain on `$action` (~120 actions). Each branch
 calls a handler sub. **Read-only** actions (`view_report`, `status`, `compare`,
 ...) render directly. **State-changing** actions (`login`, `user_save`,
 `add_site`, `note_save`, `backup_now`, ...) are in `%STATE_CHANGING` and are
@@ -218,8 +218,8 @@ All settings are declared in one array of tuples:
 [ 'KEY_NAME', 'type', 'default-or-(required)', 'human value hint', $min, $max ]
 ```
 
-* `type` drives validation. The full set is `bool`, `enum`, `file`, `int`,
-  `path`, `path_opt`, `siteurl`, `str`, `str_req`, `url`. (`enum_onoff` and
+* `type` drives validation. The full set is `bool`, `cronuser`, `enum`, `file`,
+  `int`, `path`, `path_opt`, `siteurl`, `str`, `str_req`, `url`. (`enum_onoff` and
   `secret` are *device-table* option types from `%COMMON_OPTS` -- see section
   6 -- not config types.)
 * `$min`/`$max` bound integer types.
@@ -357,8 +357,11 @@ Security is layered; the important mechanisms:
 ### 7.5 Authorization (roles + site scoping)
 
 * Rights are per-user boolean columns: `edit_device_table`, `admin_function`,
-  `download_full_report`, `download_full_config`. `PROTECTED_USER` is the
-  built-in super-admin that cannot be deleted or de-admined.
+  `download_full_report`, `download_full_config`, `read_debug` (the last must be
+  granted explicitly -- unlike the others it is *not* implied by being
+  site-unrestricted, since a debug log can hold a cleartext device password).
+  `PROTECTED_USER` is the built-in super-admin that cannot be deleted or
+  de-admined.
 * **Site scoping**: a device's `site=` tag restricts which users see it. A
   site-limited user only sees/edits devices tagged with their assigned sites
   (`user_sites`). Enforcement is centralised in `read_device_ids()` /
@@ -497,6 +500,7 @@ erDiagram
         boolean admin_function
         boolean download_full_report
         boolean download_full_config
+        boolean read_debug
         text email "nullable"
     }
     SITES {
@@ -577,6 +581,7 @@ erDiagram
 | admin_function | BOOLEAN | right: admin (tools, users, audit) |
 | download_full_report | BOOLEAN | right: unmasked report download |
 | download_full_config | BOOLEAN | right: unmasked config download |
+| read_debug | BOOLEAN | right: view device debug logs (granted explicitly; added by dbupdate 2.08) |
 | email | TEXT | notification/reset address (nullable) |
 
 **sites** -- the site codes used for device scoping.
@@ -696,6 +701,8 @@ erDiagram
         text sha1
         boolean expired
         bigint expired_at
+        integer lines_added
+        integer lines_removed
     }
     DEVICE_TABLE {
         text dev_id "on_disk_config_file"
@@ -743,6 +750,8 @@ erDiagram
 | sha1 | TEXT NOT NULL | integrity checksum |
 | expired | BOOLEAN NOT NULL DEFAULT FALSE | flagged by a future cleanup |
 | expired_at | BIGINT | when expired |
+| lines_added | INTEGER | lines added vs the previous version (ignore-aware; 2.12, engine 9.77+). NULL = baseline / not yet counted; 0/0 = only ignored lines changed |
+| lines_removed | INTEGER | lines removed vs the previous version |
 
 ### 8.2 Connection and grants
 
@@ -768,9 +777,43 @@ helpers (`db_*`) next to the related ones, parameterized.
   CSS is always picked up; never the config-overridable `APP_VERSION`), the
   title bar, the menu, and any warning banners; `page_foot()` closes the page.
 * **CSS** is the external `fetchconfig-web.css` (served from `WEB_DIR`). The only
-  inline CSS left in the CGI is the dynamic login backdrop (depends on login
-  state) and `style="display:none"` toggle targets for JS; email HTML uses
-  inline styles by necessity.
+  inline CSS left in the CGI is the app-wide `@font-face` block (see below), the
+  dynamic login backdrop (depends on login state), the Template viewer's scoped
+  diagram styles, and `style="display:none"` toggle targets for JS; email HTML
+  uses inline styles by necessity.
+* **Design tokens**: a `:root` block at the top of the CSS is the single source
+  for shared values -- use a token, never re-hardcode one of these:
+  * fonts: `--font-ui`, `--font-mono`, `--font-head` (== `--font-ui` until a
+    branded heading face is adopted);
+  * semantic colours, each with a strong value and a light tint (background +
+    border): `--color-accent` / `-accent-dark` / `-accent-bg` / `-accent-border`;
+    `--color-danger` / `-danger-dark` / `-danger-bg` / `-danger-border` /
+    `-danger-text`; `--color-success` / `-success-bg` / `-success-border`; the
+    warning trio `--color-warn` / `-warn-bg` / `-warn-border`; and `--color-focus`
+    (every form-control focus ring);
+  * neutral greys: text dark to light `--color-ink`, `--color-heading`,
+    `--color-label`, `--color-muted`, `--color-faint`, plus `--color-border` (the
+    one hairline border / divider grey);
+  * `--diff-add` / `--diff-del` / `--diff-hunk` -- the unified-diff palette on the
+    dark config surface, shared by the config-view diff (`pre.config .d-*`) and the
+    report diff (`pre.diff.rep-diff`) so the two cannot drift.
+
+  The inline styles `page_head()` emits (login backdrop, the diagram note box, the
+  bcrypt warning) reference these tokens too. (The dashboard keeps its own
+  `--dash-*` status palette in a second `:root`; the report "state" badges are a
+  deliberate distinct-hue set and `.state-new` keeps its own teal. Not tokenised:
+  the light surface-fill greys -- table-header/hover backgrounds such as `#eaecef`,
+  `#f6f6f6`, `#dfe3e8` -- the mint section border `#cdeede`, and the dark
+  debug-log palette.)
+* **Webfonts**: IBM Plex Sans (UI) and IBM Plex Mono (config/diff/log views),
+  Regular + SemiBold, ship in `fonts/` (both SIL OFL 1.1) and load app-wide via
+  an `@font-face` block `page_head()` emits inline -- inline because the `src`
+  URL needs the configured `BASE_URL`/`FONT_BASE_URL`, which the static stylesheet
+  cannot interpolate (and the B8 audit forbids a `$placeholder` in the CSS). Both
+  `--font-*` tokens list the Plex family ahead of the platform stack and use
+  `font-display: swap`, so an uninstalled file degrades gracefully to the system
+  font. The Template viewer additionally carries its own scoped copy of the Sans
+  faces so the diagram survives changes to `page_head`.
 * **Sections/boxes**: content panels use `.tool-section` (green) or
   `.tool-section-blue`; the title bar is `.tool-section-title`. Long pages get a
   floating Top/Bottom nav (`top_bottom_nav()`).
@@ -1095,7 +1138,7 @@ is **functional** for that feature.
 **F. Version module** (`fetchconfig_installed_version`; a **file read**, not a
 run): `FETCHCONFIG_PATH/fetchconfig/Constants.pm`, package
 `fetchconfig::Constants`, function `version()` returning a dotted string.
-Compared against the web app's `MIN_FETCHCONFIG_VERSION` (currently **9.74**) by
+Compared against the web app's `MIN_FETCHCONFIG_VERSION` (currently **9.77**) by
 `version_cmp` (leading integer of each dotted component). Moving or renaming the
 module, package or `version()` yields the "version could not be determined"
 banner. *Functional for the warning (non-fatal to the app).*
@@ -1129,14 +1172,21 @@ the writer role*.
 sees only their own sites (tiles, trend and By-site scoped via
 `read_device_ids($user)`), an unrestricted user the whole fleet. **All devices**
 and **Cleanup dashboard** are admin-only (`dashboard_allowed`). After login, users
-land on the Overview when the dashboard is enabled (`do_login`).
+land on the Overview when the dashboard is enabled (`do_login`). Every tile **and
+panel** on both pages carries a **scope pill** -- `global` (blue) or `restricted`
+(red) -- driven by the `unrestricted` flag the data functions return. `dash_scope_pill($scope)`
+renders it (inline next to a panel heading, or pinned top-right inside a tile via
+`dash_tile`'s optional `$scope` argument), so a site-limited user can tell at a
+glance that every number on the page covers only their sites. The scope is per
+*viewer* (uniform across a page), not per box.
 
 **Config join.** `site`, `model` and `template` are config-only (absent from the
 backup tables), so the device views join `backup_current` to the parsed device
 table by `dev_id` (`dashboard_devices_rows`, `dashboard_overview_data`): site code
 -> description via `db_all_sites`; generic devices shown as `generic · <template>`;
 Site shown as `code / description` and the client-side filter keyed on the site
-code. The All-devices table and its CSV (`dashboard_devices_csv`) render the full
+code. The All-devices table and its CSV (`do_dashboard_devices_csv`, action
+`dashboard_devices_csv`) render the full
 visible set once and filter/sort/paginate client-side (sort by Last backup
 (default, newest first) or Status, over the whole set). A device with no
 `backup_current` row shows **No data**, distinct from **Never** (row, no good backup).
@@ -1159,7 +1209,7 @@ absent. It is an integrity checksum, not a cryptographic signature.
 * **State detection** (`dashboard_schema_state`): `missing` (no table) / `nogrant`
   (no `SELECT`) / `empty` (no rows) / `ok`. Non-`ok` renders `dashboard_state_block`
   guidance; the empty panel prints the `db:` string (writer name from
-  `app_state('dashboard_writer')`, password masked).
+  `app_state_get($dbh, 'dashboard_writer')`, password masked).
 * **`db_host`** parse/format is shared (`db_host_parse`/`db_host_format`) and
   mirrors the engine's rule exactly, so the panel emits what the engine parses.
 * **Schema install/upgrade** lives in `fetchconfig-web-dbsetup.pl --upgrade` (run
@@ -1168,7 +1218,15 @@ absent. It is an integrity checksum, not a cryptographic signature.
   three history tables' owner to the **writer** (so it can run the cleanup
   `DELETE`), while `schema_migrations` stays superuser-owned; the web login is
   `SELECT`-only. The writer's `SELECT` grant is also required by the engine's
-  pre-9.5 DML.
+  pre-9.5 DML. `--upgrade` (2.12) additionally grants the web user `SELECT` on
+  `schema_migrations` (so the **About** dialog can report the applied schema
+  version via `db_schema_version_cached` -- the highest ledger id by `version_cmp`;
+  without the grant the ledger is invisible to the web role and About reads "not
+  installed"), and grants the writer `UPDATE (lines_added, lines_removed)` on
+  `backup_versions` (so `--db-backfill` can fill them). `version_cmp` compares
+  per-component integers, so three-part ids (`2.12.3`) and `2.12` vs `2.9` sort
+  correctly; schema ids are deliberately two-part (one per schema change), distinct
+  from the app's VRM shown as About's *Internal version*.
 * The renamed **"General parameters"** editor tab has admin-only structured
   `db:` fields; they round-trip via `parse_device_table` (kind `db`),
   `reconstruct_records_from_form` (guarded by the `db_section` marker; `db_pass`
@@ -1179,3 +1237,67 @@ absent. It is an integrity checksum, not a cryptographic signature.
   (the sandbox has no PostgreSQL, so these paths are covered only by unit/stub
   tests); and the DB-cleanup retention algorithm (keep-count aware, not purely
   time-based).
+
+### 13.5 Changes view (config churn)
+
+`Dashboard -> Changes` (`show_dashboard_changes`; route `dashboard_changes`;
+`dashboard_changes_allowed` = `ENABLE_DASHBOARD`, same open/site-scoped model as
+the Overview). It answers "how often does config actually change", which is
+*independent of backup freshness* -- a device backed up nightly but unchanged for
+years is **stable**, not stale.
+
+**Data source.** Everything comes from `backup_versions`, where **one row = one
+stored config version = one change event** in *both* eras: the engine writes a
+version file only when the config changed, and the 9.76 `--db-backfill` pass
+imports one row per on-disk backup with its real historical `file_timestamp`. So
+live and back-filled rows are directly comparable -- no clustering-at-import
+distortion (that caveat is a `backup_runs`/trend concern, not this view).
+
+`dashboard_changes_data($dbh,$user,%opt)` is pure `SELECT` (unit-tested against a
+mock handle, `t/E10-dashboard-changes.t`) and returns: 7d/30d change counts;
+`changed_24h` (distinct devices); `most_changed` (30d leader); `stable_1y`;
+a 16-week churn series (`weeks`, zero-filled; `spike` = `n >= 5 && n >= 3*median`
+of non-zero weeks); `top` (30d leaderboard, device-table devices only); change-age
+`buckets` (`<=7d / 8-30 / 31-90 / 91-365 / 1-2y / >2y`, plus `none` = device-table
+devices with no version yet); and the `feed`. `%opt` is `feed_n` / `feed_days`
+(the feed's cap and window; defaults 50 / 7). All scoped to the caller's visible
+devices (`read_device_ids` + a `dev_id IN (...)` clause) for a site-limited user;
+whole fleet otherwise.
+
+**Back-fill (retention) caveat.** The weekly chart marks the pre-cut-over region
+hatched. `cutover` = `MIN(run_end) FROM backup_runs WHERE duration_sec IS NOT NULL`
+(the first *live*-recorded run; back-filled runs have `duration_sec = NULL`). Weeks
+ending at/before it are reconstructed from the backups **still on disk** -- pruned
+or expired versions leave no row -- so those counts are a floor and can undercount
+the deeper past. The caveat is about retention completeness, not timestamp accuracy.
+
+**Feed delta (line counts, 2.12).** The "Top *N* recently changed - last *D* days"
+feed shows `+added / -removed` lines straight from `backup_versions.lines_added` /
+`lines_removed` -- written by the fetchconfig engine (**9.77+**, ignore-aware so
+volatile lines do not count) on the live save path and by `--db-backfill`. Pure DB,
+no file reads. The columns are added by `fetchconfig-web-dbupdate-2.12.sql` (via
+`dbsetup.pl --upgrade`, which also grants the writer `UPDATE` on them for the
+backfill). Rendering: a defined pair -> `+a / -r` (`0/0` = only ignored lines
+changed, shown `±0`); `NULL` -> `--` (no stored delta: the device's **oldest
+retained** version, which had no on-disk predecessor to diff -- earlier backups may
+have been pruned -- or a row written before 9.77). It deliberately does **not** show
+"new": the web cannot distinguish the oldest retained version from a genuine
+first-ever backup once earlier versions are pruned, so claiming "new" would be
+wrong (e.g. `apgmg00`, whose oldest kept version is NULL but which clearly predates
+it). `N`/`D` come from the `n` / `days` query params, validated and clamped
+(`N<=500`, `D<=365`). Each row's **View diff** links to `show_changes_diff`
+(`?action=changes_diff&dev=…&ts=<file_timestamp>`): it resolves that version's path
+from the DB, maps it to fetchconfig's own on-disk backup index via `list_backups`
+(the index `-m`/`-n` expects -- never a DB-derived one, which could drift from the
+on-disk enumeration), and diffs index N (this version) against N+1 (the previous)
+through `compare_backups`. So a device that appears several times in the feed jumps
+straight to the exact two configs, instead of the device view where the user had to
+find them. Guarded by `device_accessible`. The oldest retained version (no earlier
+backup on disk) shows a note and a device-view link rather than a diff; the diff
+itself is the full raw `fetchconfig.pl -m` output (may show more lines than the
+ignore-aware count). `MIN_FETCHCONFIG_VERSION` is bumped to **9.77** (a non-blocking
+header warning when older).
+
+**Overview card.** `show_dashboard_overview` adds a compact *Recently changed -
+last 24 h* card (`dashboard_recent_changed`) linking through to this page -- the
+first thing checked after a maintenance night.

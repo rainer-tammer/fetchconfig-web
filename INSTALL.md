@@ -50,8 +50,8 @@ repository.
 
 ### What is in the package
 
-The release archive `fetchconfig-web-2.11.tar` unpacks to a directory
-`fetchconfig-web-2.11/` containing:
+The release archive `fetchconfig-web-2.12.tar` unpacks to a directory
+`fetchconfig-web-2.12/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -66,6 +66,7 @@ The release archive `fetchconfig-web-2.11.tar` unpacks to a directory
 | `fetchconfig-web-dbupdate-1.62.sql` | Idempotent SQL that upgrades an existing database to the 1.62 schema (`users.download_full_config`, the `device_notes` table; PostgreSQL 8.2+). |
 | `fetchconfig-web-dbupdate-2.08.sql` | Idempotent SQL that upgrades an existing database to the 2.08 schema (`users.read_debug`; PostgreSQL 8.2+). |
 | `fetchconfig-web-dbupdate-2.11.sql` | Idempotent SQL that adds the 2.11 Backup-Dashboard history schema (`schema_migrations`, `backup_current`, `backup_runs`, `backup_versions`; PostgreSQL 8.2+). Schema only -- grants are done by `fetchconfig-web-dbsetup.pl --upgrade`. |
+| `fetchconfig-web-dbupdate-2.12.sql` | Idempotent SQL that adds the 2.12 per-version line-count columns (`backup_versions.lines_added`, `lines_removed`; PostgreSQL 8.2+) for the Changes view. Schema only -- grants are done by `fetchconfig-web-dbsetup.pl --upgrade`. |
 | `fetchconfig-web-clean-resets.pl` | Standalone script to prune spent password-reset tokens and stale login-throttle rows (`-h` for help, `-s` to print the role SQL). |
 | `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`: installs, creates, reverts, deletes or renames a template file; reads/deletes a device debug log; and lists `CRON_USER`'s crontab for the schedule viewer (v1.7). |
 | `imageconvert.pl`, `README.imageconvert.md` (+ `.html`/`README.imageconvert`) | Optional helper for embedding a small image as a base64 Perl constant; its manual (Markdown master, with generated HTML and plain-text). |
@@ -79,15 +80,15 @@ The release archive `fetchconfig-web-2.11.tar` unpacks to a directory
 | `render-doc.py`, `render-doc.md` | Build tool: renders each Markdown document to styled HTML and a plain-text (ASCII) version (Python 2.7/3). |
 | `fetchconfig-web.css` | **Required** stylesheet. Must be installed at `<WEB_DIR><CSS_BASE_URL>/fetchconfig-web.css` (Step 4) or every page is unstyled and a red banner is shown. |
 | `js/mermaid.min.js` | Bundled Mermaid renderer (UMD, self-contained, offline). Draws the Template viewer's state-machine diagram. Copy the `js/` directory into `WEB_DIR` (Step 4); served at `<WEB_DIR><JS_BASE_URL>/mermaid.min.js`. |
-| `fonts/IBMPlexSans-Regular.woff2`, `fonts/IBMPlexSans-SemiBold.woff2` | IBM Plex Sans webfont the diagram needs so its labels fit. Copy the `fonts/` directory into `WEB_DIR` (Step 4); served under `<WEB_DIR><FONT_BASE_URL>`. |
+| `fonts/IBMPlexSans-*.woff2`, `fonts/IBMPlexMono-*.woff2` | IBM Plex Sans (UI font, Regular + SemiBold) and IBM Plex Mono (config / diff / log views, Regular + SemiBold). Copy the `fonts/` directory into `WEB_DIR` (Step 4); served under `<WEB_DIR><FONT_BASE_URL>`. The app references them via `@font-face` with `font-display: swap` and a system-font fallback, so if the files are absent the pages render in the platform's own fonts -- no error, only a less consistent look. |
 | `LICENSE`, `LICENSE.md`, `LICENSE.html` | GPL-3.0-or-later licence (the plain-text master plus the generated Markdown and HTML). Build the `.md`/`.html` with `render-doc.py LICENSE` -- the **plain** master, not `LICENSE.md`. |
-| `COPYING.md`, `COPYING.html`, `COPYING` | Third-party licences for the bundled components: Mermaid (MIT) and IBM Plex Sans (SIL OFL 1.1). Markdown master, with generated HTML and plain text. |
+| `COPYING.md`, `COPYING.html`, `COPYING` | Third-party licences for the bundled components: Mermaid (MIT) and IBM Plex Sans / IBM Plex Mono (SIL OFL 1.1). Markdown master, with generated HTML and plain text. |
 | `Makefile.PL`, `cpanfile` | A `prove`-based test harness, and the Perl dependency manifest used by `cpanm --installdeps .`. |
 | `t/` | The regression test suite. |
 
 ### Requirements
 
-- **fetchconfig 9.74 or newer** already installed and working. fetchconfig-web
+- **fetchconfig 9.77 or newer** already installed and working. fetchconfig-web
   calls `fetchconfig.pl` and reads its device table, repository and template
   directories; it does not replace fetchconfig.
 - **Perl 5.10 or newer.** Tested on Linux and AIX.
@@ -340,7 +341,7 @@ in Step 3. The defaults match a typical fetchconfig install.
 | `SESSION_DIR` | `/var/lib/fetchconfig-web/sessions` | Login sessions (mode 0700, files 0600). Must be writable by the web user. |
 | `BACKUP_TMP_DIR` | same as `SESSION_DIR` | Scratch space for *Backup Now* and the device-table writer lock. Must be writable by the web user. |
 | `WEB_DIR` | `/www/virtual/fetchconfig/htdocs` | **Filesystem** directory holding the static assets (css, fonts, images, help tree); used for on-disk presence checks. |
-| `BASE_URL`, `CSS_BASE_URL`, `FONT_BASE_URL`, `IMAGE_BASE_URL`, `JS_BASE_URL`, `HELP_BASE_URL` | `/`, `/css`, `/fonts`, `/images`, `/js`, `/help` | **URL paths** under which the web server serves `WEB_DIR` and its sub-directories. `JS_BASE_URL` holds `mermaid.min.js` for the Template viewer's state-machine diagram (which also uses the IBM Plex Sans webfont under `FONT_BASE_URL`). `HELP_BASE_URL` is the help tree (`help.html` plus the scanned `fetchconfig-web/` and `fetchconfig/` menus). |
+| `BASE_URL`, `CSS_BASE_URL`, `FONT_BASE_URL`, `IMAGE_BASE_URL`, `JS_BASE_URL`, `HELP_BASE_URL` | `/`, `/css`, `/fonts`, `/images`, `/js`, `/help` | **URL paths** under which the web server serves `WEB_DIR` and its sub-directories. `FONT_BASE_URL` holds the IBM Plex Sans and IBM Plex Mono webfonts used across the UI; `JS_BASE_URL` holds `mermaid.min.js` for the Template viewer's state-machine diagram (which reuses the Plex Sans webfont). `HELP_BASE_URL` is the help tree (`help.html` plus the scanned `fetchconfig-web/` and `fetchconfig/` menus). |
 
 You also need the identity of the **web-server user** (Apache's `User`
 directive, or `ps -ef` while a request is running). On the reference
@@ -510,7 +511,7 @@ JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 # Overrides the version shown in the footer and About dialog. Omit it to show
 # the version the script ships as; the About dialog always shows that one too.
-#APP_VERSION            = 2.11
+#APP_VERSION            = 2.12
 COPYRIGHT               = 2026 (c) Your Organisation
 ```
 
@@ -555,21 +556,26 @@ mkdir -p $WEB/css $WEB/images $WEB/js $WEB/fonts
 cp fetchconfig-web.css $WEB/css/           # REQUIRED stylesheet
 cp images/back.jpg     $WEB/images/        # optional login backdrop
 cp js/mermaid.min.js   $WEB/js/            # Template viewer state-machine diagram
-cp fonts/*.woff2       $WEB/fonts/         # IBM Plex Sans (needed by that diagram)
+cp fonts/*.woff2       $WEB/fonts/         # IBM Plex Sans (UI) + IBM Plex Mono (config views)
 ```
 
-> **Template viewer diagram (optional but recommended).** The release ships a
-> `js/` directory (`mermaid.min.js`, the self-contained Mermaid renderer) and a
-> `fonts/` directory (IBM Plex Sans `.woff2`). Copy **both directories into
-> `WEB_DIR`** as shown above -- they install to `<WEB_DIR><JS_BASE_URL>` (default
-> `.../htdocs/js`) and `<WEB_DIR><FONT_BASE_URL>` (default `.../htdocs/fonts`).
-> With both in place, the Template viewer draws each template's login/collect
-> state machine below the template text. If `js/` is missing the viewer shows a
-> short note instead of the diagram; if the IBM Plex Sans font is missing the
-> diagram still renders but its labels may not fit. `mermaid.min.js` is ~5 MB, so
-> enabling `mod_deflate`/gzip for `*.js` (it compresses to ~1 MB) is worthwhile.
-> Any existing fonts already in `<WEB_DIR><FONT_BASE_URL>` are left untouched --
-> the copy only adds the IBM Plex Sans files.
+> **Webfonts (recommended).** The release ships a `fonts/` directory with IBM
+> Plex Sans (the UI font) and IBM Plex Mono (the config / diff / log view font),
+> Regular + SemiBold each. Copy it into `WEB_DIR` as shown above -- it installs to
+> `<WEB_DIR><FONT_BASE_URL>` (default `.../htdocs/fonts`). The app loads them via
+> `@font-face` with `font-display: swap`; the CSS font stacks fall back to the
+> platform's own fonts, so if the files are absent the pages simply render in the
+> system fonts -- no error, only a less consistent look across platforms. Any
+> fonts already present in `<WEB_DIR><FONT_BASE_URL>` are left untouched.
+>
+> **Template viewer diagram (optional but recommended).** The release also ships
+> a `js/` directory (`mermaid.min.js`, the self-contained Mermaid renderer).
+> Copy it into `WEB_DIR` too -- it installs to `<WEB_DIR><JS_BASE_URL>` (default
+> `.../htdocs/js`). With it in place, the Template viewer draws each template's
+> login/collect state machine below the template text (it reuses the IBM Plex
+> Sans webfont above for the labels); if `js/` is missing the viewer shows a
+> short note instead. `mermaid.min.js` is ~5 MB, so enabling `mod_deflate`/gzip
+> for `*.js` (it compresses to ~1 MB) is worthwhile.
 
 **The help tree.** The Help menu is served from the help tree,
 `<WEB_DIR><HELP_BASE_URL>` (default `.../htdocs/help`). It holds `help.html`
@@ -1186,10 +1192,13 @@ Then review the new **Security hardening checklist** in Part 4.
 1. Copy the new `fetchconfig-web.cgi` (and `fetchconfig-web.css`, `help.html` if
    changed) into place. Under FastCGI, follow with `apachectl graceful`; hard-reload
    the browser so the new CSS is picked up.
-2. **Copy the new `js/` and `fonts/` directories into `WEB_DIR`** to enable the
-   Template viewer's state-machine diagram (`js/mermaid.min.js` and the IBM Plex
-   Sans webfont). See *Step 4 -- Static files*. Without them the viewer shows a
-   short note instead of the diagram; the rest of the application is unaffected.
+2. **Copy the new `fonts/` and `js/` directories into `WEB_DIR`.** `fonts/` now
+   carries IBM Plex Sans (UI) and IBM Plex Mono (config views); the whole app
+   uses them via `@font-face`, falling back to the platform fonts if absent (so
+   this is recommended, not required). `js/mermaid.min.js` enables the Template
+   viewer's state-machine diagram. See *Step 4 -- Static files*. Without the
+   fonts the pages render in the system fonts; without `js/` the viewer shows a
+   short note instead of the diagram. The rest of the application is unaffected.
 
 Upgrading from 2.07 or earlier: do the 2.08 database upgrade below first, then the
 steps above.
@@ -1377,8 +1386,8 @@ Work through this after a fresh install or an upgrade:
       few hundred KB. A bare **500** with
       `exceeds MaxRequestLen` in the error log means `FcgidMaxRequestLen` is
       still at its 128 KB default -- see Step 7.3.
-- [ ] The footer shows the expected version: *fetchconfig-web v2.11 using
-      fetchconfig v9.7x*.
+- [ ] The footer shows the expected version: *fetchconfig-web v2.12 using
+      fetchconfig v9.77*.
 
 ### Security hardening checklist
 
@@ -1457,6 +1466,42 @@ and the exact path to `fetchconfig.pl`, and that the file in
 
 **Everything looks right but a recent fix is "not there".** Hard-reload the
 browser (Ctrl-F5); the editor's JavaScript is cached.
+
+**Every page is unstyled and a red "directories not configured" banner
+appears.** `fetchconfig-web.css` is not installed at
+`<WEB_DIR><CSS_BASE_URL>/fetchconfig-web.css`, or `WEB_DIR` / `CSS_BASE_URL` are
+wrong. Copy the stylesheet into `WEB_DIR/css` (Step 4) and re-check the two keys.
+
+**The login page reports that password hashing is unavailable and login is
+disabled.** `REQUIRE_BCRYPT = 1` (the default) but `Crypt::Bcrypt` is not
+installed. Install it (Step 1), or set `REQUIRE_BCRYPT = 0` to allow the legacy
+`$apr1$` fallback on a stack without the module.
+
+**"Forgot password?" never sends an email.** With `EMAIL = 1`, `SITE_URL` must be
+set -- the reset link is never built from the request `Host` header, so without
+`SITE_URL` no mail is sent. Every forgot-password outcome is audited, so the
+audit log names the reason (no `SITE_URL`, throttled, unknown user, or no address
+on file). Also confirm `Net::SMTP` and the `SMTP_*` settings.
+
+**Saving, uploading, renaming or reverting a template fails.** The template tools
+write through `TEMPLATE_HELPER` under sudo; the second sudoers rule (Step 6) for
+`fetchconfig-web-install-template.pl` is missing, or `TEMPLATE_HELPER` is unset.
+Add the rule and redeploy the helper.
+
+**An upload (logo, template, or HEX capture) fails with a bare 500 and
+`exceeds MaxRequestLen` in the error log.** Under mod_fcgid, `FcgidMaxRequestLen`
+is still at its 128 KB default. Set it to `2097152` to match `$CGI::POST_MAX`
+(Step 7). Plain CGI is unaffected.
+
+**The Template viewer shows a note instead of the state-machine diagram.**
+`js/mermaid.min.js` (or the IBM Plex fonts) is not in `WEB_DIR`, or fetchconfig's
+template parser is not found under `FETCHCONFIG_PATH`. Copy the `js/` and `fonts/`
+directories into `WEB_DIR` (Step 4).
+
+**The dashboard shows setup guidance instead of data.** `ENABLE_DASHBOARD = 1`
+but the history schema is missing or empty, or the web DB user lacks `SELECT`.
+Run `fetchconfig-web-dbsetup.pl --upgrade` and add the engine's `db:` option (see
+*Backup Dashboard*); the page prints the exact `db:` line to paste.
 
 ## Running the test suite
 

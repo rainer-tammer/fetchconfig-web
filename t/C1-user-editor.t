@@ -186,7 +186,7 @@ no warnings 'once', 'redefine';
     unlike($sites_save // '', qr/download_full_report/, 'sites save: does not write full-report');
     unlike($sites_save // '', qr/download_full_config/, 'sites save: does not write full-config');
     # Add user: no permission checkboxes; creation redirects to the edit page.
-    my ($add_sub) = $src =~ /if \(\$only eq 'add'/s ? ($src =~ /(if \(\$only eq 'add'.*?# \.user-section \(Add user\))/s) : ('');
+    my ($add_sub) = $src =~ /if \(\$only eq 'add'/s ? ($src =~ /(if \(\$only eq 'add'.*?# \.tool-section \(Add user\))/s) : ('');
     unlike($add_sub // '', qr/Grant admin functions/,   'add form: no admin checkbox');
     unlike($add_sub // '', qr/Allow this user to view and edit/, 'add form: no edit checkbox');
     like($src, qr/redirect_to_user_page\(action=>"user_edit", username=>\$new_user/,
