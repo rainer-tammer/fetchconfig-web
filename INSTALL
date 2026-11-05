@@ -32,6 +32,7 @@ Contents
   - Step 8 -- First login
 - Part 3 -- Upgrading
   - Upgrading the script
+  - Upgrading to 2.14
   - Upgrading to 2.11
   - Upgrading to 2.10
   - Upgrading to 2.09
@@ -54,8 +55,8 @@ Part 1 -- Before you start
 What is in the package
 ----------------------
 
-The release archive fetchconfig-web-2.12.tar unpacks to a directory fetchconfig-
-web-2.12/ containing:
+The release archive fetchconfig-web-2.14.tar unpacks to a directory fetchconfig-
+web-2.14/ containing:
 
   File: fetchconfig-web.cgi
   Purpose: The application: one self-contained Perl script, run under FastCGI or
@@ -109,6 +110,14 @@ web-2.12/ containing:
            (backup_versions.lines_added, lines_removed; PostgreSQL 8.2+) for the
            Changes view. Schema only -- grants are done by fetchconfig-web-
            dbsetup.pl --upgrade.
+
+  File: fetchconfig-web-dbupdate-2.14.sql
+  Purpose: Idempotent SQL for the 2.14 device-id rename: grants the writer role
+           UPDATE on dev_id for backup_runs / backup_versions and records DB
+           schema level 2.14 (PostgreSQL 8.2+). Column-level grants need 8.4+;
+           below 8.4 it grants whole-table UPDATE instead. Privilege-only -- no
+           table/column change. fetchconfig-web-dbsetup.pl --upgrade issues the
+           same grants with the configured writer name.
 
   File: fetchconfig-web-clean-resets.pl
   Purpose: Standalone script to prune spent password-reset tokens and stale
@@ -693,7 +702,7 @@ A complete example with the defaults:
     HELP_BASE_URL           = /help
     # Overrides the version shown in the footer and About dialog. Omit it to show
     # the version the script ships as; the About dialog always shows that one too.
-    #APP_VERSION            = 2.12
+    #APP_VERSION            = 2.14.0
     COPYRIGHT               = 2026 (c) Your Organisation
 
 Protect it: it contains the database password.
@@ -779,6 +788,13 @@ no web-server write access. A sub-directory that is missing or holds no .html
 shows a muted "No additional helpfiles available - see INSTALL.md"; a sub-
 directory with more than fifteen .html files is treated as a misconfiguration
 and shows a single "too many help documents in <dir>" placeholder.
+
+    Warning: The scan lists every *.html currently in a sub-directory -- it
+    never removes or overwrites files. When you refresh the fetchconfig manuals
+    (or your own help documents), delete the old/renamed HTML files from
+    $WEB/help/fetchconfig/ (and $WEB/help/fetchconfig-web/) by hand first;
+    copying in new versions does not clear the previous ones, so any stale file
+    left behind keeps appearing in the Help menu.
 
 The web server must serve $WEB at BASE_URL (e.g. the vhost DocumentRoot at /).
 The backdrop image is optional (the login page shows a plain background without
@@ -948,6 +964,17 @@ and keep USE_SUDO_FOR_BACKUP_NOW = 1 (the default). Backup Now then runs sudo -n
 /usr/local/fetchconfig/fetchconfig.pl -devices=<tempfile>; -n means it fails
 fast with sudo's own message rather than hanging if the rule does not match. New
 backups are created with root ownership, consistent with cron-made ones.
+
+Setup devices -> Rename device-id (and its Replay DB change) run through the
+same sudo path -- sudo -n /usr/local/fetchconfig/fetchconfig.pl --rename-device-
+id --old=... --new=.... This is required: the rename creates the device-table
+lock and moves the backup tree, which the unprivileged web user cannot do (the
+symptom without sudo is cannot create the lock ... refusing to rename without a
+lock). Because the sudoers rule below is the script path with no argument
+restriction, no sudoers change is needed -- the same rule already permits these
+subcommands. With USE_SUDO_FOR_BACKUP_NOW = 0, the rename instead needs the
+fetchconfig directories (device table, its lock, and the backup tree) to be web-
+writable.
 
 Two things to weigh before granting this:
 
@@ -1313,6 +1340,29 @@ Running under FastCGI? Copying the new script is not enough -- the long-lived
 mod_fcgid workers keep running the old code until recycled, and touch does not
 trigger a reload. Run apachectl graceful after the copy (see Step 7 -- Web
 server configuration). Plain CGI needs no such step.
+
+Upgrading to 2.14
+-----------------
+
+    Database privilege change in 2.14 (for the device-id rename). Copy the new
+    fetchconfig-web.cgi and fetchconfig-web.css into WEB_DIR as in Upgrading the
+    script (under FastCGI, graceful the server; hard-reload once for the CSS).
+    Then, if the Backup Dashboard history database is in use, grant the writer
+    role UPDATE on dev_id in the history tables: run fetchconfig-web-dbsetup.pl
+    --upgrade (as root), which applies fetchconfig-web-dbupdate-2.14.sql and
+    refreshes the grants, or apply that .sql by hand. It is privilege-only -- no
+    table or column is changed. On PostgreSQL 8.4+ the grant is column-scoped to
+    dev_id; below 8.4 (which has no column-level GRANT) a whole-table UPDATE is
+    granted instead. If the dashboard database is not configured, no database
+    step is needed.
+
+    The Rename device-id feature (Setup devices menu) additionally requires the
+    fetchconfig engine at 9.78 or newer; the menu item stays hidden on older
+    engines. MIN_FETCHCONFIG_VERSION is 9.78 in this release, so an older engine
+    also raises the usual non-blocking header warning. The rename runs through
+    the sudo helper (like Backup Now, gated on USE_SUDO_FOR_BACKUP_NOW = 1) so
+    it can create the device-table lock and move the backup tree -- the existing
+    script-path sudoers rule already covers it, so no sudoers change is needed.
 
 Upgrading to 2.11
 -----------------

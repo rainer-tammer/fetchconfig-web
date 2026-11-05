@@ -3,9 +3,10 @@
 **Audience:** engineers extending or maintaining fetchconfig-web.
 **Scope:** architecture, request lifecycle, data structures, the PostgreSQL
 schema, the security model, and step-by-step recipes for adding functionality.
-**Version:** this document tracks fetchconfig-web 2.12 (requires fetchconfig
-9.77+; the optional Backup Dashboard needs the engine's DB writer, fetchconfig
-9.75+, and per-version line counts need 9.77+).
+**Version:** this document tracks fetchconfig-web 2.14 (requires fetchconfig
+9.78+; the optional Backup Dashboard needs the engine's DB writer, fetchconfig
+9.75+, per-version line counts need 9.77+, and the Setup devices -> Rename
+device-id feature needs the engine's `--rename-device-id`, fetchconfig 9.78+).
 
 ---
 
@@ -195,9 +196,29 @@ flowchart TD
 
 The dispatch is a long `if/elsif` chain on `$action` (~120 actions). Each branch
 calls a handler sub. **Read-only** actions (`view_report`, `status`, `compare`,
-...) render directly. **State-changing** actions (`login`, `user_save`,
-`add_site`, `note_save`, `backup_now`, ...) are in `%STATE_CHANGING` and are
-CSRF-protected and POST-guarded.
+`compare_devices`, `compare_device_versions`, `rename_device_id` (the rename
+*form*), ...) render directly. **State-changing** actions (`login`, `user_save`,
+`add_site`, `note_save`, `backup_now`, `rename_device_do`, `replay_db_change`,
+...) are in `%STATE_CHANGING` and are CSRF-protected and POST-guarded.
+
+The **Rename device-id** feature (2.14+) is a front-end for the engine's
+`fetchconfig.pl --rename-device-id --old=X --new=Y` (9.78+): `rename_device_id`
+shows the form, `rename_device_do` runs the engine (`mode=preview` adds `-T`;
+`mode=commit` performs it, then migrates the web-owned `device_notes` row and
+writes an audit entry), and `replay_db_change` runs `--replay-db-change` to flush
+the engine's history-DB outbox. Both run via **`run_fetchconfig_priv()`** (the
+sudo path -- `run_fetchconfig` and `run_fetchconfig_priv` now share the
+`run_capture_cmd()` core), so the rename can create the device-table lock and move
+the backup tree as the fetchconfig owner rather than the web user. The `edit_table`
+editor shows an existing device's Device-ID **read-only** (a new, unsaved device's is
+still editable), because changing it there would desync the backups/history -- use
+Rename device-id instead. Gated on `rename_feature_available()` (engine
+>= `RENAME_MIN_FETCHCONFIG_VERSION`) and `user_may_rename_device()` (all-sites
+editor). The DB side is a privilege-only migration (`2.14`): UPDATE on `dev_id` for
+the writer on `backup_runs` / `backup_versions` (column-scoped on PostgreSQL 8.4+,
+whole-table UPDATE below 8.4 where column-level GRANT is unsupported; the writer owns
+the tables, so effective access is unchanged). `backup_current` already had table-wide
+UPDATE.
 
 ### The `%STATE_CHANGING` set
 

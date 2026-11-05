@@ -273,16 +273,30 @@ like($h, qr{<span class="dbg-ctl">0d</span>},      'CR/LF/NUL padding is dimmed'
         like($body, qr/param\('err'\)/, "$page renders a flash error");
     }
 
-    # The ssh log is hidden by DEFAULT, and the JS default state must agree
-    # with which button is rendered as pressed -- otherwise the first click
-    # does nothing visible.
+    # Direction / ssh / view switching is SERVER-SIDE: each control is an <a>
+    # link that reloads with the filter applied; ssh is hidden by DEFAULT.
     my ($vw) = $src =~ /\nsub show_debug_log \{(.*?)\n\}\n/s;
-    like($vw, qr/\$cls \.= ' no-ssh'/, 'the viewer starts with the ssh log hidden');
-    like($vw, qr/data-ssh="hide">SSH log hidden<\/button>/, 'the Hidden button is rendered');
-    like($vw, qr/class="seg-btn on" data-ssh="hide"/, '... and is the pressed one');
+    like($vw, qr/\$ssh = 'hide' unless/,       'the viewer defaults to ssh hidden');
+    like($vw, qr/\$render->\(\$raw, \$dir, \$ssh\)/, 'the renderer is given the dir/ssh filter');
+    like($vw, qr/dir=>'tx'[^\n]*'Sent only'/,  'Sent only is a server-side dir link');
+    like($vw, qr/ssh=>'hide'[^\n]*'SSH log hidden'/, 'SSH log hidden is a server-side link');
+    like($vw, qr/\$ssh eq 'hide', 'SSH log hidden'/, '... and is the pressed one by default');
+    unlike($vw, qr/data-dir=|data-ssh=/,       'no client-side data-dir/data-ssh buttons remain');
+    unlike($vw, qr/only-tx|only-rx|no-ssh/,    'no client-side CSS filter classes remain');
+
     my ($js) = $src =~ /\nsub debug_filter_script \{(.*?)\n\}\n/s;
-    like($js, qr/state = \{ dir: 'both', ssh: 'hide' \}/,
-         'the script default matches the pressed buttons');
+    like($js, qr/dbg-spinner/,                 'spinner script references the overlay');
+    like($js, qr/querySelectorAll\('a\.seg-btn'\)/, 'every seg-btn link shows the overlay on click');
+    unlike($js, qr/apply\(|state =|only-tx/,   'the old client-side filter script is gone');
+
+    # Download / Delete are normal-size buttons (no btn-small) in the viewer toolbar.
+    my ($view0) = $src =~ /\nsub show_debug_log \{(.*?)\n\}\n/s;
+    like($view0,   qr/class="backup-overlay" id="dbg-spinner"/, 'viewer renders the spinner overlay');
+    unlike($view0, qr/btn btn-small/,          'viewer toolbar uses normal-size buttons');
+    # Render-time footer (as on the device-table editor), gated on SHOW_RENDER_TIME.
+    like($view0, qr/\$render_t0 = \[Time::HiRes::gettimeofday/, 'viewer captures the render start time');
+    like($view0, qr/if \(\$SHOW_RENDER_TIME\)/,                 'render-time footer is gated on SHOW_RENDER_TIME');
+    like($view0, qr/class="render-time">Rendered in/,          'viewer prints the "Rendered in" footer');
 
     # No raw errno in a rendered page (t/B6 enforces this globally; keep the
     # new code honest about it too).

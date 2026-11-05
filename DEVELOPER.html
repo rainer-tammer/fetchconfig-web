@@ -519,7 +519,7 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v2.12.27</span>
+      <span class="pill">v2.14.0</span>
       <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
@@ -544,10 +544,10 @@
 
     <div class="hero">
       <h1 class="hero-title">fetchconfig-web &mdash; Technical / Developer Documentation</h1>
-      <p class="lede"><strong>Audience:</strong> engineers extending or maintaining fetchconfig-web. <strong>Scope:</strong> architecture, request lifecycle, data structures, the PostgreSQL schema, the security model, and step-by-step recipes for adding functionality. <strong>Version:</strong> this document tracks fetchconfig-web 2.12 (requires fetchconfig 9.77+; the optional Backup Dashboard needs the engine&#x27;s DB writer, fetchconfig 9.75+, and per-version line counts need 9.77+).</p>
+      <p class="lede"><strong>Audience:</strong> engineers extending or maintaining fetchconfig-web. <strong>Scope:</strong> architecture, request lifecycle, data structures, the PostgreSQL schema, the security model, and step-by-step recipes for adding functionality. <strong>Version:</strong> this document tracks fetchconfig-web 2.14 (requires fetchconfig 9.78+; the optional Backup Dashboard needs the engine&#x27;s DB writer, fetchconfig 9.75+, per-version line counts need 9.77+, and the Setup devices -&gt; Rename device-id feature needs the engine&#x27;s <code>--rename-device-id</code>, fetchconfig 9.78+).</p>
       
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">2.12.27</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">2.14.0</span><span class="label">version</span></div>
         <div class="hero-stat"><span class="num">Perl FCGI/CGI</span><span class="label">language</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>
@@ -631,7 +631,8 @@ sub name { ... }</code></pre>
     L -- yes --&gt; N[&quot;site-scope guard; dispatch to handler&quot;]
     K -- no --&gt; N
     N --&gt; O[[&quot;render: page_head .. page_foot&quot;]]</pre>
-<p>The dispatch is a long <code>if/elsif</code> chain on <code>$action</code> (~120 actions). Each branch calls a handler sub. <strong>Read-only</strong> actions (<code>view_report</code>, <code>status</code>, <code>compare</code>, ...) render directly. <strong>State-changing</strong> actions (<code>login</code>, <code>user_save</code>, <code>add_site</code>, <code>note_save</code>, <code>backup_now</code>, ...) are in <code>%STATE_CHANGING</code> and are CSRF-protected and POST-guarded.</p>
+<p>The dispatch is a long <code>if/elsif</code> chain on <code>$action</code> (~120 actions). Each branch calls a handler sub. <strong>Read-only</strong> actions (<code>view_report</code>, <code>status</code>, <code>compare</code>, <code>compare_devices</code>, <code>compare_device_versions</code>, <code>rename_device_id</code> (the rename <em>form</em>), ...) render directly. <strong>State-changing</strong> actions (<code>login</code>, <code>user_save</code>, <code>add_site</code>, <code>note_save</code>, <code>backup_now</code>, <code>rename_device_do</code>, <code>replay_db_change</code>, ...) are in <code>%STATE_CHANGING</code> and are CSRF-protected and POST-guarded.</p>
+<p>The <strong>Rename device-id</strong> feature (2.14+) is a front-end for the engine&#x27;s <code>fetchconfig.pl --rename-device-id --old=X --new=Y</code> (9.78+): <code>rename_device_id</code> shows the form, <code>rename_device_do</code> runs the engine (<code>mode=preview</code> adds <code>-T</code>; <code>mode=commit</code> performs it, then migrates the web-owned <code>device_notes</code> row and writes an audit entry), and <code>replay_db_change</code> runs <code>--replay-db-change</code> to flush the engine&#x27;s history-DB outbox. Both run via <strong><code>run_fetchconfig_priv()</code></strong> (the sudo path -- <code>run_fetchconfig</code> and <code>run_fetchconfig_priv</code> now share the <code>run_capture_cmd()</code> core), so the rename can create the device-table lock and move the backup tree as the fetchconfig owner rather than the web user. The <code>edit_table</code> editor shows an existing device&#x27;s Device-ID <strong>read-only</strong> (a new, unsaved device&#x27;s is still editable), because changing it there would desync the backups/history -- use Rename device-id instead. Gated on <code>rename_feature_available()</code> (engine &gt;= <code>RENAME_MIN_FETCHCONFIG_VERSION</code>) and <code>user_may_rename_device()</code> (all-sites editor). The DB side is a privilege-only migration (<code>2.14</code>): UPDATE on <code>dev_id</code> for the writer on <code>backup_runs</code> / <code>backup_versions</code> (column-scoped on PostgreSQL 8.4+, whole-table UPDATE below 8.4 where column-level GRANT is unsupported; the writer owns the tables, so effective access is unchanged). <code>backup_current</code> already had table-wide UPDATE.</p>
 <h3 id="the-state_changing-set">The <code>%STATE_CHANGING</code> set</h3>
 <p>A hash (<code>map { $_ =&gt; 1 } qw(...)</code>) listing every action that mutates state. The CSRF gate and POST-only guard consult it. <strong>Any new mutating action MUST be added to this set</strong> or it will be rejected (or, worse, left unprotected). Tests assert membership (see <code>FCWebTest::state_changing_actions</code>).</p>
 <hr>

@@ -30,6 +30,7 @@ repository.
   - [Step 8 -- First login](#step-8----first-login)
 - [Part 3 -- Upgrading](#part-3----upgrading)
   - [Upgrading the script](#upgrading-the-script)
+  - [Upgrading to 2.14](#upgrading-to-2.14)
   - [Upgrading to 2.11](#upgrading-to-2.11)
   - [Upgrading to 2.10](#upgrading-to-2.10)
   - [Upgrading to 2.09](#upgrading-to-2.09)
@@ -50,8 +51,8 @@ repository.
 
 ### What is in the package
 
-The release archive `fetchconfig-web-2.12.tar` unpacks to a directory
-`fetchconfig-web-2.12/` containing:
+The release archive `fetchconfig-web-2.14.tar` unpacks to a directory
+`fetchconfig-web-2.14/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -67,6 +68,7 @@ The release archive `fetchconfig-web-2.12.tar` unpacks to a directory
 | `fetchconfig-web-dbupdate-2.08.sql` | Idempotent SQL that upgrades an existing database to the 2.08 schema (`users.read_debug`; PostgreSQL 8.2+). |
 | `fetchconfig-web-dbupdate-2.11.sql` | Idempotent SQL that adds the 2.11 Backup-Dashboard history schema (`schema_migrations`, `backup_current`, `backup_runs`, `backup_versions`; PostgreSQL 8.2+). Schema only -- grants are done by `fetchconfig-web-dbsetup.pl --upgrade`. |
 | `fetchconfig-web-dbupdate-2.12.sql` | Idempotent SQL that adds the 2.12 per-version line-count columns (`backup_versions.lines_added`, `lines_removed`; PostgreSQL 8.2+) for the Changes view. Schema only -- grants are done by `fetchconfig-web-dbsetup.pl --upgrade`. |
+| `fetchconfig-web-dbupdate-2.14.sql` | Idempotent SQL for the 2.14 device-id rename: grants the writer role UPDATE on `dev_id` for `backup_runs` / `backup_versions` and records DB schema level 2.14 (PostgreSQL 8.2+). Column-level grants need 8.4+; below 8.4 it grants whole-table UPDATE instead. Privilege-only -- no table/column change. `fetchconfig-web-dbsetup.pl --upgrade` issues the same grants with the configured writer name. |
 | `fetchconfig-web-clean-resets.pl` | Standalone script to prune spent password-reset tokens and stale login-throttle rows (`-h` for help, `-s` to print the role SQL). |
 | `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`: installs, creates, reverts, deletes or renames a template file; reads/deletes a device debug log; and lists `CRON_USER`'s crontab for the schedule viewer (v1.7). |
 | `imageconvert.pl`, `README.imageconvert.md` (+ `.html`/`README.imageconvert`) | Optional helper for embedding a small image as a base64 Perl constant; its manual (Markdown master, with generated HTML and plain-text). |
@@ -511,7 +513,7 @@ JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 # Overrides the version shown in the footer and About dialog. Omit it to show
 # the version the script ships as; the About dialog always shows that one too.
-#APP_VERSION            = 2.12
+#APP_VERSION            = 2.14.0
 COPYRIGHT               = 2026 (c) Your Organisation
 ```
 
@@ -608,6 +610,13 @@ shows a muted "No additional helpfiles available - see INSTALL.md"; a
 sub-directory with more than fifteen `*.html` files is treated as a
 misconfiguration and shows a single "too many help documents in &lt;dir&gt;"
 placeholder.
+
+> **Warning:** The scan lists **every** `*.html` currently in a sub-directory --
+> it never removes or overwrites files. When you refresh the fetchconfig manuals
+> (or your own help documents), **delete the old/renamed HTML files from
+> `$WEB/help/fetchconfig/` (and `$WEB/help/fetchconfig-web/`) by hand first**;
+> copying in new versions does not clear the previous ones, so any stale file
+> left behind keeps appearing in the Help menu.
 
 The web server must serve `$WEB` at `BASE_URL` (e.g. the vhost DocumentRoot at
 `/`). The backdrop image is optional (the login page shows a plain background
@@ -789,6 +798,16 @@ and keep `USE_SUDO_FOR_BACKUP_NOW = 1` (the default). Backup Now then runs
 means it fails fast with sudo's own message rather than hanging if the rule
 does not match. New backups are created with root ownership, consistent with
 cron-made ones.
+
+**Setup devices -> Rename device-id** (and its *Replay DB change*) run through the
+same sudo path -- `sudo -n /usr/local/fetchconfig/fetchconfig.pl --rename-device-id
+--old=... --new=...`. This is required: the rename creates the device-table lock
+and moves the backup tree, which the unprivileged web user cannot do (the symptom
+without sudo is `cannot create the lock ... refusing to rename without a lock`).
+Because the sudoers rule below is the **script path** with no argument restriction,
+**no sudoers change is needed** -- the same rule already permits these subcommands.
+With `USE_SUDO_FOR_BACKUP_NOW = 0`, the rename instead needs the fetchconfig
+directories (device table, its lock, and the backup tree) to be web-writable.
 
 Two things to weigh before granting this:
 
@@ -1151,6 +1170,28 @@ usual reason a fix "does not appear".
 long-lived `mod_fcgid` workers keep running the old code until recycled, and
 `touch` does not trigger a reload. Run `apachectl graceful` after the copy
 (see *Step 7 -- Web server configuration*). Plain CGI needs no such step.
+
+### Upgrading to 2.14
+
+> **Database privilege change in 2.14** (for the device-id rename). Copy the new
+> `fetchconfig-web.cgi` and `fetchconfig-web.css` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the
+> server; hard-reload once for the CSS). Then, if the Backup Dashboard history
+> database is in use, grant the writer role UPDATE on `dev_id` in the history tables:
+> run `fetchconfig-web-dbsetup.pl --upgrade` (as root), which applies
+> `fetchconfig-web-dbupdate-2.14.sql` and refreshes the grants, or apply that `.sql`
+> by hand. It is privilege-only -- no table or column is changed. On PostgreSQL 8.4+
+> the grant is column-scoped to `dev_id`; below 8.4 (which has no column-level GRANT)
+> a whole-table UPDATE is granted instead. If the dashboard database is **not**
+> configured, no database step is needed.
+>
+> The **Rename device-id** feature (Setup devices menu) additionally requires the
+> **fetchconfig engine at 9.78 or newer**; the menu item stays hidden on older
+> engines. `MIN_FETCHCONFIG_VERSION` is 9.78 in this release, so an older engine
+> also raises the usual non-blocking header warning. The rename runs through the
+> **sudo helper** (like Backup Now, gated on `USE_SUDO_FOR_BACKUP_NOW = 1`) so it
+> can create the device-table lock and move the backup tree -- the existing
+> script-path sudoers rule already covers it, so **no sudoers change is needed**.
 
 ### Upgrading to 2.11
 

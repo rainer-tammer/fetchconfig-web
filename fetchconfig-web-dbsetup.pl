@@ -251,6 +251,11 @@ my @UPDATES = (
     [ '2.08', 'fetchconfig-web-dbupdate-2.08.sql', sub { col_exists($_[0], 'users', 'read_debug') } ],
     [ '2.11', 'fetchconfig-web-dbupdate-2.11.sql', sub { tbl_exists($_[0], 'backup_current') } ],
     [ '2.12', 'fetchconfig-web-dbupdate-2.12.sql', sub { col_exists($_[0], 'backup_versions', 'lines_added') } ],
+    # 2.14 is a privilege-only change (UPDATE(dev_id) for the engine's device-id
+    # rename) -- no schema artifact to probe, so the signature is always false:
+    # the file is applied (idempotent) and recorded once. The actual grants are
+    # issued both by the .sql (to the table owner) and by do_grants (below).
+    [ '2.14', 'fetchconfig-web-dbupdate-2.14.sql', sub { 0 } ],
 );
 
 sub tbl_exists {
@@ -401,14 +406,37 @@ sub do_grants {
     # Writer: SELECT + INSERT on all three (SELECT is required by the pre-9.5
     # DML), UPDATE on backup_current, UPDATE(expired, expired_at) on backup_versions.
     $dbh->do("GRANT SELECT, INSERT ON backup_current, backup_runs, backup_versions TO $qw");
+    # backup_current: table-wide UPDATE (current pointer, expiry, and dev_id for
+    # the 2.14 device-id rename -- the whole-table grant already covers dev_id).
     $dbh->do("GRANT UPDATE ON backup_current TO $qw");
-    # Writer UPDATE on backup_versions: expiry always; the 2.12 line-count columns
-    # (for --db-backfill) when present. --upgrade applies migrations before grants,
-    # so the columns normally exist by now; guarded for a schema that predates 2.12.
-    my $bv_cols = col_exists($dbh, 'backup_versions', 'lines_added')
-                ? 'expired, expired_at, lines_added, lines_removed' : 'expired, expired_at';
-    $dbh->do("GRANT UPDATE ($bv_cols) ON backup_versions TO $qw");
-    print "Granted: web user \"$webuser\" SELECT; writer \"$writer\" SELECT+INSERT+UPDATE.\n";
+
+    # Column-level GRANT ("GRANT UPDATE (col) ...") is PostgreSQL 8.4+ syntax; on
+    # 8.2 / 8.3 it is a syntax error. Detect the server version and fall back to a
+    # whole-table UPDATE below 8.4 (the writer owns these tables anyway, so the
+    # table-level grant does not widen effective access). pg_server_version is the
+    # DBD::Pg integer form (e.g. 80204, 90603); fall back to the GUC if absent.
+    my $pgver = $dbh->{pg_server_version};
+    if (!defined $pgver) {
+        ($pgver) = $dbh->selectrow_array("SELECT current_setting('server_version_num')::int");
+        $pgver //= 0;
+    }
+    if ($pgver >= 80400) {
+        # backup_runs: UPDATE(dev_id) for the 2.14 device-id rename.
+        $dbh->do("GRANT UPDATE (dev_id) ON backup_runs TO $qw");
+        # backup_versions: expiry always; dev_id for the 2.14 rename; the 2.12
+        # line-count columns (for --db-backfill) when present.
+        my $bv_cols = col_exists($dbh, 'backup_versions', 'lines_added')
+                    ? 'expired, expired_at, dev_id, lines_added, lines_removed'
+                    : 'expired, expired_at, dev_id';
+        $dbh->do("GRANT UPDATE ($bv_cols) ON backup_versions TO $qw");
+    }
+    else {
+        # pre-8.4: no column privileges -> whole-table UPDATE on both.
+        $dbh->do("GRANT UPDATE ON backup_runs TO $qw");
+        $dbh->do("GRANT UPDATE ON backup_versions TO $qw");
+    }
+    print "Granted: web user \"$webuser\" SELECT; writer \"$writer\" SELECT+INSERT+UPDATE"
+        . ($pgver && $pgver < 80400 ? " (table-level UPDATE; PostgreSQL < 8.4)" : "") . ".\n";
 }
 
 sub do_upgrade {

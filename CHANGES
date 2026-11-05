@@ -3,6 +3,41 @@ fetchconfig-web -- Change Log
 
 Release history for fetchconfig-web, newest version first.
 
+2.14
+====
+
+Adds Setup devices -> Rename device-id, a web front-end for the fetchconfig
+engine's device-id rename.
+
+Upgrading: run fetchconfig-web-dbsetup.pl --upgrade (applies fetchconfig-web-
+dbupdate-2.14.sql), or apply that .sql by hand. It is a privilege-only change
+(no table/column change). Requires fetchconfig 9.78+ for the rename itself.
+
+- Setup devices -> Rename device-id (all-sites editors only): rename a device's
+  id everywhere -- the device table, the on-disk backup tree, and (if a history
+  database is configured) the dashboard history. The engine does the work under
+  its table-file lock; the page offers a mandatory dry-run Preview first, then
+  performs the rename on confirmation and shows the engine's transcript. It runs
+  through the sudo helper (like Backup Now) so it can take the lock and move the
+  backup tree; the existing script-path sudoers rule covers it (no new rule).
+  Any two device types are renameable. The fetchconfig-web-owned device note
+  moves with the device, and the rename is written to the audit log. The menu
+  item appears only when the installed engine is 9.78+. In the device-table
+  editor an existing device's Device-ID is now read-only (rename it here
+  instead); a new, unsaved device's id stays editable.
+- Replay DB change: a button that runs the engine's --replay-db-change to flush
+  the history-database outbox (used if a rename finished while the database was
+  unreachable and its update was queued).
+- fetchconfig-web-dbupdate-2.14.sql + dbsetup.pl --upgrade: grant the writer
+  role UPDATE on dev_id for backup_runs and backup_versions (and record DB
+  schema level 2.14), so the engine can carry the id change into the history
+  tables. backup_current already had table-wide UPDATE. Column-level grants need
+  PostgreSQL 8.4+; below 8.4 a whole-table UPDATE is granted instead (the writer
+  owns these tables, so this does not widen effective access). The web login
+  stays SELECT-only.
+- Requires fetchconfig 9.78+ (MIN_FETCHCONFIG_VERSION). Older engines: a non-
+  blocking header warning, and the Rename menu item is hidden.
+
 2.12
 ====
 
@@ -31,6 +66,17 @@ counts.
   loaded via @font-face with font-display: swap and a system-font fallback -- so
   a consistent look where the fonts are installed, the platform fonts where they
   are not. Copy fonts/ into WEB_DIR (see INSTALL).
+- Devices -> Compare devices: a side-by-side comparison of any two devices (any
+  models/extractors -- an old-style extractor on one side and generic on the
+  other is fine). Pick each device (with an optional per-site filter and type-
+  to-filter) and a backup version -- the latest of each by default, or an older
+  one for a point-in-time comparison. The result reuses the aligned diff view
+  (secrets masked) with a difference count, Only differences and Ignore
+  whitespace toggles, Swap, a plain-text Download diff, and New comparison.
+  Access is per device: site-limited users can only pick and compare devices in
+  their own sites.
+- An unknown or unsupported action now returns a proper 404 Not Found error page
+  instead of silently falling back to the device list.
 - CSS cleanup
 - UI cleanup to ensure consistency
 - Corrected several documentation issues.

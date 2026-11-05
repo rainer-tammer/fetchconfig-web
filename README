@@ -56,7 +56,10 @@ for accounts with the edit or admin right) in the title bar's nav row:
    (see "Config syntax highlighting").
 6. Tick two backups of a device and press Compare selected (unified diff) or
    Side by side selected (two-column view) -> see the differences, colored in
-   both cases.
+   both cases. To compare two different devices instead (any models or
+   extractors), use Devices -> Compare devices: pick a device and backup version
+   on each side (latest by default) and get the same side-by-side view, with
+   Only-differences / Ignore-whitespace toggles, Swap, and Download diff.
 7. Press "Backup now" on a device's backup list -> runs a live backup for that
    device immediately, shows the full run transcript, and returns you to the
    (now refreshed) backup list.
@@ -211,6 +214,13 @@ Files
 
 Part 2 -- Installation and configuration
 ========================================
+
+    Note: The authoritative, step-by-step installation and upgrade procedure --
+    requirements with per-distribution package names, database setup, web-server
+    configuration, the sudo rules, and version-to-version upgrades -- lives in
+    INSTALL.md. This part is a quick-start overview plus the configuration-key
+    reference; for a production install, follow INSTALL.md so the two never
+    diverge.
 
 Quick start
 -----------
@@ -443,7 +453,7 @@ You can also create it by hand:
     GENERIC_SYNTAX          = auto
     TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
     #CRON_USER              = fetchconfig
-    APP_VERSION             = 2.12
+    APP_VERSION             = 2.14.0
     COPYRIGHT               = 2026 (c) Rainer Tammer
 
 Format and loading:
@@ -1055,13 +1065,15 @@ Navigation menus
 ----------------
 
 The title bar uses drop-down menus: Devices (Devices, Device backup status,
-Backup reports, Device notes), Setup devices (Device table, Edit device table,
-Bulk edit devices -- shown only to users who may edit the table; a site-limited
-user sees only Edit device table), Tools (admin only, each tool on its own
-page), User (Change your password and Change your email for everyone; Users, Add
-user and Sites for admins), Dashboard (Overview, Changes, All devices -- shown
-only when ENABLE_DASHBOARD is on), and Help. The post-login page is the device
-list (the Overview when the dashboard is enabled).
+Compare devices, Backup reports, Device notes), Setup devices (Device table,
+Edit device table, Bulk edit devices, and Rename device-id -- shown only to
+users who may edit the table; a site-limited user sees only Edit device table,
+and Rename device-id appears only to all-sites editors when the installed engine
+is fetchconfig 9.78+), Tools (admin only, each tool on its own page), User
+(Change your password and Change your email for everyone; Users, Add user and
+Sites for admins), Dashboard (Overview, Changes, All devices -- shown only when
+ENABLE_DASHBOARD is on), and Help. The post-login page is the device list (the
+Overview when the dashboard is enabled).
 
 Device notes
 ------------
@@ -1603,6 +1615,36 @@ no control characters). If any line fails, nothing is saved and the page is
 redrawn with your text intact and the error list. Saving goes through the same
 safe path as the editor -- mtime concurrency guard, timestamped backup to
 $BACKUP_DEVICE_TABLE, in-place overwrite, POST + CSRF.
+
+Rename device-id
+................
+
+The Rename device-id item in the Setup devices menu (?action=rename_device_id,
+all-sites editors only, and shown only when the installed engine is fetchconfig
+9.78+) renames a device's id everywhere: the device-table line, the on-disk
+backup tree (<repo>/YYYYMM/YYYYMMDD/<id>/ and the <id>.run.* / <id>.status /
+<id>.debug files), and -- if a db: history database is configured -- the dev_id
+in backup_current, backup_runs and backup_versions.
+
+The rename is done by the fetchconfig engine (fetchconfig.pl --rename-device-id
+--old=X --new=Y), which serializes it under a device-table lock, is crash-safe
+via a journal, and carries the database change on its statistics outbox.
+fetchconfig-web runs it through the sudo helper (the same privileged path as
+Backup Now, gated on USE_SUDO_FOR_BACKUP_NOW), so it has the permissions to
+create the lock and move the backup tree -- the existing script-path sudoers
+rule covers it, no new rule needed. The web page only drives it: pick the
+current id and type a new one (letters, digits, dot, dash, underscore; not
+starting with a dash, not all dots, not already in use), Preview changes (a dry
+run, -T, that writes nothing) and then Perform rename. The engine's transcript
+is shown. The fetchconfig-web-owned device note (keyed by device-id) is moved to
+the new id by the web app afterwards, and the rename is recorded in the audit
+log.
+
+If the rename finishes while the history database is unreachable, the engine
+queues the database update and reports exit 1; the page says so and offers
+Replay DB change (?action=replay_db_change, runs fetchconfig.pl --replay-db-
+change) to flush the queue once the database is back. Both actions are POST +
+CSRF.
 
 Tools (admins only)
 -------------------

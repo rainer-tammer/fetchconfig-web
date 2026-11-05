@@ -101,7 +101,17 @@
         <li><a href="#help-backups">Backups for a device</a></li>
         <li><a href="#help-viewing">Viewing a backup</a></li>
         <li><a href="#help-comparing">Comparing backups</a></li>
+        <li><a href="#help-compare-devices">Compare devices</a></li>
         <li><a href="#help-reports">Backup reports</a></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Dashboard</h3>
+      <ul>
+        <li><a href="#help-dashboard">Backup health (Overview)</a></li>
+        <li><a href="#help-dash-changes">Configuration changes</a></li>
+        <li><a href="#help-dash-devices">All devices</a></li>
+        <li><a href="#help-dash-cleanup">Cleanup dashboard</a></li>
       </ul>
     </div>
     <div>
@@ -109,6 +119,7 @@
       <ul>
         <li><a href="#help-setup">The device table &amp; editor</a></li>
         <li><a href="#help-bulk">Bulk edit</a></li>
+        <li><a href="#help-rename-device">Rename device-id</a></li>
         <li><a href="#help-templates">Templates</a></li>
       </ul>
     </div>
@@ -126,6 +137,7 @@
         <li><a href="#help-diskspace">Disk space</a></li>
         <li><a href="#help-cfg">Show fetchconfig-web.cfg</a></li>
         <li><a href="#help-email">E-mail setup &amp; report logo</a></li>
+        <li><a href="#help-schedule">Show schedule</a></li>
         <li><a href="#help-schedlog">Last schedule log</a></li>
       </ul>
     </div>
@@ -136,6 +148,7 @@
         <li><a href="#help-navigation">Getting around long pages</a></li>
         <li><a href="#help-security">Security &amp; privacy</a></li>
         <li><a href="#help-browser">Browser requirements</a></li>
+        <li><a href="#help-faq">Common questions</a></li>
         <li><a href="#help-support">Getting help</a></li>
       </ul>
     </div>
@@ -160,9 +173,12 @@
         &mdash; Device table, Edit device table, Bulk edit devices. A site-limited
         editor sees only Edit device table.</li>
     <li><strong>Tools</strong> <span class="badge">admins only</span> &mdash; each
-        maintenance tool on its own page (see <a href="#help-tools">Part 4</a>).</li>
+        maintenance tool on its own page (see <a href="#help-tools">Part 5</a>).</li>
     <li><strong>User</strong> &mdash; Change your password and Change your email
         (everyone); Users, Add user and Sites (admins only).</li>
+    <li><strong>Dashboard</strong> &mdash; Overview and Changes (everyone; a
+        site-limited user sees only their own sites) and All devices (admins).
+        Appears only when your administrator has enabled the dashboard.</li>
     <li><strong>Help</strong> &mdash; this guide, the two
         <em>additional help</em> sections, and About
         (see <a href="#help-helpmenu">Help menu &amp; About</a>).</li>
@@ -412,6 +428,38 @@
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
+<section class="card" id="help-compare-devices">
+  <h2>Compare devices <span class="badge all">everyone</span></h2>
+  <p>While <em>Comparing backups</em> (above) compares two versions of the
+  <strong>same</strong> device, <strong>Devices &rarr; Compare devices</strong>
+  compares the stored configurations of <strong>two different devices</strong>
+  side by side &mdash; useful for checking that a pair of switches, firewalls or
+  routers really are configured the same way, or for spotting what a new box is
+  missing against a known-good one.</p>
+  <ul>
+    <li>Pick a device on each side. An optional <strong>Site filter</strong>
+        narrows the list, and you can type part of a name to filter as you go.
+        The devices need <strong>not</strong> be the same model or use the same
+        extractor &mdash; an old-style extractor on one side and a generic
+        (template-driven) device on the other is fine.</li>
+    <li>Each side has a <strong>Backup version</strong> selector. It defaults to
+        <strong>Latest</strong>; choose an older backup on either side for a
+        point-in-time comparison (for example, this device today against that
+        device last week).</li>
+    <li>Press <strong>Compare</strong> to get the two-column view, device&nbsp;A
+        on the left and device&nbsp;B on the right. A badge shows the number of
+        differences, or tells you the two configurations are identical.</li>
+    <li>In the result you can toggle <strong>Only differences</strong> (hide the
+        matching lines), toggle <strong>Ignore whitespace</strong>,
+        <strong>Swap</strong> the two sides, <strong>Download diff</strong> as a
+        plain-text file, or start a <strong>New comparison</strong>.</li>
+    <li>Differences are colour-coded exactly as elsewhere, and passwords stay
+        masked. Site-limited users can only pick and compare devices in their
+        own sites.</li>
+  </ul>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
 <section class="card" id="help-reports">
   <h2>Backup reports <span class="badge all">everyone</span></h2>
   <p>The <strong>Devices &rarr; Backup reports</strong> page lists the HTML
@@ -433,7 +481,80 @@
 </section>
 
 <!-- ============================ PART 3 ============================ -->
-<div class="help-part"><span class="n">Part 3</span><h2>Editing the configuration</h2><span class="rule"></span></div>
+<div class="help-part"><span class="n">Part 3</span><h2>Dashboard</h2><span class="rule"></span></div>
+
+<section class="card" id="help-dashboard">
+  <h2>Backup health (Overview) <span class="badge all">everyone</span></h2>
+  <p>When your administrator has enabled it, a <strong>Dashboard</strong> menu
+  appears and you land on its <strong>Overview</strong> after login. The dashboard
+  reads the backup history the fetchconfig engine records in the database, so it
+  shows live fleet status without opening each device.</p>
+  <p>The Overview (&ldquo;Backup health&rdquo;) has five tiles &mdash;
+  <strong>Total devices</strong>, <strong>Fresh (&le;24h)</strong>,
+  <strong>Stale (1&ndash;7d)</strong>, <strong>Failed last run</strong>
+  (auth / timeout / unreachable) and <strong>Never backed up</strong> &mdash; above
+  a <strong>Fleet freshness</strong> bar and a <strong>Recently changed &middot;
+  last 24&nbsp;h</strong> list. Each panel carries a <strong>scope</strong> pill.</p>
+  <div class="note"><span class="lbl">Scope.</span> A <strong>global</strong> (blue)
+  pill means you are seeing the whole fleet; a <strong>restricted</strong> (red)
+  pill means you are site-limited and the figures cover only your sites.</div>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-dash-changes">
+  <h2>Configuration changes <span class="badge all">everyone</span></h2>
+  <p><strong>Dashboard &rarr; Changes</strong> is about <em>config churn</em> &mdash;
+  how often device configurations actually change. It shows:</p>
+  <ul>
+    <li>Headline counts: changes in the <strong>last 7 days</strong> and
+        <strong>30 days</strong>, devices <strong>changed in 24&nbsp;h</strong>, and
+        devices <strong>stable for a year</strong>.</li>
+    <li><strong>Changes per week &middot; fleet</strong> &mdash; a weekly bar chart
+        (weeks with an unusual spike are marked).</li>
+    <li><strong>Most-changed devices &middot; 30 days</strong> &mdash; a leaderboard
+        of the busiest configurations.</li>
+    <li><strong>Time since last config change</strong> &mdash; buckets from
+        &ldquo;today&rdquo; out to &ldquo;over a year&rdquo;, so you can see what has
+        gone quiet.</li>
+    <li><strong>Top&nbsp;N recently changed &middot; last&nbsp;D days</strong> &mdash;
+        a feed of the most recent changes with the <strong>+added / &minus;removed</strong>
+        line counts and a <strong>View diff</strong> link straight to the two
+        configs. Set N and D with the boxes at the top of the panel.</li>
+  </ul>
+  <div class="note"><span class="lbl">Note.</span> The per-change line counts
+  (<code>+a / &minus;r</code>) need fetchconfig 9.77 or newer; against an older
+  engine, and for a brand-new or oldest-retained backup, the feed shows
+  <code>&mdash;</code> instead of a count.</div>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-dash-devices">
+  <h2>All devices <span class="badge">admins only</span></h2>
+  <p><strong>Dashboard &rarr; All devices</strong> is the full per-device table
+  &mdash; last result, last-changed time, backup count and size &mdash; sortable
+  and filterable, with a <strong>CSV</strong> download for reporting. Site-limited
+  users see the Overview and Changes for their own sites; the All-devices table is
+  for administrators.</p>
+  <p>Once history exists, each device's <a href="#help-backups">Backups</a> page
+  also gains a small <strong>SHA1</strong> button beside a backup, which copies its
+  integrity checksum (a change / corruption check, not a cryptographic signature).</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-dash-cleanup">
+  <h2>Cleanup dashboard <span class="badge">admins only</span></h2>
+  <p><strong>Tools &rarr; Cleanup dashboard</strong> lists statistics still held for
+  devices that are no longer in the device table and lets you delete them, so the
+  dashboard totals stay in step with the current fleet.</p>
+  <div class="note"><span class="lbl">Note.</span> If the dashboard is switched on
+  but no history has been recorded yet (or the database is unreachable), its pages
+  show a short setup note instead of failing. Ask your administrator if it stays
+  empty.</div>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<!-- ============================ PART 4 ============================ -->
+<div class="help-part"><span class="n">Part 4</span><h2>Editing the configuration</h2><span class="rule"></span></div>
 
 <section class="card" id="help-setup">
   <h2>The device table &amp; editor <span class="badge edit">editors</span></h2>
@@ -446,7 +567,7 @@
         exactly as the tool reads it, with a Copy button (passwords masked).</li>
     <li><strong>Edit device table</strong> opens a structured editor with three
         tabs: <strong>Devices</strong>, <strong>Defaults</strong> (per model) and
-        <strong>Email notification</strong>.</li>
+        <strong>General parameters</strong>.</li>
   </ul>
   <h3>Editing devices</h3>
   <ul>
@@ -476,7 +597,7 @@
   gray beside the box. When a value matches the one on the model's
   <code>default:</code> line, a blue <strong>default</strong> flag is shown. The
   <code>on_fetch_run</code> option (if allowed) is a directory drop-down plus a
-  command field; report options appear on the Email tab when a
+  command field; report options appear on the General parameters tab when a
   <code>report</code> directory is allow-listed. A table that uses a directory
   not on the list opens with a red warning and cannot be saved until fixed.</p>
   <h3>Generic (template-driven) devices</h3>
@@ -486,11 +607,15 @@
   device, or set it once on a <strong>Defaults</strong> card for
   <code>generic</code> so all generic devices inherit it. Templates added on disk
   appear after you reload the page. See <a href="#help-templates">Templates</a>.</p>
-  <h3>E-mail notification</h3>
-  <p>The <strong>Email notification</strong> tab sets who gets the backup-summary
-  e-mail (the <code>from</code>, <code>to</code> and <code>smtp</code> server,
-  plus optional SMTP user/password) and an optional <strong>footer</strong>
-  (the attribution line at the bottom of that e-mail; empty = default).</p>
+  <h3>General parameters</h3>
+  <p>The <strong>General parameters</strong> tab (shown only to admins and
+  site-unrestricted users) sets who gets the backup-summary e-mail (the
+  <code>from</code>, <code>to</code> and <code>smtp</code> server, plus optional
+  SMTP user/password) and an optional <strong>footer</strong> (the attribution
+  line at the bottom of that e-mail; empty = default). When the
+  <a href="#help-dashboard">Backup Dashboard</a> is in use, it also holds the
+  database (<code>db:</code>) connection fields the fetchconfig engine writes its
+  backup history through.</p>
   <h3>Saving</h3>
   <ul>
     <li><strong>Preview raw table</strong> shows exactly what would be written
@@ -519,6 +644,36 @@
   a line you remove is deleted, and an empty box removes all devices. The
   defaults and e-mail settings are not affected. You confirm first, and if any
   line is invalid nothing is saved and the problems are listed.</div>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-rename-device">
+  <h2>Rename device-id <span class="badge">all-sites editors</span></h2>
+  <p><strong>Setup devices &rarr; Rename device-id</strong> changes a device's id
+  <strong>everywhere</strong> at once &mdash; in the device table, in the stored
+  backup files on disk, and (if the backup history database is in use) in the
+  dashboard history. Use it when a device is renamed and you want its whole backup
+  history to follow the new name rather than start over.</p>
+  <ul>
+    <li>Pick the <strong>current</strong> device id and type the <strong>new</strong>
+        one. Allowed characters are letters, digits, dot, dash and underscore; the
+        new id may not start with a dash, be all dots, or already be in use.</li>
+    <li>Press <strong>Preview changes</strong> first. This is a dry run: it shows
+        exactly what would be renamed and changes <strong>nothing</strong>.</li>
+    <li>If the preview looks right, press <strong>Perform rename</strong> to carry it
+        out. The rename itself is done by the fetchconfig engine under a lock, so it
+        is safe to run while backups are scheduled. The engine's report is shown when
+        it finishes. A device <strong>note</strong> kept in fetchconfig-web moves to
+        the new id automatically.</li>
+  </ul>
+  <div class="note"><span class="lbl">Database queued?</span> If the history database
+  was briefly unreachable, the rename still completes for the table and the backup
+  files, and the database part is <strong>queued</strong>. The page says so and
+  offers <strong>Replay DB change</strong> to apply the queued update once the
+  database is back.</div>
+  <div class="note warn"><span class="lbl">Availability.</span> This item appears only
+  for all-sites editors and only when the installed fetchconfig engine is new enough
+  (9.78 or later). If you do not see it, the engine needs upgrading.</div>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
@@ -597,8 +752,8 @@
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
-<!-- ============================ PART 4 ============================ -->
-<div class="help-part"><span class="n">Part 4</span><h2>Administration</h2><span class="rule"></span></div>
+<!-- ============================ PART 5 ============================ -->
+<div class="help-part"><span class="n">Part 5</span><h2>Administration</h2><span class="rule"></span></div>
 
 <section class="card" id="help-tools">
   <h2>Tools overview <span class="badge">admins only</span></h2>
@@ -822,6 +977,23 @@
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
+<section class="card" id="help-schedule">
+  <h2>Show schedule <span class="badge">admins only</span></h2>
+  <p><strong>Tools &rarr; Show schedule</strong> is a read-only helper for the
+  scheduled (cron) backup, in two panels:</p>
+  <ul>
+    <li><strong>Current schedule</strong> &mdash; the configured schedule user's
+        crontab, with the fetchconfig lines parsed out so you can see when the
+        backup runs.</li>
+    <li><strong>Build a crontab entry</strong> &mdash; compose a schedule line from
+        drop-downs and copy it to paste into the crontab yourself.</li>
+  </ul>
+  <p>The tool never changes the crontab. If the schedule settings are not
+  configured, the page says which are missing. For the output of the last run, see
+  <a href="#help-schedlog">Last schedule log</a>.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
 <section class="card" id="help-schedlog">
   <h2>Last schedule log <span class="badge">admins only</span></h2>
   <p><strong>Tools &rarr; View last fetchconfig schedule log</strong> opens the
@@ -833,8 +1005,8 @@
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 
-<!-- ============================ PART 5 ============================ -->
-<div class="help-part"><span class="n">Part 5</span><h2>Reference</h2><span class="rule"></span></div>
+<!-- ============================ PART 6 ============================ -->
+<div class="help-part"><span class="n">Part 6</span><h2>Reference</h2><span class="rule"></span></div>
 
 <section class="card" id="help-helpmenu">
   <h2>Help menu &amp; About</h2>
@@ -853,7 +1025,8 @@
         needs to thin the directory out.</li>
     <li><strong>About</strong> &mdash; opens the About dialog (also reachable from
         the program icon on the far left), showing the program version(s),
-        copyright, the installed <code>fetchconfig.pl</code> version, the run mode
+        copyright, the installed <code>fetchconfig.pl</code> version, the applied
+        database schema version, the run mode
         (<strong>CGI</strong> or <strong>FastCGI</strong>) and the licence.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
@@ -907,6 +1080,28 @@
   (Opera, Brave, Vivaldi&hellip;) and Safari 10.1 or newer. Static pages &mdash; logging
   in, viewing devices and backups &mdash; work without JavaScript, but the
   filter, sorting and the device-table editor will not.</p>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-faq">
+  <h2>Common questions</h2>
+  <ul>
+    <li><strong>I don't see the Tools or Setup menu.</strong> Those are shown only
+        to administrators (Tools) and to users with the device-table edit right
+        (Setup devices). Ask an administrator if you need access.</li>
+    <li><strong>Why is a password shown as <code>\__unchanged__/</code>?</strong>
+        Stored credentials are masked on screen. Leave the masked value to keep the
+        password; type a new one to change it.</li>
+    <li><strong>My save says &ldquo;the device table changed on disk&rdquo;.</strong>
+        Someone else, or a scheduled job, wrote the table while you were editing, so
+        nothing was saved. Reload the editor and redo your change &mdash; this guard
+        stops two people overwriting each other.</li>
+    <li><strong>A change I just made isn't showing.</strong> Your browser cached the
+        page's script; hard-reload with <kbd>Ctrl</kbd>+<kbd>F5</kbd>.</li>
+    <li><strong>The dashboard is empty, or a page looks unstyled.</strong> A
+        server-side file or the backup history may be missing; tell your
+        administrator (the installation guide has the troubleshooting steps).</li>
+  </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
 

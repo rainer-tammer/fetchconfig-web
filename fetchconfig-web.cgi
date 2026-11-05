@@ -92,12 +92,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.12.27';
+use constant APP_VERSION => '2.14.0';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.12.27';
+use constant APP_VERSION_INTERNAL => '2.14.0';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -105,7 +105,7 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.77';
+use constant MIN_FETCHCONFIG_VERSION => '9.78';
 
 # --- Help menu "additional help" scan (see help_scan_dir / help_extract_title) ---
 # Each of the two help subdirectories (fetchconfig/, fetchconfig-web/) is
@@ -1435,6 +1435,8 @@ my %STATE_CHANGING = map { $_ => 1 } qw(
   delete_debug
   delete_all_debug
   dashboard_cleanup_delete
+  rename_device_do
+  replay_db_change
 );
 
 ################################################################################
@@ -1529,6 +1531,16 @@ sub main {
             show_compare($user);
         } elsif ($action eq 'sidebyside') {
             show_side_by_side($user);
+        } elsif ($action eq 'compare_devices') {
+            show_compare_devices($user);
+        } elsif ($action eq 'compare_device_versions') {
+            compare_device_versions_json($user);
+        } elsif ($action eq 'rename_device_id') {
+            show_rename_device_id($user);
+        } elsif ($action eq 'rename_device_do') {
+            do_rename_device($user);
+        } elsif ($action eq 'replay_db_change') {
+            do_replay_db_change($user);
         } elsif ($action eq 'backup_now') {
             show_backup_now($user);
         } elsif ($action eq 'user') {
@@ -1756,7 +1768,9 @@ sub main {
             download_latest_config($user, scalar $cgi->param('dev'));
         } elsif ($action eq 'config_raw') {
             serve_config_raw($user, scalar $cgi->param('dev'), scalar $cgi->param('idx'));
-        } else {
+        } elsif ($action eq '') {
+            # No action: the post-login home (device list), or the implicit
+            # ?dev=...&idx=... backup-view link form used throughout the app.
             my $dev = $cgi->param('dev');
             my $idx = $cgi->param('idx');
             if (defined $dev && $dev ne '' && defined $idx && $idx ne '') {
@@ -1766,6 +1780,15 @@ sub main {
             } else {
                 show_device_list($user);
             }
+        } else {
+            # A non-empty action with no handler: a genuine bad URL. Return 404
+            # rather than silently showing the device list. The action string is
+            # not echoed back (avoids reflected XSS and leaks nothing useful).
+            print std_header(-type => 'text/html', -charset => 'UTF-8',
+                             -status => '404 Not Found');
+            print page_head('Not available', $user);
+            print qq{<p class="error">Unknown or unsupported action.</p>\n};
+            print page_foot();
         }
     }
 }
@@ -6859,6 +6882,7 @@ sub debug_cut_marker {
 ################################################################################
 sub show_debug_log {
     my ($user) = @_;
+    my $render_t0 = [Time::HiRes::gettimeofday()];
     print std_header(-type => 'text/html', -charset => 'UTF-8');
 
     # Viewing needs the read_debug right (administrators have it implicitly).
@@ -6916,6 +6940,14 @@ sub show_debug_log {
 
     my $view = $cgi->param('view');
     $view = 'hex' unless defined $view && $view =~ /^(?:hex|plain|transcript)\z/;
+
+    # Direction / ssh filter -- applied SERVER-SIDE (the renderer omits the hidden
+    # lines) so a filtered view reloads as a smaller, fast page instead of freezing
+    # the browser reflowing a huge DOM. Defaults: both directions, ssh chatter hidden.
+    my $dir = $cgi->param('dir');
+    $dir = 'both' unless defined $dir && $dir =~ /^(?:both|tx|rx)\z/;
+    my $ssh = $cgi->param('ssh');
+    $ssh = 'hide' unless defined $ssh && $ssh =~ /^(?:hide|show)\z/;
 
     # Over the ceiling nothing is read at all -- the decision comes from the
     # lstat above, so an oversized file costs no I/O. Delete still works, and
@@ -6983,37 +7015,45 @@ sub show_debug_log {
     # View selector: a GET per view. Rendering all three into one page would
     # triple the markup for no benefit; the direction filter below is the one
     # that has to be instant, and it is pure CSS.
-    my $vurl = sub {
-        my ($v) = @_;
-        return esc(script_url() . '?action=view_debug&dev=' . CGI::escape($dev)
-                   . '&view=' . $v);
+    # Every toolbar control is a server-side link that reloads with the current
+    # view + dir + ssh, overriding one axis. Server-side filtering means a reload
+    # is a smaller, fast page (the old client-side CSS filter froze on big logs),
+    # and the links are <a class="seg-btn">, so the overlay spinner fires on click.
+    my $durl = sub {
+        my (%o) = @_;
+        my $v = exists $o{view} ? $o{view} : $view;
+        my $d = exists $o{dir}  ? $o{dir}  : $dir;
+        my $s = exists $o{ssh}  ? $o{ssh}  : $ssh;
+        my @q = ('action=view_debug', 'dev=' . CGI::escape($dev), 'view=' . $v);
+        push @q, 'dir=' . $d if $d ne 'both';    # both is the default
+        push @q, 'ssh=' . $s if $s ne 'hide';    # hide is the default
+        return esc(script_url() . '?' . join('&', @q));
     };
-    my $vbtn = sub {
-        my ($v, $label) = @_;
-        my $on = ($view eq $v) ? ' on' : '';
-        return qq{<a class="seg-btn$on" href="} . $vurl->($v) . qq{">} . esc($label) . qq{</a>};
+    my $seg_link = sub {
+        my ($href, $on, $label) = @_;
+        return qq{<a class="seg-btn} . ($on ? ' on' : '') . qq{" href="$href">} . esc($label) . qq{</a>};
     };
 
     print qq{<div class="dbg-bar">\n};
     if ($view ne 'plain') {
         print qq{<span class="seg" id="dbg-dir">}
-            . qq{<button type="button" class="seg-btn on" data-dir="both">Both</button>}
-            . qq{<button type="button" class="seg-btn" data-dir="tx">Sent only</button>}
-            . qq{<button type="button" class="seg-btn" data-dir="rx">Received only</button>}
+            . $seg_link->($durl->(dir=>'both'), $dir eq 'both', 'Both')
+            . $seg_link->($durl->(dir=>'tx'),   $dir eq 'tx',   'Sent only')
+            . $seg_link->($durl->(dir=>'rx'),   $dir eq 'rx',   'Received only')
             . qq{</span>\n};
         # SSH client chatter is hidden by DEFAULT: on an ssh device it is the
         # bulk of the file and none of it is device traffic. The "#" markers
         # stay visible either way, so the structure of the session is still
         # readable with it off.
         print qq{<span class="seg" id="dbg-ssh">}
-            . qq{<button type="button" class="seg-btn on" data-ssh="hide">SSH log hidden</button>}
-            . qq{<button type="button" class="seg-btn" data-ssh="show">SSH log shown</button>}
+            . $seg_link->($durl->(ssh=>'hide'), $ssh eq 'hide', 'SSH log hidden')
+            . $seg_link->($durl->(ssh=>'show'), $ssh eq 'show', 'SSH log shown')
             . qq{</span>\n};
     }
     print qq{<span class="seg">}
-        . $vbtn->('hex',        'Hex')
-        . $vbtn->('plain',      'Hex, no highlighting')
-        . $vbtn->('transcript', 'Transcript')
+        . $seg_link->($durl->(view=>'hex'),        $view eq 'hex',        'Hex')
+        . $seg_link->($durl->(view=>'plain'),      $view eq 'plain',      'Hex, no highlighting')
+        . $seg_link->($durl->(view=>'transcript'), $view eq 'transcript', 'Transcript')
         . qq{</span>\n};
     print qq{<span class="dbg-spacer"></span>\n};
     print qq{<span class="dbg-meta">} . esc(human_size($size)) . qq{ &middot; }
@@ -7022,12 +7062,12 @@ sub show_debug_log {
     # for a read_debug holder: nothing to POST, nothing to explain away.
     if ($is_admin) {
         if ($size > DEBUG_MAX_BYTES) {
-            print qq{<button type="button" class="btn btn-small btn-gray" disabled }
+            print qq{<button type="button" class="btn btn-gray" disabled }
                 . qq{title="} . esc(human_size($size) . ' - over the '
                                     . _dbg_mb(DEBUG_MAX_BYTES) . ' limit')
                 . qq{">Download</button>\n};
         } else {
-            print qq{<a class="btn btn-small" href="}
+            print qq{<a class="btn" href="}
                 . esc(script_url() . '?action=download_debug&dev=' . CGI::escape($dev))
                 . qq{">Download</a>\n};
         }
@@ -7038,10 +7078,14 @@ sub show_debug_log {
             . qq{<input type="hidden" name="dev" value="} . esc($dev) . qq{">}
             . qq{<input type="hidden" name="from" value="} . esc($from eq 'tool' ? 'tool' : 'status') . qq{">}
             . csrf_field()
-            . qq{<button type="submit" class="btn btn-small btn-danger">Delete</button>}
+            . qq{<button type="submit" class="btn btn-danger">Delete</button>}
             . qq{</form>\n};
     }
     print qq{</div>\n};
+    # Overlay shown while a view switch is applied (the client-side Sent/Received/
+    # SSH filters reflow a large DOM; the Hex/Transcript links reload the page).
+    print qq{<div class="backup-overlay" id="dbg-spinner" style="display:none">}
+        . qq{<div class="backup-overlay-box"><div class="backup-spinner"></div>Updating&hellip;</div></div>\n};
 
     print debug_size_note() if $size > DEBUG_VIEW_FULL_MAX;
 
@@ -7064,12 +7108,13 @@ sub show_debug_log {
     }
     if ($cut) {
         my ($head, $tail) = @$raw;
-        $body = $render->($head) . debug_cut_marker($view) . $render->($tail);
+        $body = $render->($head, $dir, $ssh) . debug_cut_marker($view) . $render->($tail, $dir, $ssh);
     } else {
-        $body = $render->($raw);
+        $body = $render->($raw, $dir, $ssh);
     }
 
-    $cls .= ' no-ssh' if $view ne 'plain';   # default: ssh chatter hidden
+    # No client-side filter classes: the renderer has already omitted the hidden
+    # lines, so the <pre> carries only what is shown.
     print qq{<div class="config-wrap">\n};
     print copy_button_html(0);
     print qq{<pre class="$cls" id="config-content">$body</pre>\n};
@@ -7087,18 +7132,26 @@ sub show_debug_log {
     print qq{</div>\n};   # .tool-section
 
     print copy_button_script(0, undef, undef);
-    print debug_filter_script() if $view ne 'plain';
+    print debug_filter_script();
     print top_bottom_nav();
+    if ($SHOW_RENDER_TIME) {
+        my $secs = Time::HiRes::tv_interval($render_t0);
+        my $str  = $secs < 1 ? sprintf('%dms', int($secs * 1000 + 0.5))
+                             : sprintf('%.2fs', $secs);
+        print qq{<p class="render-time">Rendered in } . esc($str) . qq{</p>\n};
+    }
     print page_foot();
 }
 
 ################################################################################
 # debug_filter_script
 #
-# The Sent/Received filter. Pure class toggle on the <pre>; the CSS hides the
-# other direction. It works because highlight_debug_log() puts each line's
-# newline INSIDE its span, so display:none removes the whole line rather than
-# leaving an empty row behind.
+# Spinner wiring for the debug-log viewer. Direction / ssh / view switching is
+# done SERVER-SIDE now (the renderer omits hidden lines), so every toolbar
+# control is an <a class="seg-btn"> link that reloads the page. This shows the
+# overlay on click; the navigation then replaces the page. (The old client-side
+# CSS filter was removed: hiding thousands of spans reflowed the whole DOM and
+# froze the browser on large logs -- slower than just re-rendering server-side.)
 #
 # Parameters: none
 ################################################################################
@@ -7106,32 +7159,12 @@ sub debug_filter_script {
     return <<'JS';
 <script>
 (function () {
-  var pre = document.getElementById('config-content');
-  if (!pre) return;
-  var state = { dir: 'both', ssh: 'hide' };   // must match the pressed buttons
-
-  function apply() {
-    pre.className = 'config hl'
-      + (state.dir === 'tx' ? ' only-tx' : state.dir === 'rx' ? ' only-rx' : '')
-      + (state.ssh === 'hide' ? ' no-ssh' : '');
+  var ov = document.getElementById('dbg-spinner');
+  if (!ov) return;
+  var links = document.querySelectorAll('a.seg-btn');
+  for (var i = 0; i < links.length; i++) {
+    links[i].addEventListener('click', function () { ov.style.display = 'flex'; });
   }
-  function wire(id, key) {
-    var seg = document.getElementById(id);
-    if (!seg) return;
-    seg.addEventListener('click', function (e) {
-      var b = e.target.closest ? e.target.closest('button') : null;
-      if (!b) return;
-      var v = b.getAttribute('data-' + key);
-      if (!v) return;
-      var all = seg.querySelectorAll('button');
-      for (var i = 0; i < all.length; i++) { all[i].className = 'seg-btn'; }
-      b.className = 'seg-btn on';
-      state[key] = v;
-      apply();
-    });
-  }
-  wire('dbg-dir', 'dir');
-  wire('dbg-ssh', 'ssh');
 })();
 </script>
 JS
@@ -9465,8 +9498,16 @@ sub _dbg_hex_line {
 #   $content   raw bytes of the .debug file
 ################################################################################
 sub highlight_debug_log {
-    my ($content) = @_;
+    my ($content, $dir, $ssh) = @_;
     $content = '' unless defined $content;
+    # Server-side direction / ssh filtering (replaces the old client-side CSS
+    # filter, which reflowed the whole DOM and froze on large logs). Defaults show
+    # everything, so callers that don't filter (e.g. highlight_config) are unchanged.
+    $dir = 'both' unless defined $dir && ($dir eq 'tx' || $dir eq 'rx');
+    $ssh = 'show' unless defined $ssh && $ssh eq 'hide';
+    my $skip_tx  = ($dir eq 'rx');
+    my $skip_rx  = ($dir eq 'tx');
+    my $skip_ssh = ($ssh eq 'hide');
     $content =~ s/\n\z//;            # re-added per line below
     my @out;
     my $prev_dir  = '';   # last hex direction, for turn detection
@@ -9496,6 +9537,7 @@ sub highlight_debug_log {
             # means a direction change is never seen and no turn rule is ever
             # drawn.
             if ($line =~ /^\s*\z/ && $block_dir ne '') {
+                next if ($block_dir eq '>' ? $skip_tx : $skip_rx);
                 push @out, qq{<span class="dbg-l }
                          . ($block_dir eq '>' ? 'dbg-tx' : 'dbg-rx')
                          . qq{ dbg-blank">\n</span>};
@@ -9528,6 +9570,7 @@ sub highlight_debug_log {
                 $cls  = ' dbg-ssh';
                 $body = _dbg_esc($line);
             }
+            next if $skip_ssh && $cls eq ' dbg-ssh';
             push @out, qq{<span class="dbg-l$cls">$body\n</span>};
             next;
         }
@@ -9545,6 +9588,7 @@ sub highlight_debug_log {
         $prev_dir  = $h->{dir};
         $block_dir = $h->{dir};
 
+        next if ($h->{dir} eq '>' ? $skip_tx : $skip_rx);
         push @out, qq{<span class="dbg-l $dircls$turn">}
                  . qq{<span class="dbg-off">} . esc($h->{head}) . qq{</span> }
                  . qq{<span class="dbg-hex">$hexh</span>}
@@ -9570,8 +9614,13 @@ sub highlight_debug_log {
 #   $content   raw bytes of the .debug file
 ################################################################################
 sub debug_log_transcript {
-    my ($content) = @_;
+    my ($content, $dir, $ssh) = @_;
     $content = '' unless defined $content;
+    $dir = 'both' unless defined $dir && ($dir eq 'tx' || $dir eq 'rx');
+    $ssh = 'show' unless defined $ssh && $ssh eq 'hide';
+    my $skip_tx  = ($dir eq 'rx');
+    my $skip_rx  = ($dir eq 'tx');
+    my $skip_ssh = ($ssh eq 'hide');
     my @out;
     my @buf;
     my $cur = '';
@@ -9580,6 +9629,7 @@ sub debug_log_transcript {
         return unless $cur ne '' && @buf;
         my $raw = join('', @buf);
         @buf = ();
+        return if ($cur eq '>' ? $skip_tx : $skip_rx);
         # Drop IAC negotiation (0xff + 2 bytes), keep printable ASCII, turn
         # LF into a line break and discard the rest of the control bytes.
         my $txt = '';
@@ -9613,6 +9663,7 @@ sub debug_log_transcript {
             # dropped, so the same Show/Hide control governs both views.
             my $cls = ($line =~ /^#\s*\[secret/) ? 'dbg-sec'
                     : ($line =~ /^\s*#/)         ? 'dbg-hdr' : 'dbg-ssh';
+            next if $skip_ssh && $cls eq 'dbg-ssh';
             push @out, qq{<span class="dbg-l $cls">} . _dbg_esc($line) . qq{\n</span>};
             next;
         }
@@ -10800,9 +10851,11 @@ sub normalize_config_ws {
 #   $left_label
 #   $right_label
 #   $unmask
+#   $only_diff  (optional): when true, unchanged rows are not listed; each run of
+#               them collapses to one muted "... N unchanged lines ..." separator.
 ################################################################################
 sub render_side_by_side {
-    my ($left_text, $right_text, $left_label, $right_label, $unmask) = @_;
+    my ($left_text, $right_text, $left_label, $right_label, $unmask, $only_diff) = @_;
     # $unmask (optional): when true, the config line text is HTML-escaped
     # but NOT secret-masked -- used by the admin-only Tools "compare configs"
     # feature. Everywhere else (the device-page side-by-side) it stays masked.
@@ -10829,8 +10882,21 @@ sub render_side_by_side {
            . qq{<th colspan="2">} . esc($right_label) . qq{</th></tr>\n};
 
     my ($ln_l, $ln_r) = (0, 0);
+    my $skipped = 0;
+    my $flush_skip = sub {
+        return unless $only_diff && $skipped;
+        $html .= qq{<tr class="sbs-skip"><td colspan="4" style="text-align:center;}
+               . qq{color:var(--color-faint);background:#f6f8fa;font-size:0.8em;padding:0.15em 0.6em">}
+               . qq{&middot;&middot;&middot; $skipped unchanged line} . ($skipped == 1 ? '' : 's')
+               . qq{ &middot;&middot;&middot;</td></tr>\n};
+        $skipped = 0;
+    };
     for my $row (@sd) {
         my ($flag, $l, $r) = @$row;
+        # "Only differences": don't list unchanged rows; keep the line counters
+        # accurate and collapse the run into a single separator before the next change.
+        if ($only_diff && $flag eq 'u') { $ln_l++; $ln_r++; $skipped++; next; }
+        $flush_skip->();
         my ($rowcls, $lcls, $rcls, $lnum, $rnum, $ltxt, $rtxt);
         if ($flag eq 'u') {
             $ln_l++; $ln_r++;
@@ -10858,6 +10924,914 @@ sub render_side_by_side {
     }
     $html .= qq{</table>\n</div>\n};
     return $html;
+}
+
+################################################################################
+# Compare devices (Devices -> Compare devices)
+#
+# Side-by-side comparison of the stored configurations of TWO ARBITRARY devices
+# (any models/extractors -- no device-type guard), each at a chosen backup
+# version (default: latest). Reuses render_side_by_side() (Algorithm::Diff::sdiff
+# -> aligned table, secrets masked) and get_backup_content(). Access is per
+# device: read_device_ids() limits the pickers to the user's sites, and
+# device_accessible() guards the result, the download and the AJAX version lookup.
+#
+# Parameters:
+#   $user
+################################################################################
+sub show_compare_devices {
+    my ($user) = @_;
+
+    my $devA = $cgi->param('devA') // '';
+    my $devB = $cgi->param('devB') // '';
+    my $verA = $cgi->param('verA'); $verA = 'latest' unless defined $verA && $verA ne '';
+    my $verB = $cgi->param('verB'); $verB = 'latest' unless defined $verB && $verB ne '';
+    my $ignore_ws = (($cgi->param('ignore_ws') // '') eq '1') ? 1 : 0;
+    my $only_diff = (($cgi->param('only_diff') // '') eq '1') ? 1 : 0;
+
+    # Plain-text download of the current comparison -- must run before the HTML
+    # header is emitted (it sends its own text/plain attachment header). The
+    # download is always the full diff; only_diff is a view-only toggle.
+    if (($cgi->param('format') // '') eq 'txt' && valid_id($devA) && valid_id($devB)) {
+        return compare_devices_download($user, $devA, $verA, $devB, $verB, $ignore_ws);
+    }
+
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Compare devices', $user, 'full');
+
+    my ($devices, $err) = read_device_ids($user);
+    if ($err) {
+        print qq{<div class="tool-section"><h2 class="tool-section-title">Compare devices</h2>\n};
+        print qq{<p class="error">} . esc($err) . qq{</p>\n</div>\n};
+        print page_foot();
+        return;
+    }
+
+    my $has_result = (valid_id($devA) && valid_id($devB)) ? 1 : 0;
+    # Fold the selection form away once a comparison is shown (keep it open on the
+    # first visit, or when the selection is incomplete, so the pickers are visible).
+    print compare_devices_form_html($user, $devices, $devA, $verA, $devB, $verB, $ignore_ws, $only_diff, $has_result);
+
+    if ($has_result) {
+        print compare_devices_result_html($user, $devA, $verA, $devB, $verB, $ignore_ws, $only_diff);
+    }
+
+    print top_bottom_nav();
+    print page_foot();
+}
+
+################################################################################
+# compare_devices_form_html -- the selection screen (step 1).
+#
+# Parameters:
+#   $user, $devices (arrayref from read_device_ids), $devA, $verA, $devB, $verB,
+#   $ignore_ws
+################################################################################
+sub compare_devices_form_html {
+    my ($user, $devices, $devA, $verA, $devB, $verB, $ignore_ws, $only_diff, $has_result) = @_;
+
+    my %sites; $sites{ $_->{site} }++ for grep { defined $_->{site} && $_->{site} ne '' } @$devices;
+    my $sdbh = db_connect();
+    my $site_desc = $sdbh ? site_name_map($sdbh) : {};
+    $sdbh->disconnect if $sdbh;
+
+    # Device data for the client (id, model, site): drives the datalist, the
+    # per-side site filter and the model/site hint. json_string keeps it ASCII.
+    my @js;
+    for my $d (@$devices) {
+        push @js, '{"id":' . json_string($d->{id})
+                . ',"model":' . json_string(defined $d->{model} ? $d->{model} : '')
+                . ',"site":'  . json_string(defined $d->{site}  ? $d->{site}  : '') . '}';
+    }
+    my $devices_js = '[' . join(',', @js) . ']';
+
+    my $site_options = qq{<option value="">All sites</option>};
+    for my $sc (sort keys %sites) {
+        my $d = $site_desc->{$sc};
+        my $label = (defined $d && $d ne '' && $d ne $sc) ? "$sc / $d" : $sc;
+        $site_options .= qq{<option value="} . esc($sc) . qq{">} . esc($label) . qq{</option>};
+    }
+
+    my $side = sub {
+        my ($k, $dev, $ver) = @_;              # $k = 'a' or 'b'
+        my $K = uc $k;
+        my $subtxt = $k eq 'a' ? 'left-hand side' : 'right-hand side';
+        return qq{
+      <div class="cmp-side">
+        <h3>Device&nbsp;$K</h3>
+        <p class="cmp-sub">$subtxt</p>
+        <div class="cmp-field">
+          <label for="$k-site">Site filter (optional)</label>
+          <select id="$k-site" class="cmp-site">$site_options</select>
+        </div>
+        <div class="cmp-field">
+          <label for="$k-dev">Device</label>
+          <input id="$k-dev" name="dev$K" type="text" list="$k-list" class="cmp-dev-in"
+                 value="} . esc($dev) . qq{" placeholder="Type to filter&hellip;" autocomplete="off">
+          <datalist id="$k-list"></datalist>
+          <p class="hint" id="$k-hint"></p>
+        </div>
+        <div class="cmp-field">
+          <label for="$k-ver">Backup version</label>
+          <select id="$k-ver" name="ver$K" class="cmp-ver" data-sel="} . esc($ver) . qq{">
+            <option value="latest">Latest</option>
+          </select>
+        </div>
+      </div>};
+    };
+
+    my $wschk = $ignore_ws ? ' checked' : '';
+    my $odchk = $only_diff ? ' checked' : '';
+    # Once a result is shown, fold the selection form into a collapsed <details>
+    # (click the title to reopen and change the selection); open it otherwise.
+    my $open = $has_result ? '' : ' open';
+    # Drop the box's bottom padding only while collapsed, so the folded bar has no
+    # empty strip under it; reopening (client-side) restores it. Scoped inline rule,
+    # so no external-CSS change is needed.
+    my $html = qq{<style>details#cmp-devices-section:not([open]){padding-bottom:0}</style>\n};
+    $html .= qq{<details class="tool-section" id="cmp-devices-section"$open>\n};
+    $html .= qq{<summary class="tool-section-title">Compare devices</summary>\n};
+    $html .= qq{<p style="margin:0.2em 0 1em;color:var(--color-muted)">Pick any two devices and }
+           . qq{compare their stored configurations side by side. The <strong>latest</strong> backup of each }
+           . qq{is used by default; pick an older version for a point-in-time comparison. Secrets are masked, }
+           . qq{exactly as in the normal config view.</p>\n};
+    $html .= qq{<form method="get" action="} . esc(script_url()) . qq{" id="cmp-form">\n};
+    $html .= qq{<input type="hidden" name="action" value="compare_devices">\n};
+    $html .= qq{<div class="cmp-grid">\n};
+    $html .= $side->('a', $devA, $verA);
+    $html .= qq{\n<div class="cmp-swap"><button type="button" id="cmp-swap" title="Swap A and B">&#8646;</button></div>\n};
+    $html .= $side->('b', $devB, $verB);
+    $html .= qq{\n</div>\n};                    # .cmp-grid
+    $html .= qq{<div class="cmp-go"><button type="submit" class="btn">Compare &rarr;</button>\n};
+    $html .= qq{<label class="chk"><input type="checkbox" name="only_diff" value="1"$odchk> Only differences</label>\n};
+    $html .= qq{<label class="chk"><input type="checkbox" name="ignore_ws" value="1"$wschk> Ignore whitespace</label></div>\n};
+    $html .= qq{</form>\n};
+    $html .= qq{</details>\n};                    # .tool-section (foldable)
+    $html .= compare_devices_js($devices_js);
+    return $html;
+}
+
+################################################################################
+# compare_devices_js -- client behaviour for the selection form: the per-side
+# site filter rebuilds the device datalist, choosing a device loads its backup
+# versions over AJAX (action=compare_device_versions) and shows a model/site
+# hint, and the swap button exchanges the two sides.
+#
+# Parameters:
+#   $devices_js (a JSON array literal of {id,model,site})
+################################################################################
+sub compare_devices_js {
+    my ($devices_js) = @_;
+    my $verurl = json_string(script_url() . '?action=compare_device_versions&dev=');
+    return <<"JS";
+<script>
+(function(){
+  var DEV = $devices_js;
+  var VERURL = $verurl;
+  function byId(x){ return document.getElementById(x); }
+  function fillList(side){
+    var site = byId(side+'-site').value, dl = byId(side+'-list'), html='';
+    for (var i=0;i<DEV.length;i++){
+      if (site==='' || DEV[i].site===site){
+        html += '<option value="'+String(DEV[i].id).replace(/"/g,'&quot;')+'">';
+      }
+    }
+    dl.innerHTML = html;
+  }
+  function hint(side){
+    var v = byId(side+'-dev').value, h = byId(side+'-hint'); h.textContent='';
+    for (var i=0;i<DEV.length;i++){
+      if (DEV[i].id===v){ h.textContent=(DEV[i].model||'?')+(DEV[i].site?' \\u00b7 site '+DEV[i].site:''); return; }
+    }
+  }
+  function loadVersions(side){
+    var dev = byId(side+'-dev').value, sel = byId(side+'-ver');
+    var want = sel.getAttribute('data-sel') || 'latest';
+    sel.innerHTML = '<option value="latest">Latest</option>';
+    if (!dev) return;
+    var ok=false; for (var i=0;i<DEV.length;i++){ if(DEV[i].id===dev){ ok=true; break; } }
+    if (!ok) return;
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', VERURL + encodeURIComponent(dev), true);
+    xhr.onreadystatechange = function(){
+      if (xhr.readyState!==4 || xhr.status!==200) return;
+      var data; try { data = JSON.parse(xhr.responseText); } catch(e){ return; }
+      var vs = data.versions || [], opts='';
+      for (var i=0;i<vs.length;i++){
+        var lbl = vs[i].label + (i===0?' (latest)':'') + (i===vs.length-1 && vs.length>1?' (oldest kept)':'');
+        opts += '<option value="'+vs[i].idx+'">'+String(lbl).replace(/</g,'&lt;')+'</option>';
+      }
+      sel.innerHTML = '<option value="latest">Latest'+(vs.length?' \\u2014 '+String(vs[0].label).replace(/</g,'&lt;'):'')+'</option>' + opts;
+      sel.value = want; if (sel.selectedIndex < 0) sel.value='latest';
+    };
+    xhr.send();
+  }
+  ['a','b'].forEach(function(side){
+    fillList(side); hint(side); loadVersions(side);
+    byId(side+'-site').addEventListener('change', function(){ fillList(side); });
+    var di = byId(side+'-dev');
+    di.addEventListener('change', function(){ hint(side); byId(side+'-ver').setAttribute('data-sel','latest'); loadVersions(side); });
+    di.addEventListener('input', function(){ hint(side); });
+  });
+  var sw = byId('cmp-swap');
+  if (sw) sw.addEventListener('click', function(){
+    var ad=byId('a-dev'),bd=byId('b-dev'),av=byId('a-ver'),bv=byId('b-ver'),asf=byId('a-site'),bsf=byId('b-site'),t;
+    t=ad.value; ad.value=bd.value; bd.value=t;
+    t=asf.value; asf.value=bsf.value; bsf.value=t;
+    av.setAttribute('data-sel', bv.value); bv.setAttribute('data-sel', av.value);
+    fillList('a'); fillList('b'); hint('a'); hint('b'); loadVersions('a'); loadVersions('b');
+  });
+})();
+</script>
+JS
+}
+
+################################################################################
+# compare_devices_result_html -- the side-by-side result (step 2).
+#
+# Parameters:
+#   $user, $devA, $verA, $devB, $verB, $ignore_ws, $only_diff
+################################################################################
+sub compare_devices_result_html {
+    my ($user, $devA, $verA, $devB, $verB, $ignore_ws, $only_diff) = @_;
+    my $out = qq{<div class="tool-section" id="cmp-result-section">\n};
+    $out .= qq{<h2 class="tool-section-title">Compare devices &mdash; result</h2>\n};
+
+    for my $d ($devA, $devB) {
+        return $out . qq{<p class="error">Invalid device id.</p>\n</div>\n} unless valid_id($d);
+        return $out . qq{<p class="error">That device is not available to you.</p>\n</div>\n}
+            unless device_accessible($user, $d);
+    }
+
+    my ($idxA, $tsA, $eA) = resolve_compare_version($devA, $verA);
+    my ($idxB, $tsB, $eB) = resolve_compare_version($devB, $verB);
+    return $out . qq{<p class="error">} . esc($eA || $eB) . qq{</p>\n</div>\n} if $eA || $eB;
+
+    my ($cA, $errA) = get_backup_content($devA, $idxA);
+    my ($cB, $errB) = get_backup_content($devB, $idxB);
+    return $out . qq{<p class="error">} . esc($errA || $errB) . qq{</p>\n</div>\n} if $errA || $errB;
+
+    my ($lA, $lB) = ($cA, $cB);
+    if ($ignore_ws) { $lA = normalize_config_ws($lA); $lB = normalize_config_ws($lB); }
+
+    $out .= compare_devices_header_html($devA, $tsA, $devB, $tsB);
+
+    my @la = split /\n/, (defined $lA ? $lA : ''), -1; pop @la if @la && $la[-1] eq '';
+    my @lb = split /\n/, (defined $lB ? $lB : ''), -1; pop @lb if @lb && $lb[-1] eq '';
+    my $ndiff = grep { $_->[0] ne 'u' } sdiff(\@la, \@lb);
+
+    $out .= compare_devices_toolbar_html($devA, $verA, $devB, $verB, $ignore_ws, $ndiff, $only_diff);
+
+    my $labelA = "$devA (backup " . ($tsA || "#$idxA") . ")";
+    my $labelB = "$devB (backup " . ($tsB || "#$idxB") . ")";
+    $out .= render_side_by_side($lA, $lB, $labelA, $labelB, 0, $only_diff);
+    $out .= qq{</div>\n};
+    return $out;
+}
+
+################################################################################
+# compare_devices_header_html / compare_devices_toolbar_html / compare_devices_url
+################################################################################
+sub compare_devices_header_html {
+    my ($devA, $tsA, $devB, $tsB) = @_;
+    my $one = sub {
+        my ($dev, $ts) = @_;
+        return qq{<div class="cmp-dev"><span class="id">} . esc($dev) . qq{</span><br>}
+             . qq{<span class="meta">backup } . esc($ts || 'latest') . qq{</span></div>};
+    };
+    return qq{<div class="cmp-result-head">} . $one->($devA, $tsA)
+         . qq{<span class="cmp-vs">vs</span>} . $one->($devB, $tsB) . qq{</div>\n};
+}
+
+sub compare_devices_toolbar_html {
+    my ($devA, $verA, $devB, $verB, $ignore_ws, $ndiff, $only_diff) = @_;
+    my $badge = $ndiff == 0
+        ? qq{<span class="dash-badge dash-badge-fresh">identical</span>}
+        : qq{<span class="dash-badge dash-badge-stale">$ndiff difference} . ($ndiff == 1 ? '' : 's') . qq{</span>};
+
+    # Two segmented toggles (same look as the debug-log viewer's seg buttons), each
+    # a pair of links that reload with the flag set/cleared, keeping the other flags.
+    my $base = sub { (devA=>$devA, verA=>$verA, devB=>$devB, verB=>$verB,
+                      ignore_ws=>$ignore_ws, only_diff=>$only_diff, @_) };
+    my $seg = sub {
+        my ($on_now, $off_url, $on_url, $off_label, $on_label) = @_;
+        my $o = $on_now ? ' on' : '';
+        my $f = $on_now ? '' : ' on';
+        return qq{<span class="seg">}
+             . qq{<a class="seg-btn cmp-reload$f" href="} . esc($off_url) . qq{">$off_label</a>}
+             . qq{<a class="seg-btn cmp-reload$o" href="} . esc($on_url)  . qq{">$on_label</a>}
+             . qq{</span>};
+    };
+    my $diff_seg = $seg->($only_diff,
+        compare_devices_url($base->(only_diff=>0)),
+        compare_devices_url($base->(only_diff=>1)),
+        'All lines', 'Only differences');
+    my $ws_seg = $seg->($ignore_ws,
+        compare_devices_url($base->(ignore_ws=>0)),
+        compare_devices_url($base->(ignore_ws=>1)),
+        'Keep whitespace', 'Ignore whitespace');
+
+    my $swap = esc(compare_devices_url($base->(devA=>$devB, verA=>$verB, devB=>$devA, verB=>$verA)));
+    my $dl   = esc(compare_devices_url(devA=>$devA, verA=>$verA, devB=>$devB, verB=>$verB, ignore_ws=>$ignore_ws, format=>'txt'));
+    my $new  = esc(script_url() . '?action=compare_devices');
+
+    # Reuse the viewer-toolbar (.dbg-bar) and the Backup-Now spinner overlay styles.
+    # Any .cmp-reload link (the toggles, Swap, New comparison) shows the overlay on
+    # click, since each reloads the page; Download diff is a file download, so it
+    # does not get the class and shows no overlay. The handler is a single delegated
+    # listener (kept in a heredoc so its JS braces can't confuse Perl's qq{}).
+    my $spinner_js = <<'JS';
+<script>
+document.addEventListener('click', function (e) {
+  var a = e.target.closest ? e.target.closest('.cmp-reload') : null;
+  if (!a) return;
+  var o = document.getElementById('cmp-spinner');
+  if (o) o.style.display = 'flex';
+});
+</script>
+JS
+    return qq{<div class="dbg-bar">$badge }
+        . $diff_seg . $ws_seg
+        . qq{<span class="dbg-spacer"></span>}
+        . qq{<a class="btn cmp-reload" href="$swap">&#8646; Swap</a> }
+        . qq{<a class="btn" href="$dl">Download diff</a> }
+        . qq{<a class="btn cmp-reload" href="$new">New comparison</a>}
+        . qq{</div>\n}
+        . qq{<div class="backup-overlay" id="cmp-spinner" style="display:none">}
+        . qq{<div class="backup-overlay-box"><div class="backup-spinner"></div>Reloading&hellip;</div></div>\n}
+        . $spinner_js;
+}
+
+sub compare_devices_url {
+    my (%p) = @_;
+    my @q = ('action=compare_devices');
+    push @q, 'devA=' . CGI::escape($p{devA}) if defined $p{devA} && $p{devA} ne '';
+    push @q, 'verA=' . CGI::escape($p{verA}) if defined $p{verA} && $p{verA} ne '' && $p{verA} ne 'latest';
+    push @q, 'devB=' . CGI::escape($p{devB}) if defined $p{devB} && $p{devB} ne '';
+    push @q, 'verB=' . CGI::escape($p{verB}) if defined $p{verB} && $p{verB} ne '' && $p{verB} ne 'latest';
+    push @q, 'ignore_ws=1' if $p{ignore_ws};
+    push @q, 'only_diff=1' if $p{only_diff};
+    push @q, 'format=txt'  if $p{format};
+    return script_url() . '?' . join('&', @q);
+}
+
+################################################################################
+# resolve_compare_version -- map a device + requested version ('latest' or a
+# backup index) to (idx, timestamp, error). Latest = the smallest index, the
+# same "smaller index = newer" convention the per-device compare uses.
+#
+# Parameters:
+#   $dev, $ver
+################################################################################
+sub resolve_compare_version {
+    my ($dev, $ver) = @_;
+    my ($backups, $err) = list_backups($dev);
+    return (undef, undef, $err) if $err;
+    return (undef, undef, "No backups found for $dev.") unless @$backups;
+    my %byidx = map { $_->{idx} => $_ } @$backups;
+    my ($latest) = sort { $a->{idx} <=> $b->{idx} } @$backups;
+    my $b;
+    if (!defined $ver || $ver eq '' || $ver eq 'latest') { $b = $latest; }
+    elsif ($ver =~ /^\d+$/ && $byidx{$ver})              { $b = $byidx{$ver}; }
+    else { return (undef, undef, "Invalid backup version for $dev."); }
+    my $ts = join(' ', grep { defined $_ && $_ ne '' } ($b->{date}, $b->{time}));
+    return ($b->{idx}, $ts, undef);
+}
+
+################################################################################
+# compare_devices_download -- the current comparison as a text/plain unified
+# diff attachment (secrets masked). Access-checked like the HTML result.
+#
+# Parameters:
+#   $user, $devA, $verA, $devB, $verB, $ignore_ws
+################################################################################
+sub compare_devices_download {
+    my ($user, $devA, $verA, $devB, $verB, $ignore_ws) = @_;
+    for my $d ($devA, $devB) {
+        unless (valid_id($d) && device_accessible($user, $d)) {
+            print std_header(-type => 'text/plain', -status => '403 Forbidden');
+            print "Not available.\n";
+            return;
+        }
+    }
+    my ($idxA, $tsA, $eA) = resolve_compare_version($devA, $verA);
+    my ($idxB, $tsB, $eB) = resolve_compare_version($devB, $verB);
+    if ($eA || $eB) {
+        print std_header(-type => 'text/plain', -status => '500 Internal Server Error');
+        print(($eA || $eB), "\n");
+        return;
+    }
+    my ($cA, $errA) = get_backup_content($devA, $idxA);
+    my ($cB, $errB) = get_backup_content($devB, $idxB);
+    if ($errA || $errB) {
+        print std_header(-type => 'text/plain', -status => '500 Internal Server Error');
+        print(($errA || $errB), "\n");
+        return;
+    }
+    if ($ignore_ws) { $cA = normalize_config_ws($cA); $cB = normalize_config_ws($cB); }
+    $cA = mask_secrets($cA); $cB = mask_secrets($cB);
+    my @la = split /\n/, $cA, -1; pop @la if @la && $la[-1] eq '';
+    my @lb = split /\n/, $cB, -1; pop @lb if @lb && $lb[-1] eq '';
+    my $fn = "compare_${devA}_vs_${devB}.txt"; $fn =~ s/[^A-Za-z0-9._-]/_/g;
+    print std_header(-type => 'text/plain', -charset => 'UTF-8',
+                     '-Content_Disposition' => qq{attachment; filename="$fn"});
+    print "# Compare devices\n";
+    print "# A (left):  $devA  backup " . ($tsA || "#$idxA") . "\n";
+    print "# B (right): $devB  backup " . ($tsB || "#$idxB") . "\n";
+    print "# Secrets are masked.\n#\n";
+    for my $row (sdiff(\@la, \@lb)) {
+        my ($flag, $l, $r) = @$row;
+        if    ($flag eq 'u') { print "  $l\n"; }
+        elsif ($flag eq 'c') { print "- $l\n+ $r\n"; }
+        elsif ($flag eq '-') { print "- $l\n"; }
+        elsif ($flag eq '+') { print "+ $r\n"; }
+    }
+}
+
+################################################################################
+# compare_device_versions_json -- AJAX: a device's backup versions as JSON, for
+# the selection form's "Backup version" dropdown. Access-checked.
+#
+# Parameters:
+#   $user
+################################################################################
+sub compare_device_versions_json {
+    my ($user) = @_;
+    my $dev = $cgi->param('dev') // '';
+    unless (valid_id($dev)) {
+        print std_header(-type => 'application/json', -status => '400 Bad Request');
+        print '{"error":"bad id"}';
+        return;
+    }
+    unless (device_accessible($user, $dev)) {
+        print std_header(-type => 'application/json', -status => '403 Forbidden');
+        print '{"error":"forbidden"}';
+        return;
+    }
+    my ($backups, $err) = list_backups($dev);
+    if ($err) {
+        print std_header(-type => 'application/json', -status => '500 Internal Server Error');
+        print '{"error":' . json_string($err) . '}';
+        return;
+    }
+    my @sorted = sort { $a->{idx} <=> $b->{idx} } @$backups;   # newest (smallest idx) first
+    my @items;
+    for my $b (@sorted) {
+        my $label = join(' ', grep { defined $_ && $_ ne '' } ($b->{date}, $b->{time}));
+        $label = "#$b->{idx}" if $label eq '';
+        push @items, '{"idx":' . ($b->{idx}+0) . ',"label":' . json_string($label) . '}';
+    }
+    print std_header(-type => 'application/json', -charset => 'UTF-8');
+    print '{"dev":' . json_string($dev) . ',"versions":[' . join(',', @items) . ']}';
+}
+
+################################################################################
+# Rename device-id (Setup devices -> Rename device-id)
+#
+# A thin web front-end over the fetchconfig engine's `--rename-device-id` mode
+# (engine 9.78+). The engine does the real work -- it rewrites the device-table
+# line, moves the on-disk backup tree, and updates the history DB (dev_id in
+# backup_current/runs/versions) under its own table-file lock, with a journal and
+# the DB change carried on the statistics outbox. The web side only:
+#   - gates the feature on an installed engine >= 9.78,
+#   - offers a mandatory dry-run (-T) preview before the real rename,
+#   - drives the engine and shows its transcript, and
+#   - finishes the parts the engine never sees: the fetchconfig-web-owned
+#     device_notes row (keyed by device_id) and an audit-log entry.
+#
+# Access: admin / unrestricted (all-sites) device-table editors only -- a rename
+# moves the whole backup tree and rewrites history across sites.
+################################################################################
+
+# The engine version at which --rename-device-id exists.
+use constant RENAME_MIN_FETCHCONFIG_VERSION => '9.78';
+
+################################################################################
+# rename_feature_available
+#
+# True if the installed fetchconfig engine is new enough to offer the device-id
+# rename mode. Undetermined version -> not available (fail safe).
+#
+# Parameters: none
+################################################################################
+sub rename_feature_available {
+    my $installed = fetchconfig_version_cached();
+    return 0 unless defined $installed;
+    return version_cmp($installed, RENAME_MIN_FETCHCONFIG_VERSION) >= 0 ? 1 : 0;
+}
+
+################################################################################
+# user_may_rename_device
+#
+# Rename is allowed only for an unrestricted (all-sites) user who may edit the
+# device table -- i.e. an admin, or an all-sites editor. Takes an open $dbh.
+#
+# Parameters:
+#   $dbh
+#   $username
+################################################################################
+sub user_may_rename_device {
+    my ($dbh, $username) = @_;
+    return (user_may_edit_table($dbh, $username) && user_is_unrestricted($dbh, $username)) ? 1 : 0;
+}
+
+################################################################################
+# rename_all_device_ids
+#
+# The full set of device ids in the current table (no site filter), as a hashref
+# { id => 1 }, plus a sorted arrayref -- used for the picker and the pre-checks.
+#
+# Parameters: none
+################################################################################
+sub rename_all_device_ids {
+    my ($devices, $err) = read_device_ids(undef);
+    return (undef, undef, $err) if $err;
+    my %set = map { $_->{id} => 1 } @$devices;
+    my @sorted = sort { lc($a) cmp lc($b) } keys %set;
+    return (\%set, \@sorted, undef);
+}
+
+################################################################################
+# rename_transcript_html
+#
+# Render an engine run's captured stdout/stderr as a transcript block.
+#
+# Parameters:
+#   $out
+#   $err
+################################################################################
+sub rename_transcript_html {
+    my ($out, $err) = @_;
+    # Collapse fetchconfig's per-model "debug: registering model: ..." preamble
+    # into a two-line summary, exactly as Backup Now and the other transcript
+    # views do (display-only).
+    $out = collapse_model_registration($out) if defined $out;
+    $err = collapse_model_registration($err) if defined $err;
+    my $html = '';
+    if (defined $out && $out ne '') {
+        $html .= qq{<div class="config-wrap">\n} . copy_button_html()
+               . qq{<pre class="config" id="config-content">} . esc($out) . qq{</pre>\n}
+               . qq{</div>\n} . copy_button_script();
+    }
+    if (defined $err && $err ne '') {
+        $html .= qq{<p class="muted" style="margin:0.6em 0 0.2em">Diagnostic output:</p>\n}
+               . qq{<pre class="config">} . esc($err) . qq{</pre>\n};
+    }
+    return $html;
+}
+
+################################################################################
+# show_rename_device_id  (action=rename_device_id, GET, read-only)
+#
+# The selection form: pick an existing device id and a new id, then Preview.
+#
+# Parameters:
+#   $user
+################################################################################
+sub show_rename_device_id {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+
+    my $dbh = db_connect();
+    my $allowed = $dbh ? user_may_rename_device($dbh, $user) : 0;
+    $dbh->disconnect if $dbh;
+
+    unless ($allowed) {
+        print page_head('Rename device-id', $user);
+        print qq{<p class="error">You are not authorized to rename a device id }
+            . qq{(this needs an all-sites device-table editor).</p>\n};
+        print page_foot();
+        return;
+    }
+
+    print page_head('Rename device-id', $user, 'full');
+    print qq{<div class="tool-section" id="rename-device-section">\n};
+    print qq{<h2 class="tool-section-title">Rename device-id</h2>\n};
+
+    unless (rename_feature_available()) {
+        my $inst = fetchconfig_version_cached();
+        print qq{<p class="error">This feature requires fetchconfig }
+            . esc(RENAME_MIN_FETCHCONFIG_VERSION) . qq{ or newer}
+            . (defined $inst ? qq{ (installed: } . esc($inst) . qq{)} : qq{ (installed version could not be determined)})
+            . qq{. Upgrade the fetchconfig engine, then reload this page.</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    my ($set, $sorted, $err) = rename_all_device_ids();
+    if ($err) {
+        print qq{<p class="error">} . esc($err) . qq{</p>\n</div>\n};
+        print page_foot();
+        return;
+    }
+    if (!@$sorted) {
+        print qq{<p class="muted">There are no devices in the table to rename.</p>\n</div>\n};
+        print page_foot();
+        return;
+    }
+
+    print qq{<p style="margin:0.2em 0 1em;color:var(--color-muted)">Rename a device's id }
+        . qq{<strong>everywhere</strong> &mdash; the device table, the on-disk backup tree, and (if a }
+        . qq{history database is configured) the dashboard history. The rename is performed by the }
+        . qq{fetchconfig engine under a lock; this page previews it first (a dry run that writes nothing), }
+        . qq{then performs it on confirmation. Device notes kept here move with the device.</p>\n};
+
+    my $sel = $cgi->param('old') // '';
+    print qq{<form method="post" action="} . esc(script_url()) . qq{">\n};
+    print csrf_field();
+    print qq{<input type="hidden" name="action" value="rename_device_do">\n};
+    print qq{<div class="cmp-field" style="max-width:34em">\n};
+    print qq{<label for="rn-old">Current device id</label>\n};
+    print qq{<input id="rn-old" name="old" type="text" list="rn-old-list" autocomplete="off"\n}
+        . qq{       value="} . esc($sel) . qq{" placeholder="Type to filter&hellip;">\n};
+    print qq{<datalist id="rn-old-list">\n};
+    print qq{<option value="} . esc($_) . qq{"></option>\n} for @$sorted;
+    print qq{</datalist>\n};
+    print qq{<p class="hint">Type to filter; pick an existing device id from the list.</p>\n};
+    print qq{</div>\n};
+    print qq{<div class="cmp-field" style="max-width:34em">\n};
+    print qq{<label for="rn-new">New device id</label>\n};
+    print qq{<input id="rn-new" name="new" type="text" value="" autocomplete="off"\n}
+        . qq{       pattern="[A-Za-z0-9_.][A-Za-z0-9_.-]*" title="Letters, digits, dot, dash, underscore; must not start with a dash.">\n};
+    print qq{<p class="hint">Allowed: letters, digits, dot, dash, underscore. Must not start with a dash or be all dots, and must not already exist.</p>\n};
+    print qq{</div>\n};
+    print qq{<div class="cmp-go"><button type="submit" name="mode" value="preview" class="btn">Preview changes &rarr;</button></div>\n};
+    print qq{</form>\n};
+    print qq{</div>\n};   # .tool-section
+
+    print rename_replay_section_html();
+    print page_foot();
+}
+
+################################################################################
+# rename_replay_section_html
+################################################################################
+sub rename_replay_section_html {
+    return qq{<div class="tool-section" id="replay-db-section">\n}
+         . qq{<h2 class="tool-section-title">Flush pending database operations</h2>\n}
+         . qq{<p style="margin:0.2em 0 1em;color:var(--color-muted)">If a rename finished while the history }
+         . qq{database was unreachable, its change is queued in the engine's outbox and applied on the next run. }
+         . qq{Use this to flush the queue now (runs <code>--replay-db-change</code>).</p>\n}
+         . qq{<form method="post" action="} . esc(script_url()) . qq{">\n}
+         . csrf_field()
+         . qq{<input type="hidden" name="action" value="replay_db_change">\n}
+         . qq{<button type="submit" class="btn">Replay DB change</button>\n}
+         . qq{</form>\n</div>\n};
+}
+
+################################################################################
+# do_rename_device  (action=rename_device_do, POST + CSRF, state-changing)
+#
+# mode=preview : run the engine with -T (writes nothing); on success arm a
+#                confirm form carrying the same old/new for the real rename.
+# mode=commit  : perform the rename, then migrate the web-owned device_notes row
+#                and write an audit entry.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_rename_device {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+
+    my $dbh = db_connect();
+    my $allowed = $dbh ? user_may_rename_device($dbh, $user) : 0;
+    $dbh->disconnect if $dbh;
+
+    my $done = sub { print page_foot(); return; };
+
+    unless ($allowed) {
+        print page_head('Rename device-id', $user);
+        print qq{<p class="error">You are not authorized to rename a device id.</p>\n};
+        return $done->();
+    }
+
+    print page_head('Rename device-id', $user, 'full');
+    print qq{<div class="tool-section" id="rename-device-section">\n};
+    print qq{<h2 class="tool-section-title">Rename device-id</h2>\n};
+
+    my $end = sub { print qq{</div>\n}; print page_foot(); return; };
+
+    unless (rename_feature_available()) {
+        my $inst = fetchconfig_version_cached();
+        print qq{<p class="error">This feature requires fetchconfig }
+            . esc(RENAME_MIN_FETCHCONFIG_VERSION) . qq{ or newer}
+            . (defined $inst ? qq{ (installed: } . esc($inst) . qq{)} : qq{})
+            . qq{.</p>\n};
+        return $end->();
+    }
+
+    my $old  = $cgi->param('old')  // '';
+    my $new  = $cgi->param('new')  // '';
+    my $mode = ($cgi->param('mode') // '') eq 'commit' ? 'commit' : 'preview';
+    $new =~ s/^\s+|\s+$//g;
+
+    # Server-side validation (the engine re-checks under its lock; this gives a
+    # friendly error without shelling out).
+    my ($set, $sorted, $lerr) = rename_all_device_ids();
+    if ($lerr) { print qq{<p class="error">} . esc($lerr) . qq{</p>\n}; return $end->(); }
+
+    my $back = qq{<p><a class="btn" href="} . esc(script_url() . '?action=rename_device_id&old=' . CGI::escape($old))
+             . qq{">&larr; Back to the rename form</a></p>\n};
+
+    my $bad = '';
+    if (!valid_id($old) || !$set->{$old}) {
+        $bad = 'Select an existing device id to rename.';
+    } elsif ($new eq '' || !valid_id($new)) {
+        $bad = 'The new id may contain only letters, digits, dot, dash and underscore, and must not start with a dash.';
+    } elsif ($new =~ /^\.+\z/) {
+        $bad = 'The new id must not consist only of dots.';
+    } elsif ($new eq $old) {
+        $bad = 'The new id is the same as the current id.';
+    } elsif ($set->{$new}) {
+        $bad = qq{A device "$new" already exists in the table.};
+    }
+    if ($bad ne '') {
+        print qq{<p class="error">} . esc($bad) . qq{</p>\n} . $back;
+        return $end->();
+    }
+
+    # Drive the engine. --old=/--new= single-token form so a value is never taken
+    # as a flag (valid_id already forbids a leading dash; this is defence in depth).
+    my @args = ('-devices=' . $DEVICE_TABLE, '--rename-device-id', "--old=$old", "--new=$new");
+    push @args, '-T' if $mode eq 'preview';
+    # Privileged: the rename creates the table lock and moves the backup tree, so
+    # it must run as the fetchconfig owner via the sudo helper (same as Backup Now).
+    my ($out, $err, $status, $fork_err) = run_fetchconfig_priv(@args);
+
+    if (defined $fork_err) {
+        print qq{<p class="error">} . esc($fork_err) . qq{</p>\n} . $back;
+        return $end->();
+    }
+
+    print qq{<p class="muted">Command: <code>fetchconfig.pl -devices=} . esc($DEVICE_TABLE)
+        . qq{ --rename-device-id --old=} . esc($old) . qq{ --new=} . esc($new)
+        . ($mode eq 'preview' ? qq{ -T} : '') . qq{</code></p>\n};
+
+    # Distinguish a lock-acquisition failure (a filesystem-permission problem) from
+    # a genuine validation / name-collision refusal, so the exit-2 message is not
+    # misleading. The engine prints a "lock" diagnostic it cannot create/obtain.
+    my $diag = (defined $out ? $out : '') . "\n" . (defined $err ? $err : '');
+    my $lock_problem = ($diag =~ /refusing to rename without a lock|cannot (?:create|open|obtain|acquire)\b[^\n]*lock/i) ? 1 : 0;
+    my $refused_msg = $lock_problem
+        ? qq{The rename could not obtain the device-table lock. The web server's user needs }
+          . qq{write permission on the directory that holds the device table, so the fetchconfig }
+          . qq{engine can create the lock file beside it. Nothing has been changed.}
+        : qq{The rename was refused (validation or a name collision). Nothing has been changed.};
+
+    if ($mode eq 'preview') {
+        if ($status == 0) {
+            print qq{<p class="success">Dry run OK &mdash; the rename below would succeed. Nothing has been changed yet.</p>\n};
+            print rename_transcript_html($out, $err);
+            # Arm the real rename.
+            print qq{<form method="post" action="} . esc(script_url()) . qq{" style="margin-top:1em">\n};
+            print csrf_field();
+            print qq{<input type="hidden" name="action" value="rename_device_do">\n};
+            print qq{<input type="hidden" name="old" value="} . esc($old) . qq{">\n};
+            print qq{<input type="hidden" name="new" value="} . esc($new) . qq{">\n};
+            print qq{<button type="submit" name="mode" value="commit" class="btn btn-danger">Perform rename: }
+                . esc($old) . qq{ &rarr; } . esc($new) . qq{</button>\n};
+            print qq{ <a class="btn" href="} . esc(script_url() . '?action=rename_device_id') . qq{">Cancel</a>\n};
+            print qq{</form>\n};
+        } elsif ($status == 2) {
+            print qq{<p class="error">} . esc($refused_msg) . qq{</p>\n};
+            print rename_transcript_html($out, $err);
+            print $back;
+        } else {
+            print qq{<p class="error">The preview could not be completed (engine exit $status).</p>\n};
+            print rename_transcript_html($out, $err);
+            print $back;
+        }
+        return $end->();
+    }
+
+    # ----- commit -----------------------------------------------------------
+    if ($status == 2) {
+        print qq{<p class="error">} . esc($refused_msg) . qq{</p>\n};
+        print rename_transcript_html($out, $err);
+        audit(action => 'rename_device_id', object_type => 'device', object_id => $old,
+              detail => ($lock_problem ? "REFUSED (exit 2, lock): " : "REFUSED (exit 2): ") . "$old -> $new");
+        print $back;
+        return $end->();
+    }
+    if ($status != 0 && $status != 1) {
+        print qq{<p class="error">The rename failed (engine exit $status). Check the output below.</p>\n};
+        print rename_transcript_html($out, $err);
+        audit(action => 'rename_device_id', object_type => 'device', object_id => $old,
+              detail => "FAILED (exit $status): $old -> $new");
+        print $back;
+        return $end->();
+    }
+
+    # Exit 0 (all done) or 1 (table+files done, DB op queued). Finish the web-
+    # owned pieces the engine never touches: the device_notes row and the audit.
+    my $notes_detail = rename_migrate_device_notes($old, $new);
+    my $db_state = ($status == 1) ? 'queued' : 'applied';
+    # The engine rewrote the device table (its content changed), so refresh the
+    # external-change tripwire token -- this IS the app's own write, just performed
+    # via the engine, so the editor must not flag it as an outside modification.
+    audit_record_device_table_token(undef, $user);
+    audit(action => 'rename_device_id', object_type => 'device', object_id => $new,
+          detail => "OK (exit $status): $old -> $new; history db $db_state; $notes_detail");
+
+    if ($status == 1) {
+        print qq{<p class="success">Renamed <code>} . esc($old) . qq{</code> &rarr; <code>} . esc($new)
+            . qq{</code> (device table and backups).</p>\n};
+        print qq{<p class="version-warning" style="margin-top:0"><strong>&#9888; Note:</strong> the history }
+            . qq{database was unreachable, so its update is <strong>queued</strong> and will be applied on the next }
+            . qq{run. You can flush it now with <em>Replay DB change</em> below.</p>\n};
+    } else {
+        print qq{<p class="success">Renamed <code>} . esc($old) . qq{</code> &rarr; <code>} . esc($new)
+            . qq{</code> &mdash; device table, backups and history database all updated.</p>\n};
+    }
+    print qq{<p class="muted">} . esc(ucfirst $notes_detail) . qq{.</p>\n};
+    print rename_transcript_html($out, $err);
+    print qq{<p style="margin-top:1em"><a class="btn btn-green" href="}
+        . esc(script_url() . '?dev=' . CGI::escape($new)) . qq{">View backups for } . esc($new) . qq{</a>\n};
+    print qq{ <a class="btn" href="} . esc(script_url() . '?action=rename_device_id') . qq{">Rename another</a></p>\n};
+    print qq{</div>\n};   # .tool-section
+    print rename_replay_section_html() if $status == 1;
+    print page_foot();
+}
+
+################################################################################
+# rename_migrate_device_notes
+#
+# Move the fetchconfig-web-owned device_notes row from $old to $new after a
+# successful engine rename. device_id is UNIQUE: if a note already exists under
+# $new (it should not, since $new was absent from the table), keep it and leave
+# the old row untouched rather than destroy data. Returns a short status phrase
+# for the report / audit. Best-effort; never dies.
+#
+# Parameters:
+#   $old
+#   $new
+################################################################################
+sub rename_migrate_device_notes {
+    my ($old, $new) = @_;
+    my $dbh = db_connect();
+    return 'notes not migrated (database unavailable)' unless $dbh;
+    my $phrase = eval {
+        my ($old_has) = $dbh->selectrow_array('SELECT 1 FROM device_notes WHERE device_id = ?', undef, $old);
+        if (!$old_has) { $dbh->disconnect; return 'no device note to move'; }
+        my ($new_has) = $dbh->selectrow_array('SELECT 1 FROM device_notes WHERE device_id = ?', undef, $new);
+        if ($new_has) {
+            $dbh->disconnect;
+            return "a note already existed for $new; the old note was left under $old and not moved";
+        }
+        my $rows = $dbh->do('UPDATE device_notes SET device_id = ? WHERE device_id = ?', undef, $new, $old);
+        $dbh->disconnect;
+        return (($rows && $rows > 0) ? 'device note moved' : 'no device note to move');
+    };
+    if ($@) { eval { $dbh->disconnect }; return 'notes not migrated (database error)'; }
+    return $phrase;
+}
+
+################################################################################
+# do_replay_db_change  (action=replay_db_change, POST + CSRF, state-changing)
+#
+# Flush the engine's statistics/rename DB outbox (fetchconfig.pl
+# --replay-db-change). Admin / unrestricted editors only.
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_replay_db_change {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+
+    my $dbh = db_connect();
+    my $allowed = $dbh ? user_may_rename_device($dbh, $user) : 0;
+    $dbh->disconnect if $dbh;
+
+    print page_head('Replay DB change', $user, 'full');
+    print qq{<div class="tool-section" id="replay-db-result-section">\n};
+    print qq{<h2 class="tool-section-title">Flush pending database operations</h2>\n};
+
+    unless ($allowed) {
+        print qq{<p class="error">You are not authorized to run this.</p>\n</div>\n};
+        print page_foot();
+        return;
+    }
+
+    # Privileged: applies the queued history-DB operations as the fetchconfig owner.
+    my ($out, $err, $status, $fork_err) = run_fetchconfig_priv('-devices=' . $DEVICE_TABLE, '--replay-db-change');
+    if (defined $fork_err) {
+        print qq{<p class="error">} . esc($fork_err) . qq{</p>\n};
+    } elsif ($status == 0) {
+        print qq{<p class="success">Outbox flushed &mdash; pending database operations were applied.</p>\n};
+    } else {
+        print qq{<p class="error">The replay did not complete cleanly (engine exit $status). }
+            . qq{Some operations may still be queued (for example if the database is still unreachable).</p>\n};
+    }
+    print rename_transcript_html($out, $err) unless defined $fork_err;
+    audit(action => 'replay_db_change', object_type => 'system', object_id => '',
+          detail => defined $fork_err ? "error: $fork_err" : "exit $status");
+    print qq{<p style="margin-top:1em"><a class="btn" href="} . esc(script_url() . '?action=rename_device_id')
+        . qq{">&larr; Back</a></p>\n};
+    print qq{</div>\n};
+    print page_foot();
 }
 
 ################################################################################
@@ -21974,8 +22948,17 @@ sub render_record_card {
         $h .= qq{<div class="rec-head">};
         $h .= qq{<label>Model </label><select name="${rk}_model" class="rec-model">$sel</select>};
         if ($kind eq 'device') {
+            # The Device-ID of an existing device is read-only here: changing it
+            # would rewrite only the table line, leaving the backup tree and the
+            # history DB behind. Use Setup devices -> Rename device-id, which drives
+            # the engine to rename everything. (readonly, not disabled, so the value
+            # still posts and the save path keeps matching this device.)
+            my $id_tip = 'The device-id cannot be changed here. Use Setup devices '
+                       . '-> Rename device-id to rename a device everywhere '
+                       . '(device table, backups and history).';
             $h .= qq{ <label>Device-ID </label><input type="text" name="${rk}_id" value="}
-                . esc($r->{id}) . qq{" size="32">};
+                . esc($r->{id}) . qq{" size="32" readonly title="} . esc($id_tip) . qq{"}
+                . qq{ style="background:#eee;cursor:not-allowed">};
             $h .= qq{ <label>Host </label><input type="text" name="${rk}_host" class="host-field" value="}
                 . esc($r->{host}) . qq{" size="48">};
         }
@@ -23942,11 +24925,54 @@ sub fetchconfig_version_warning {
 ################################################################################
 # run_fetchconfig
 #
+# Run fetchconfig.pl AS THE WEB USER (no sudo), capturing stdout/stderr/status.
+# Used by the read-only operations (backup listing, status, side-by-side, ...),
+# which only read the repository. Write operations that need the fetchconfig
+# owner's privileges (the device-id rename) use run_fetchconfig_priv instead.
+#
 # Parameters:
 #   @args
 ################################################################################
 sub run_fetchconfig {
     my (@args) = @_;
+    return run_capture_cmd($FETCHCONFIG_BIN_FULL, @args);
+}
+
+################################################################################
+# run_fetchconfig_priv
+#
+# Like run_fetchconfig, but routes fetchconfig through the sudo helper when
+# USE_SUDO_FOR_BACKUP_NOW is set -- the same privileged path Backup Now uses --
+# so write operations run as the fetchconfig owner, not the unprivileged web
+# user. The device-id rename needs this: it creates the device-table lock and
+# moves the on-disk backup tree, which the web user cannot do (that was the
+# "cannot create the lock ... refusing to rename without a lock" failure).
+# Replaying the history-DB outbox uses it too.
+#
+# Parameters:
+#   @args
+################################################################################
+sub run_fetchconfig_priv {
+    my (@args) = @_;
+    my @cmd = $USE_SUDO_FOR_BACKUP_NOW
+        ? ($SUDO_BIN, '-n', $FETCHCONFIG_BIN_FULL, @args)
+        : ($FETCHCONFIG_BIN_FULL, @args);
+    return run_capture_cmd(@cmd);
+}
+
+################################################################################
+# run_capture_cmd
+#
+# Core runner shared by run_fetchconfig / run_fetchconfig_priv: run @cmd
+# (program followed by its arguments -- LIST form, so no shell is involved),
+# capturing stdout and stderr SEPARATELY via open3 + select(). Returns
+# ($stdout, $stderr, $exit_status, $fork_err).
+#
+# Parameters:
+#   @cmd
+################################################################################
+sub run_capture_cmd {
+    my (@cmd) = @_;
 
     my ($stdin, $stdout, $stderr);
     $stderr = gensym();
@@ -23957,7 +24983,7 @@ sub run_fetchconfig {
     # is both unnecessary and risky. (run_command_capture, which merges the
     # child's output onto the parent's STDOUT path, handles the tie explicitly
     # in the child instead.)
-    my $pid = eval { open3($stdin, $stdout, $stderr, $FETCHCONFIG_BIN_FULL, @args) };
+    my $pid = eval { open3($stdin, $stdout, $stderr, @cmd) };
     if (!$pid) {
         return (undef, undef, undef, "Cannot run fetchconfig.pl: $@");
     }
@@ -25732,6 +26758,7 @@ sub page_head {
         my $devices_menu = $group->('Devices',
             $su->('Devices',        script_url()),
             $su->('Device backup status', '?action=status'),
+            $su->('Compare devices', '?action=compare_devices'),
             $su->('Backup reports', '?action=report'),
             $su->('Device notes',   '?action=tool_notes'));
 
@@ -25744,6 +26771,10 @@ sub page_head {
                    $su->('Edit device table', '?action=edit_table'),
                    $su->('Bulk edit devices', '?action=bulk_edit'))
                 : ($su->('Edit device table', '?action=setup'));  # routes to editor
+            # Rename device-id: all-sites editors only, and only when the installed
+            # engine offers the rename mode (fetchconfig 9.78+).
+            push @items, $su->('Rename device-id', '?action=rename_device_id')
+                if $unrestricted && rename_feature_available();
             $setup_menu = $group->('Setup devices', @items);
         }
 

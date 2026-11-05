@@ -336,6 +336,32 @@
   .diff-legend .sw-chg { background: #fff8c5; }
   .diff-legend .sw-uni-add { background: var(--diff-add); }
   .diff-legend .sw-uni-del { background: var(--diff-del); }
+  /* Compare devices (Devices -> Compare devices) */
+  .cmp-grid { display: grid; grid-template-columns: 1fr 2.6em 1fr; gap: 1em; align-items: stretch; }
+  .cmp-side { border: 1px solid var(--color-border); border-radius: 6px; background: #fff; padding: 1em 1.1em; }
+  .cmp-side h3 { margin: 0 0 0.2em; color: var(--color-heading); }
+  .cmp-side .cmp-sub { font-size: 0.82em; color: var(--color-muted); margin: 0 0 0.8em; }
+  .cmp-field { margin: 0.7em 0; }
+  .cmp-field label { display: block; font-size: 0.82em; color: var(--color-muted); margin: 0 0 0.25em; }
+  .cmp-field select, .cmp-field input[type="text"] { width: 100%; box-sizing: border-box; padding: 0.5em 0.7em;
+                     font-size: 0.95em; border: 1px solid var(--color-border); border-radius: 4px;
+                     background: #fff; font-family: var(--font-ui); }
+  .cmp-field .hint { font-size: 0.78em; color: var(--color-faint); margin: 0.25em 0 0; min-height: 1em; }
+  .cmp-swap { display: flex; align-items: center; justify-content: center; }
+  .cmp-swap button { width: 2.4em; height: 2.4em; border-radius: 50%; border: 1px solid var(--color-accent-border);
+                     background: var(--color-accent-bg); color: var(--color-accent); font-size: 1.1em; cursor: pointer; }
+  .cmp-go { margin-top: 1.1em; display: flex; gap: 1em; align-items: center; flex-wrap: wrap; }
+  .cmp-go .chk, .cmp-toolbar .chk { font-size: 0.85em; color: var(--color-muted);
+                     display: inline-flex; align-items: center; gap: 0.35em; }
+  .cmp-result-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.8em; margin: 0 0 0.6em; }
+  .cmp-dev { flex: 1 1 0; min-width: 14em; border: 1px solid var(--color-border); border-radius: 6px;
+             background: #fff; padding: 0.55em 0.8em; }
+  .cmp-dev .id { font-family: var(--font-mono); font-weight: 600; color: var(--color-heading); }
+  .cmp-dev .meta { font-size: 0.8em; color: var(--color-muted); }
+  .cmp-vs { font-size: 0.85em; color: var(--color-faint); font-weight: 600; }
+  .cmp-toolbar { display: flex; flex-wrap: wrap; gap: 0.5em; align-items: center; margin: 0 0 0.6em; }
+  .cmp-toolbar .cmp-spacer { flex: 1 1 auto; }
+  @media (max-width: 800px) { .cmp-grid { grid-template-columns: 1fr; } .cmp-swap { transform: rotate(90deg); } }
   .login-box { position: relative; max-width: 320px; margin: 4em auto; background: #fff; padding: 2em;
                border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,0.15); }
   .login-forgot { margin: 0.8em 0 0; font-size: 0.9em; }
