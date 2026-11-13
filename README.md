@@ -399,7 +399,7 @@ ALIAS_REPLACE_ON_SAVE   = off
 GENERIC_SYNTAX          = auto
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 #CRON_USER              = fetchconfig
-APP_VERSION             = 2.17.1
+APP_VERSION             = 2.18.1
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 
@@ -1255,12 +1255,18 @@ separate SNMP-inventory roll-up described in [Inventory dashboard](#inventory-da
   first by default) or **Status** across the whole set. **Export CSV** downloads
   the current data. A device in the table that has no history row yet shows
   **No data** (distinct from **Never**, which has a row but no successful backup).
+  A device-id with history/inventory rows but no device-table entry (decommissioned
+  or removed) shows a red **Orphan DB** pill (not **Stale**) and an **Orphan
+  dashboard cleanup** button instead of **View**.
 
-**Tools -> Cleanup dashboard** (administrators only) lists *orphaned* statistics --
+**Tools -> Orphan dashboard cleanup** (administrators only) lists *orphaned* statistics --
 history for device-ids that are no longer in the device table (e.g. renamed or
 removed devices) -- and offers a single all-or-nothing **Delete orphaned
-statistics** (with a confirmation). The device backups are never touched; the
-action is recorded in the audit log.
+statistics** (with a confirmation). It removes the orphan's rows from the
+`backup_*` tables and the inventory tables (`device_inventory`,
+`device_inventory_component`, `device_inventory_history`). The device backups on
+disk are never touched; the action is recorded in the audit log. (Orphaned backup
+*files* are cleaned separately under **Tools -> Orphaned backup cleanup**.)
 
 On the per-device **Backups** page, each backup whose integrity checksum is on
 file shows a small **SHA1** button that copies the checksum (a change/corruption
@@ -1899,7 +1905,7 @@ reachable directly by URL.
 
 The full set of entries, in the order they appear in the menu, is: *Audit log*,
 *Login failures*, *Consistent backup suffixes*, *Check site assignment*, (when
-the dashboard is enabled) *Cleanup dashboard*, *Device debug logs*, *Devices
+the dashboard is enabled) *Orphan dashboard cleanup*, *Device debug logs*, *Devices
 without backups*, *Disk space*, *Empty backup cleanup*, *Empty directory
 cleanup*, *Orphaned backup cleanup*, *Orphaned notes cleanup*, *Restore device
 table*, *Show fetchconfig-web.cfg*, *Show schedule*, *Verify email setup*,

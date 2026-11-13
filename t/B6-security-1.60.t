@@ -285,8 +285,11 @@ sub _mock_throttle_dbh {
     };
     *{"${pkg}::do"} = sub {
         my ($s, $sql, undef, @b) = @_;
-        if ($sql =~ /UPDATE login_attempts/) { my ($n,$k,$v)=@b; return 0 unless $T->{"$k/$v"}; $T->{"$k/$v"}={n=>$n,t=>time()}; return 1; }
-        if ($sql =~ /INSERT INTO login_attempts/) { my ($k,$v,$n)=@b; $T->{"$k/$v"}={n=>$n,t=>time()}; return 1; }
+        # Atomic increment: "SET failures = failures + 1 WHERE kind=? AND keyval=?"
+        # binds only (kind, keyval); the count lives server-side. 0 rows if absent.
+        if ($sql =~ /UPDATE login_attempts/) { my ($k,$v)=@b; return '0E0' unless $T->{"$k/$v"}; $T->{"$k/$v"}{n}++; $T->{"$k/$v"}{t}=time(); return 1; }
+        # INSERT ... VALUES (?, ?, 1, now()) binds (kind, keyval); failures starts at 1.
+        if ($sql =~ /INSERT INTO login_attempts/) { my ($k,$v)=@b; $T->{"$k/$v"}={n=>1,t=>time()}; return 1; }
         if ($sql =~ /DELETE FROM login_attempts/) { my ($k1,$v1,$k2,$v2)=@b; delete $T->{"$k1/$v1"}; delete $T->{"$k2/$v2"}; return 1; }
         return 1;
     };

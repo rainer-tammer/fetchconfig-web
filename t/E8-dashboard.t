@@ -135,17 +135,20 @@ is(main::dashboard_schema_state(undef), 'missing', 'no dbh -> missing');
     is_deeply(\@oids, ['ghost'], 'orphans: only the history-only device (configured ones excluded)');
 
     my $d = main::dashboard_overview_data($dbh, undef);
-    # 3 current-status rows (rtrcore01, fw01, ghost) + the configured-but-never-run
-    # "orphan" device (in the device table, no backup_current row) counted as never.
-    is($d->{total}, 4, 'overview total = current-status rows + configured-not-yet-run');
-    is($d->{never}, 1, 'overview: the configured-but-no-row device counts as never');
+    # Current-status rows: rtrcore01 (fresh), fw01 (failed), ghost (history-only ->
+    # an ORPHAN, excluded from fleet health). Plus the configured-but-never-run
+    # "orphan" device (in the table, no backup_current row) counted as never. So the
+    # health total is 3 and 'ghost' is counted separately as an orphan, not stale.
+    is($d->{total},  3, 'overview total excludes the orphan (history-only) device');
+    is($d->{never},  1, 'overview: the configured-but-no-row device counts as never');
+    is($d->{orphan}, 1, 'overview: the history-only device is counted as orphan, not stale');
+    is($d->{stale},  0, 'overview: no stale (the orphan is no longer miscounted)');
     my %site = map { $_->{site} => $_ } @{ $d->{by_site} };
     is($site{'gop / Goeppingen'}{total},   2, 'by_site: gop = rtrcore01 (fresh) + orphan (never)');
     is($site{'gop / Goeppingen'}{fresh},   1, 'by_site: Goeppingen 1 fresh');
     is($site{'gop / Goeppingen'}{never},   1, 'by_site: Goeppingen 1 never (configured, no row yet)');
     is($site{'can / Canton, MI'}{failed},  1, 'by_site: Canton 1 failed');
-    ok(exists $site{'(no site)'},             'by_site: history-only device bucketed as (no site)');
-    is($site{'(no site)'}{stale},          1, 'by_site: (no site) 1 stale');
+    ok(!exists $site{'(no site)'},            'by_site: the orphan is excluded (no "(no site)" bucket)');
 }
 
 # --- backup_sha1_map: path -> sha1 from backup_versions ----------------------

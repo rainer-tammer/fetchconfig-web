@@ -92,12 +92,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.17.15';
+use constant APP_VERSION => '2.18.1';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.17.15';
+use constant APP_VERSION_INTERNAL => '2.18.1';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -2355,31 +2355,33 @@ sub login_is_throttled {
 sub login_record_failure {
     my ($dbh, $kind, $key) = @_;
     return unless $dbh && defined $key && $key ne '';
-    # UPSERT without ON CONFLICT (PostgreSQL 8.2): UPDATE, and INSERT if no row
-    # existed. Two concurrent FIRST failures for the same key can both see "no
-    # row" and both INSERT; the loser hits the primary key. So: run it in a
-    # transaction and, on a failed INSERT, retry the UPDATE once -- the winner's
-    # row now exists, so no count is lost (V11 race).
+    # Atomic increment (no SELECT): "SET failures = failures + 1" is computed in
+    # the server under the row lock, so two concurrent failures can't both read
+    # N and both write N+1 (the V11 lost-update). If no row exists yet (0 rows
+    # updated) we INSERT; two concurrent FIRST failures can still collide on the
+    # primary key, so on a failed INSERT we re-run the atomic UPDATE -- the
+    # winner's row exists by then and "+ 1" picks up its value. All in one txn.
+    # PostgreSQL 8.2: no RETURNING / ON CONFLICT needed; under READ COMMITTED the
+    # second UPDATE blocks on the row lock, then re-reads the committed value and
+    # adds 1, so neither increment is lost.
     my $was_ac = $dbh->{AutoCommit};
     eval {
         $dbh->begin_work if $was_ac;
-        my ($n, $last) = _login_fail_state($dbh, $kind, $key);
-        my $next = ($n || 0) + 1;
         my $upd = $dbh->do(
-            'UPDATE login_attempts SET failures = ?, last_fail = now() '
-          . ' WHERE kind = ? AND keyval = ?', undef, $next, $kind, $key);
+            'UPDATE login_attempts SET failures = failures + 1, last_fail = now() '
+          . ' WHERE kind = ? AND keyval = ?', undef, $kind, $key);
         if (!$upd || $upd == 0) {
             my $ins = eval {
                 $dbh->do('INSERT INTO login_attempts (kind, keyval, failures, last_fail) '
-                       . 'VALUES (?, ?, ?, now())', undef, $kind, $key, $next);
+                       . 'VALUES (?, ?, 1, now())', undef, $kind, $key);
             };
             if (!$ins) {
-                # Lost the race: the other writer's row is there now -- increment it.
+                # Lost the insert race: the other writer's row is there now --
+                # increment it atomically (no SELECT, so still no lost update).
                 $dbh->rollback if $was_ac;        # clear the failed-INSERT state
                 $dbh->begin_work if $was_ac;
-                my ($n2) = _login_fail_state($dbh, $kind, $key);
-                $dbh->do('UPDATE login_attempts SET failures = ?, last_fail = now() '
-                       . ' WHERE kind = ? AND keyval = ?', undef, ($n2 || 0) + 1, $kind, $key);
+                $dbh->do('UPDATE login_attempts SET failures = failures + 1, last_fail = now() '
+                       . ' WHERE kind = ? AND keyval = ?', undef, $kind, $key);
             }
         }
         $dbh->commit if $was_ac;
@@ -3399,6 +3401,46 @@ sub device_accessible {
     return 0;   # device not found
 }
 
+################################################################################
+# device_in_table / device_has_db_rows
+#
+# Classify a device id for the backups page and the dashboard: whether it is
+# still declared in the device table, and whether it has any row in the history
+# / inventory DB. A device that is in neither is non-existent; one that is in the
+# DB but not the table is an orphan (offer DB cleanup). Both are cheap: one table
+# parse, and one indexed per-table probe keyed on dev_id.
+#
+# Parameters:
+#   $dev
+################################################################################
+sub device_in_table {
+    my ($dev) = @_;
+    return 0 unless defined $dev && $dev ne '';
+    my ($content, $err) = slurp_device_table();
+    return 0 if $err || !defined $content;
+    for my $r (@{ parse_device_table($content) }) {
+        next unless $r->{kind} eq 'device';
+        return 1 if defined $r->{id} && $r->{id} eq $dev;
+    }
+    return 0;
+}
+
+sub device_has_db_rows {
+    my ($dev) = @_;
+    return 0 unless defined $dev && $dev ne '';
+    my $dbh = db_connect() or return 0;
+    my $found = 0;
+    for my $tbl (qw(backup_current backup_runs backup_versions
+                    device_inventory device_inventory_component device_inventory_history)) {
+        next unless db_table_exists($dbh, $tbl);   # schema may be partial/absent
+        my ($hit) = $dbh->selectrow_array(
+            "SELECT 1 FROM $tbl WHERE dev_id = ? LIMIT 1", undef, $dev);
+        if ($hit) { $found = 1; last; }
+    }
+    $dbh->disconnect;
+    return $found;
+}
+
 
 ################################################################################
 # device_visible_to_acc
@@ -4303,7 +4345,7 @@ sub dash_status {
 sub dash_badge {
     my ($st) = @_;
     my %label = (fresh => 'Fresh', stale => 'Stale', failed => 'Failed',
-                 never => 'Never', nodata => 'No data');
+                 never => 'Never', nodata => 'No data', orphan => 'Orphan DB');
     my $key = exists $label{$st} ? $st : 'never';
     return qq{<span class="dash-badge dash-badge-$key">} . esc($label{$key}) . qq{</span>};
 }
@@ -4414,15 +4456,23 @@ sub dashboard_overview_data {
     my $rows = $dbh->selectall_arrayref(
         q{SELECT dev_id, state, last_good_at FROM backup_current}, { Slice => {} });
 
-    my %d = (total => 0, never => 0, failed => 0, stale => 0, fresh => 0,
+    my %d = (total => 0, never => 0, failed => 0, stale => 0, fresh => 0, orphan => 0,
              age_lt24 => 0, age_1_3 => 0, age_3_7 => 0, age_gt7 => 0);
     my %agg;        # site code => { total, fresh, stale, failed, never }
     my %inscope;    # dev_ids actually counted (for the trend query below)
     for my $r (@{ $rows || [] }) {
         my $id = $r->{dev_id};
         my $in = exists $site_of{$id};
-        next if !$in && !$unrestricted;      # limited user: skip other-site/removed devices
-        my $code = $in ? $site_of{$id} : SITE_ALL_CODE;
+        if (!$in) {
+            # Not in the device table: an orphan DB row. Count it on its own
+            # (admins only -- a site-limited user has no claim on an untabled id)
+            # and keep it OUT of the fleet health, age buckets and by-site
+            # breakdown, so it is never miscounted as "stale". Cleaned via Orphan
+            # dashboard cleanup.
+            $d{orphan}++ if $unrestricted;
+            next;
+        }
+        my $code = $site_of{$id};
         my $st   = dash_status($r->{state}, $r->{last_good_at}, $now);
         $d{total}++;
         $d{$st}++;
@@ -4794,6 +4844,19 @@ sub show_dashboard_overview {
     print dash_tile('Failed last run', $d->{failed}, 'auth / timeout / unreachable', 'failed', $scope);
     print dash_tile('Never backed up', $d->{never}, 'no successful backup yet', 'never', $scope);
     print qq{</section>\n};
+
+    # Orphan DB entries (admin only): device-ids with history/inventory rows but no
+    # device-table entry. Excluded from the health counts above (never "stale");
+    # surfaced here with a link to clean them up.
+    if ($d->{orphan}) {
+        my $cl = esc(script_url() . '?action=dashboard_cleanup');
+        print qq{<p class="muted" style="margin:0.2em 0 1em">}
+            . qq{<span class="dash-badge dash-badge-orphan">Orphan DB</span> }
+            . _dash_group($d->{orphan}) . qq{ device}
+            . ($d->{orphan} == 1 ? qq{ has } : qq{s have })
+            . qq{history/inventory data but no device-table entry (excluded from the counts above). }
+            . qq{<a href="$cl">Orphan dashboard cleanup &rarr;</a></p>\n};
+    }
 
     # Recently-changed card: the first thing checked after a maintenance night.
     # Links through to the full Changes page.
@@ -5325,10 +5388,15 @@ sub dashboard_devices_rows {
             }
             else { $model_disp = defined $m->{model} ? $m->{model} : ''; }
         }
-        # A device configured in the table but with no backup_current row yet is
-        # "No data" (the engine has not recorded it), distinct from "Never" (it
-        # has a row but no successful backup).
-        my $st = $s ? dash_status($s->{state}, $s->{last_good_at}, $now) : 'nodata';
+        # Status:
+        #   orphan  -> has DB rows but is no longer in the device table (offer DB
+        #              cleanup; never "stale", so it stops inflating that count)
+        #   nodata  -> configured in the table but no backup_current row yet
+        #   else    -> fresh/stale/failed/never from the recorded state
+        my $st;
+        if    ($s && !$m) { $st = 'orphan'; }
+        elsif ($s)        { $st = dash_status($s->{state}, $s->{last_good_at}, $now); }
+        else              { $st = 'nodata'; }
         push @out, {
             dev_id         => $id,
             site_code      => $site_code,
@@ -5367,7 +5435,7 @@ sub show_dashboard_devices {
 
     # Full-set counts (not the live filter) + distinct site codes (-> description)
     # for the drop-down. The site filter is keyed on the site CODE.
-    my %cnt = (fresh => 0, stale => 0, failed => 0, never => 0, nodata => 0);
+    my %cnt = (fresh => 0, stale => 0, failed => 0, never => 0, nodata => 0, orphan => 0);
     my %sites;   # code => description
     for my $r (@$rows) {
         $cnt{ $r->{status} }++ if exists $cnt{ $r->{status} };
@@ -5386,6 +5454,7 @@ sub show_dashboard_devices {
         . qq{<span class="dash-bad">} . _dash_group($cnt{failed}) . qq{ failed</span>, }
         . _dash_group($cnt{never}) . qq{ never}
         . ($cnt{nodata} ? (qq{, } . _dash_group($cnt{nodata}) . qq{ no data}) : '')
+        . ($cnt{orphan} ? (qq{, <span class="dash-bad">} . _dash_group($cnt{orphan}) . qq{ orphan DB</span>}) : '')
         . qq{</p>\n};
 
     # Client-side filter row: Device | Site | Status, plus Clear, rows-per-page and
@@ -5408,7 +5477,8 @@ sub show_dashboard_devices {
         . qq{<option value="stale">Stale</option>}
         . qq{<option value="failed">Failed</option>}
         . qq{<option value="never">Never</option>}
-        . qq{<option value="nodata">No data</option></select>\n};
+        . qq{<option value="nodata">No data</option>}
+        . qq{<option value="orphan">Orphan DB</option></select>\n};
     print qq{<button type="button" id="dd-clear" class="btn">Clear filter</button>\n};
     print qq{<label class="page-size-label">Per page }
         . qq{<select id="dd-rows" class="filter-select">}
@@ -5451,8 +5521,18 @@ sub show_dashboard_devices {
         }
         else { $site_cell = qq{<span class="muted">&mdash;</span>}; }
         my $model_cell= $r->{model} ne '' ? esc($r->{model}) : qq{<span class="muted">&mdash;</span>};
-        # from=dashboard so the device page's back button returns here.
-        my $view      = esc(script_url() . '?dev=' . CGI::escape($r->{dev_id}) . '&from=dashboard');
+        # from=dashboard so the device page's back button returns here. An orphan
+        # has no device page worth opening (View -> "unknown device"); its action
+        # is the DB cleanup tool instead.
+        my $action_cell;
+        if ($r->{status} eq 'orphan') {
+            $action_cell = qq{<a class="btn btn-small btn-danger" href="}
+                . esc(script_url() . '?action=dashboard_cleanup')
+                . qq{">Orphan dashboard cleanup</a>};
+        } else {
+            my $view = esc(script_url() . '?dev=' . CGI::escape($r->{dev_id}) . '&from=dashboard');
+            $action_cell = qq{<a class="btn btn-small" href="$view">View</a>};
+        }
         my $lb_epoch = defined $r->{last_good_at} ? $r->{last_good_at} : '';
         print qq{<tr data-dev="} . esc(lc $r->{dev_id}) . qq{" }
             . qq{data-site="} . esc($site_attr) . qq{" }
@@ -5464,7 +5544,7 @@ sub show_dashboard_devices {
             . qq{<td>$last</td>}
             . qq{<td>} . dash_badge($r->{status}) . qq{</td>}
             . qq{<td style="text-align:right;font-family:Consolas,Menlo,monospace">$sz</td>}
-            . qq{<td><a class="btn btn-small" href="$view">View</a></td>}
+            . qq{<td>$action_cell</td>}
             . qq{</tr>\n};
     }
     print qq{</tbody></table>\n};
@@ -5702,7 +5782,7 @@ sub show_dashboard_cleanup {
     my $state = dashboard_schema_state($dbh);
 
     print std_header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('Cleanup dashboard', $user, 'full');
+    print page_head('Orphan dashboard cleanup', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
         . esc(script_url() . '?action=dashboard_devices') . qq{">&larr; All devices</a></p>\n};
 
@@ -5717,11 +5797,12 @@ sub show_dashboard_cleanup {
     $dbh->disconnect;
 
     print qq{<div class="tool-section">\n};
-    print qq{<h2 class="tool-section-title">Cleanup dashboard</h2>\n};
+    print qq{<h2 class="tool-section-title">Orphan dashboard cleanup</h2>\n};
     print qq{<p>Statistics in the history database whose device-id no longer has a }
         . qq{device-table entry (e.g. a device that was renamed or removed). Deleting them }
-        . qq{removes the orphaned rows from <code>backup_current</code>, <code>backup_runs</code> }
-        . qq{and <code>backup_versions</code>. The device backups themselves are not touched.</p>\n};
+        . qq{removes the orphaned rows from the database. The device backups themselves are }
+        . qq{not touched. To check for orphaned backups on disk, use }
+        . qq{<a href="} . esc(script_url() . '?action=tool_orphan') . qq{">Tools &rarr; Orphaned backup cleanup</a>.</p>\n};
 
     if (!@$orphans) {
         print qq{<p class="muted">No orphaned statistics &mdash; every device in the history still has a device-table entry.</p>\n};
@@ -5733,7 +5814,7 @@ sub show_dashboard_cleanup {
     my $n = scalar @$orphans;
     print qq{<table class="list"><thead><tr>}
         . qq{<th>Device-id (orphaned)</th>}
-        . qq{<th style="text-align:right">Saved backups</th>}
+        . qq{<th style="text-align:right" title="Rows in backup_versions (DB only, not files on disk)">DB saved backups count</th>}
         . qq{<th style="text-align:right">Runs</th>}
         . qq{<th style="text-align:right">Current</th></tr></thead><tbody>\n};
     for my $o (@$orphans) {
@@ -5779,11 +5860,11 @@ sub do_dashboard_cleanup_delete {
     my @ids = map { $_->{dev_id} } @$orphans;
 
     print std_header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('Cleanup dashboard', $user, 'full');
+    print page_head('Orphan dashboard cleanup', $user, 'full');
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
-        . esc(script_url() . '?action=dashboard_cleanup') . qq{">&larr; Cleanup dashboard</a></p>\n};
+        . esc(script_url() . '?action=dashboard_cleanup') . qq{">&larr; Orphan dashboard cleanup</a></p>\n};
     print qq{<div class="tool-section">\n};
-    print qq{<h2 class="tool-section-title">Cleanup dashboard</h2>\n};
+    print qq{<h2 class="tool-section-title">Orphan dashboard cleanup</h2>\n};
 
     if (!@ids) {
         print qq{<p class="muted">Nothing to delete &mdash; no orphaned statistics.</p>\n};
@@ -5800,11 +5881,40 @@ sub do_dashboard_cleanup_delete {
         return;
     }
 
-    # All-or-nothing: one transaction, delete child rows first.
+    # TOCTOU guard: the orphan list was computed before we took the writer
+    # connection. Re-read the device table now (shared-locked via slurp) and drop
+    # any id that has since been re-added -- an admin may have re-created the
+    # device and the engine written fresh rows for it. Only ids still absent from
+    # the table are deleted, so we never remove a live device's current rows.
+    {
+        my ($tbl_now, $terr) = slurp_device_table();
+        if (!$terr && defined $tbl_now) {
+            my %in_table;
+            for my $r (@{ parse_device_table($tbl_now) }) {
+                $in_table{$r->{id}} = 1 if $r->{kind} eq 'device' && defined $r->{id};
+            }
+            @ids = grep { !$in_table{$_} } @ids;
+        }
+    }
+    unless (@ids) {
+        $wdbh->disconnect;
+        print qq{<p class="muted">Nothing to delete &mdash; the orphaned devices were re-added in the meantime.</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
+    # All-or-nothing: one transaction, delete child rows first. Covers the three
+    # backup_* tables and the inventory tables; inventory tables that are not
+    # present (older schema) are skipped so the backup_* deletes still commit.
     $wdbh->{AutoCommit} = 0;
     my $ph = join(',', ('?') x @ids);
     my $ok = 1;
-    for my $tbl (qw(backup_versions backup_runs backup_current)) {
+    my @tables = qw(backup_versions backup_runs backup_current);
+    for my $tbl (qw(device_inventory_component device_inventory_history device_inventory)) {
+        push @tables, $tbl if db_table_exists($wdbh, $tbl);
+    }
+    for my $tbl (@tables) {
         my $rv = $wdbh->do("DELETE FROM $tbl WHERE dev_id IN ($ph)", undef, @ids);
         if (!defined $rv) { $ok = 0; last; }
     }
@@ -8844,6 +8954,33 @@ sub show_backup_list {
         return;
     }
 
+    # Classify: in the device table (normal), an orphan (gone from the table but
+    # still has DB rows -> offer cleanup), or non-existent (neither -> plain
+    # error, nothing to show or clean, e.g. a hand-typed ?dev=arbitrary URL).
+    my $in_table    = device_in_table($dev);
+    my $is_orphan   = 0;
+    my $nonexistent = 0;
+    if (!$in_table) {
+        if (device_has_db_rows($dev)) { $is_orphan = 1; } else { $nonexistent = 1; }
+    }
+
+    if ($nonexistent) {
+        print page_head("Backups: $dev", $user, 'full');
+        my $from0 = $cgi->param('from') // '';
+        my $back  = $from0 eq 'dashboard' ? (script_url() . '?action=dashboard_devices')
+                  : $from0 eq 'status'    ? (script_url() . '?action=status')
+                  :                          script_url();
+        print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+            . esc($back) . qq{">&larr; Back</a></p>\n};
+        print qq{<div class="tool-section">\n};
+        print qq{<h2 class="tool-section-title">} . esc($dev) . qq{</h2>\n};
+        print qq{<p class="error">No such device: <strong>} . esc($dev)
+            . qq{</strong> is not in the device table and has no stored data.</p>\n};
+        print qq{</div>\n};
+        print page_foot();
+        return;
+    }
+
     my ($backups, $err) = list_backups($dev);
     my $show_table = (!$err && @$backups);
 
@@ -8878,25 +9015,35 @@ sub show_backup_list {
         . note_icon_button($dev, $_bn) . qq{</h2>\n};
 
     print qq{<div class="action-row">\n};
-    print $cgi->start_form(-method => 'POST', -action => script_url(),
-        -id => 'backup-now-form');
-    print qq{<input type="hidden" name="action" value="backup_now">\n};
-    print qq{<input type="hidden" name="dev" value="} . esc($dev) . qq{">\n};
-    print csrf_field();
-    print qq{<button type="submit" class="btn">Backup now</button>\n};
-    print $cgi->end_form;
-    if ($show_compare) {
-        # Lives outside the compare-form markup below, but the HTML5
-        # form="" attribute still submits it as if it were nested inside
-        # -- lets it sit next to Backup Now at the top instead of after
-        # the table.
-        print qq{<button type="submit" form="compare-form" name="action" value="compare" class="btn">Compare selected</button>\n};
-        print qq{<button type="submit" form="compare-form" name="action" value="sidebyside" class="btn">Side by side selected</button>\n};
+    if ($is_orphan) {
+        # No live device to back up (its id is gone from the device table). Offer
+        # the DB cleanup tool instead of Backup now / Compare / Download.
+        print qq{<a class="btn btn-danger" href="}
+            . esc(script_url() . '?action=dashboard_cleanup')
+            . qq{">Orphan dashboard cleanup</a>\n};
+    } else {
+        print $cgi->start_form(-method => 'POST', -action => script_url(),
+            -id => 'backup-now-form');
+        print qq{<input type="hidden" name="action" value="backup_now">\n};
+        print qq{<input type="hidden" name="dev" value="} . esc($dev) . qq{">\n};
+        print csrf_field();
+        print qq{<button type="submit" class="btn">Backup now</button>\n};
+        print $cgi->end_form;
+        if ($show_compare) {
+            # Lives outside the compare-form markup below, but the HTML5
+            # form="" attribute still submits it as if it were nested inside
+            # -- lets it sit next to Backup Now at the top instead of after
+            # the table.
+            print qq{<button type="submit" form="compare-form" name="action" value="compare" class="btn">Compare selected</button>\n};
+            print qq{<button type="submit" form="compare-form" name="action" value="sidebyside" class="btn">Side by side selected</button>\n};
+        }
     }
     # Inventory viewer for this device (read-only; always shown -- the page itself
     # handles "no inventory yet / enable SNMP" and a missing schema gracefully).
+    # Kept for orphans too: the stored inventory is exactly what you may want to
+    # review before cleaning it up.
     print qq{<a class="btn" href="} . esc(script_url() . '?action=device_inventory&dev=' . CGI::escape($dev)) . qq{">Inventory</a>\n};
-    if ($show_table) {
+    if (!$is_orphan && $show_table) {
         # (The per-device "Check for empty backups" button was removed: the
         # table shows every backup's byte size, and a 0-byte backup row is
         # highlighted red, so a separate check action is redundant.)
@@ -8912,7 +9059,13 @@ sub show_backup_list {
     print qq{</div>\n};
 
     if ($err) {
-        print qq{<p class="error">} . esc($err) . qq{</p>\n};
+        # Engine error (e.g. an orphan device: a dashboard/DB entry whose id is no
+        # longer in the device table -> fetchconfig.pl -l exits "unknown device").
+        # Show it in the standard dark tool-output box with the model-registration
+        # preamble collapsed, like every other tool-output window, instead of a
+        # bare red paragraph dumping the whole 26-line registration list.
+        print qq{<p class="error">The backup list for this device could not be retrieved.</p>\n};
+        print tool_output_box($err);
     } elsif (!@$backups) {
         print qq{<p>No configuration backups are available for this device yet. }
             . qq{Use <strong>Backup now</strong> above to take an initial backup.</p>\n};
@@ -12885,6 +13038,16 @@ sub show_tools {
     print csrf_field();
     print qq{<p><button type="submit" class="btn btn-danger">Delete orphaned backups</button></p>\n};
     print $cgi->end_form;
+
+    # These tools clean orphaned backup FILES on disk. The history/inventory
+    # DATABASE has its own orphans (ids gone from the table but still in the DB);
+    # those are cleaned in Orphan dashboard cleanup. Cross-link so both are
+    # reachable from one place.
+    print qq{<h3>Orphaned database entries</h3>\n};
+    print qq{<p class="muted">Orphaned rows in the history/inventory database }
+        . qq{(not the on-disk backups) are cleaned separately.</p>\n};
+    print qq{<p><a class="btn" href="} . esc(script_url() . '?action=dashboard_cleanup')
+        . qq{">Orphan dashboard cleanup</a></p>\n};
     print qq{</div>\n};   # .tool-section (Orphaned backup cleanup)
     }
 
@@ -18003,7 +18166,9 @@ sub do_restore_backup {
     }
 
     # Current bytes, so the pre-restore backup captures exactly what's live.
-    my ($current, $rerr) = slurp_device_table();
+    # Unlocked read: we already hold LOCK_EX here, so the public (shared-locking)
+    # slurp would self-deadlock on a second handle to the same sidecar.
+    my ($current, $rerr) = slurp_device_table_unlocked();
     $current = '' unless defined $current;
     my ($ok, $info) = backup_and_write_table($current, $restore_content);
     if (!$ok) {
@@ -18839,7 +19004,7 @@ sub do_edit_site {
             _sites_redirect(err => "Site renamed in the database, but the device table could not be locked for the site= rewrite: $lock_err");
             return;
         }
-        my ($content, $cerr) = slurp_device_table();
+        my ($content, $cerr) = slurp_device_table_unlocked();   # LOCK_EX held above
         if (!$cerr) {
             my $recs = parse_device_table($content);
             my $changed = 0;
@@ -21347,9 +21512,39 @@ sub serialize_records {
 #
 # Parameters: none
 ################################################################################
+# _device_table_lock_file
+#
+# Single source of truth for the sidecar lock path, so the exclusive writer
+# lock (lock_device_table) and the shared reader lock (_shared_lock_device_table)
+# are guaranteed to be on the SAME file. If they ever diverged the locks would
+# not serialise against each other and the whole scheme would silently fail.
+sub _device_table_lock_file {
+    my $dir = (defined $BACKUP_TMP_DIR && $BACKUP_TMP_DIR ne '') ? $BACKUP_TMP_DIR : $SESSION_DIR;
+    return "$dir/device_table.lock";
+}
+
+# _shared_lock_device_table
+#
+# Best-effort SHARED lock on the writer sidecar. Returns a filehandle whose
+# scope IS the lock (LOCK_SH released when it leaves scope); a reader keeps it
+# in a lexical for the duration of the read so it never lands in the middle of
+# backup_and_write_table()'s in-place truncate+rewrite (writers hold LOCK_EX
+# across that window). Returns undef if the sidecar can't be opened or locked,
+# in which case the caller reads unlocked -- the pre-2.18 behaviour -- rather
+# than failing the read. Callers that ALREADY hold LOCK_EX must NOT use this
+# (they would self-deadlock on a second handle); they read via
+# slurp_device_table_unlocked() instead.
+sub _shared_lock_device_table {
+    my $lock = _device_table_lock_file();
+    my $fh;
+    open($fh, '>>', $lock) or return undef;
+    chmod(0600, $lock);   # match lock_device_table: owner-only 0-byte target
+    flock($fh, LOCK_SH) or return undef;
+    return $fh;
+}
+
 sub lock_device_table {
-    my $dir  = (defined $BACKUP_TMP_DIR && $BACKUP_TMP_DIR ne '') ? $BACKUP_TMP_DIR : $SESSION_DIR;
-    my $lock = "$dir/device_table.lock";
+    my $lock = _device_table_lock_file();
     my $fh;
     unless (open($fh, '>>', $lock)) {
         return (undef, "Could not open lock file $lock: $!");
@@ -21401,13 +21596,22 @@ sub device_table_mtime {
 #
 # Parameters: none
 ################################################################################
-sub slurp_device_table {
+sub slurp_device_table_unlocked {
     open(my $fh, '<', $DEVICE_TABLE)
         or return (undef, "Cannot read device table $DEVICE_TABLE: $!");
     local $/;
     my $content = <$fh>;
     close($fh);
     return ($content, undef);
+}
+
+sub slurp_device_table {
+    # Take a shared lock first so the read is never torn by a concurrent write
+    # (writers hold LOCK_EX across the in-place rewrite). $lk is held until this
+    # sub returns, then released. Callers already holding LOCK_EX must call
+    # slurp_device_table_unlocked() directly to avoid a self-deadlock.
+    my $lk = _shared_lock_device_table();
+    return slurp_device_table_unlocked();
 }
 
 ################################################################################
@@ -23270,7 +23474,7 @@ sub do_save_table {
     # their original value. The guard above (held under the lock) means this
     # matches exactly what the editor was built from, so original record index
     # N ("rN") lines up with $orig[N].
-    my ($content, $rerr) = slurp_device_table();
+    my ($content, $rerr) = slurp_device_table_unlocked();   # LOCK_EX held above
     if ($rerr) { redirect_to_action('edit_table', err => $rerr); return; }
     my $orig = parse_device_table($content);
 
@@ -23855,7 +24059,7 @@ sub do_bulk_save {
         return;
     }
 
-    my ($content, $rerr) = slurp_device_table();
+    my ($content, $rerr) = slurp_device_table_unlocked();   # LOCK_EX held above
     if ($rerr) {
         show_bulk_edit($user, scalar($cgi->param('devices')), [$rerr]);
         return;
@@ -25674,6 +25878,10 @@ sub read_device_ids {
         $dbh->disconnect if $dbh;
     }
     my @devices;
+    # Shared lock for the duration of the read (held via $lk until this sub
+    # returns), so the device-list / dashboard render never parses a half-written
+    # table during a concurrent save. Best-effort; never called under LOCK_EX.
+    my $lk = _shared_lock_device_table();
     open(my $fh, '<', $DEVICE_TABLE)
         or return ([], "Cannot read device table $DEVICE_TABLE: $!");
     my %seen;
@@ -26226,6 +26434,26 @@ sub collapse_model_registration {
         push @out, "${prefix}$count models registered";
     }
     return join("\n", @out);
+}
+
+################################################################################
+# tool_output_box
+#
+# Render captured engine/tool output in the standard dark "tool output" box used
+# across the tool pages: a <pre class="config"> with the per-model "registering
+# model:" preamble collapsed (display-only, via collapse_model_registration).
+# Use it everywhere raw fetchconfig stdout/stderr is shown to the user -- success
+# transcripts AND error paths -- so every tool-output window looks the same
+# (black box, condensed models) instead of a bare red <p class="error"> that
+# dumps the 26-line registration preamble. Empty/undef input -> ''.
+#
+# Parameters:
+#   $text
+################################################################################
+sub tool_output_box {
+    my ($text) = @_;
+    return '' unless defined $text && $text ne '';
+    return qq{<pre class="config">} . esc(collapse_model_registration($text)) . qq{</pre>\n};
 }
 
 ################################################################################
@@ -28351,7 +28579,7 @@ sub page_head {
                 $su->('Check devices for consistent backup suffixes', '?action=tool_suffix'),
                 $su->('Check site assignment',                        '?action=check_site_assignment'),
             );
-            push @tool_items, $su->('Cleanup dashboard', '?action=dashboard_cleanup')
+            push @tool_items, $su->('Orphan dashboard cleanup', '?action=dashboard_cleanup')
                 if $ENABLE_DASHBOARD;
             push @tool_items,
                 $su->('Device debug logs',                            '?action=tool_debug'),

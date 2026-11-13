@@ -13,8 +13,8 @@ use FCWebTest qw(cgi_path);
 
 # --- version bump ---------------------------------------------------------
 my $cgi = do { local $/; open(my $f, '<', cgi_path()) or die $!; <$f> };
-like($cgi, qr/APP_VERSION\s*=>\s*'2\.17\.15'/,          'APP_VERSION 2.17.15');
-like($cgi, qr/APP_VERSION_INTERNAL\s*=>\s*'2\.17\.15'/, 'APP_VERSION_INTERNAL 2.17.15');
+like($cgi, qr/APP_VERSION\s*=>\s*'2\.18\.1'/,          'APP_VERSION 2.18');
+like($cgi, qr/APP_VERSION_INTERNAL\s*=>\s*'2\.18\.1'/, 'APP_VERSION_INTERNAL 2.18');
 
 # --- migration file -------------------------------------------------------
 ok(-f 'fetchconfig-web-dbupdate-2.15.sql', 'the 2.15 migration file exists');

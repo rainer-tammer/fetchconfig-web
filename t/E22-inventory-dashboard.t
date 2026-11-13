@@ -99,7 +99,7 @@ like($css, qr/\.dash-cat-dim \{ background: var\(--color-faint\)/,
      '"Other" bar is dimmed');
 
 # --- version ---------------------------------------------------------------
-is(main::APP_VERSION(),          '2.17.15', 'APP_VERSION 2.17.15');
-is(main::APP_VERSION_INTERNAL(), '2.17.15', 'APP_VERSION_INTERNAL 2.17.15 (stays equal to APP_VERSION)');
+is(main::APP_VERSION(),          '2.18.1', 'APP_VERSION 2.18.1');
+is(main::APP_VERSION_INTERNAL(), '2.18.1', 'APP_VERSION_INTERNAL 2.18.1 (stays equal to APP_VERSION)');
 
 done_testing();

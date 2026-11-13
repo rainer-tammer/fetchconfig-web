@@ -30,6 +30,8 @@ repository.
   - [Step 8 -- First login](#step-8----first-login)
 - [Part 3 -- Upgrading](#part-3----upgrading)
   - [Upgrading the script](#upgrading-the-script)
+  - [Upgrading to 2.18](#upgrading-to-2.18)
+  - [Upgrading to 2.17.16](#upgrading-to-2.17.16)
   - [Upgrading to 2.17.15](#upgrading-to-2.17.15)
   - [Upgrading to 2.17.14](#upgrading-to-2.17.14)
   - [Upgrading to 2.17.13](#upgrading-to-2.17.13)
@@ -74,8 +76,8 @@ repository.
 
 ### What is in the package
 
-The release archive `fetchconfig-web-2.17.tar` unpacks to a directory
-`fetchconfig-web-2.17/` containing:
+The release archive `fetchconfig-web-2.18.tar` unpacks to a directory
+`fetchconfig-web-2.18/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -545,7 +547,7 @@ JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 # Overrides the version shown in the footer and About dialog. Omit it to show
 # the version the script ships as; the About dialog always shows that one too.
-#APP_VERSION            = 2.17.1
+#APP_VERSION            = 2.18.1
 COPYRIGHT               = 2026 (c) Your Organisation
 ```
 
@@ -1203,6 +1205,22 @@ long-lived `mod_fcgid` workers keep running the old code until recycled, and
 `touch` does not trigger a reload. Run `apachectl graceful` after the copy
 (see *Step 7 -- Web server configuration*). Plain CGI needs no such step.
 
+### Upgrading to 2.18
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` **and** `fetchconfig-web.css`
+> into `WEB_DIR` as in [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the
+> server; hard-reload / Ctrl-F5 so the new CSS loads). Orphaned dashboard/DB entries now show a red
+> **Orphan DB** pill and route to **Orphan dashboard cleanup** (the renamed *Cleanup dashboard*),
+> which also clears the inventory tables. No schema or grant change: the writer role already owns the
+> inventory tables, so it can delete their rows.
+
+### Upgrading to 2.17.16
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). Display fix:
+> the device-backups page shows an engine error (e.g. for an orphan device) in the standard dark
+> tool-output box with the model-registration preamble collapsed.
+
 ### Upgrading to 2.17.15
 
 > **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
@@ -1837,7 +1855,7 @@ has nothing to show. Enabling it is three steps:
 2. **Turn the dashboard on.** Set `ENABLE_DASHBOARD = 1` in
    `/etc/fetchconfig-web.cfg`. A **Dashboard** menu then appears: **Overview**
    ("Backup health") for every user -- a site-limited user sees only their own
-   sites -- and **All devices** for administrators. **Tools -> Cleanup dashboard**
+   sites -- and **All devices** for administrators. **Tools -> Orphan dashboard cleanup**
    (admin) removes statistics for devices no longer in the device table. While the
    dashboard is enabled, users also land on the Overview after login.
 

@@ -1053,6 +1053,9 @@
   .dash-badge-failed { background: var(--color-danger-bg); border-color: var(--color-danger); color: var(--color-danger-text); }
   .dash-badge-never  { background: #f1f1f1; border-color: var(--color-border);    color: var(--color-faint); }
   .dash-badge-nodata { background: #eef2f7; border-color: #c3cfe0; color: var(--color-muted); }
+  /* Orphan DB: a DB/dashboard row whose device-id is no longer in the device
+     table. Red (danger tone), distinct from the yellow "stale". */
+  .dash-badge-orphan { background: var(--color-danger-bg); border-color: var(--color-danger); color: var(--color-danger-text); }
   /* Per-backup SHA1 copy button (a darker gray than .btn-gray). */
   .sha1-btn { background: #6c757d; }
   .sha1-btn:hover { background: #596069; }

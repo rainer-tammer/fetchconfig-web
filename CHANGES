@@ -3,6 +3,75 @@ fetchconfig-web -- Change Log
 
 Release history for fetchconfig-web, newest version first.
 
+2.18.1
+======
+
+Concurrency hardening. No database change, no configuration change.
+
+- Device-table reads can no longer be torn by a concurrent save. The table is
+  rewritten in place (the web user cannot create files in its directory, so an
+  atomic temp-and-rename is not available), and only writers took the sidecar
+  lock. Readers now take a shared lock for the duration of the read, so a page
+  render never parses a half-written table while a save is in flight. Writers
+  that already hold the exclusive lock read through an unlocked path, so they
+  cannot self-deadlock.
+- Login throttle no longer loses failure counts under concurrency. The per-key
+  failure counter is incremented atomically in the database (failures = failures
+  + 1) instead of read-then-written, so two simultaneous failed logins can no
+  longer both write the same value. (PostgreSQL 8.2 compatible; no RETURNING/ON
+  CONFLICT.)
+- Orphan dashboard cleanup re-checks membership before deleting. The orphan id
+  list is re-verified against the device table inside the delete handler, so a
+  device that was re-added between listing and confirmation is skipped rather
+  than having its fresh rows removed.
+
+2.18
+====
+
+Orphaned dashboard/DB entries (a device-id with history or inventory rows but no
+device-table entry, e.g. a decommissioned or externally removed device) are now
+surfaced and cleaned consistently. No database change.
+
+Dashboard
+---------
+
+- All devices marks an orphan with a red Orphan DB pill instead of the yellow
+  Stale, so a decommissioned device no longer inflates the stale count. The
+  status filter gains an Orphan DB entry, and the orphan's row shows an Orphan
+  dashboard cleanup button in place of View (its View only produced an "unknown
+  device" error).
+- Overview ("Backup health") now excludes orphans from the fleet counts (Total /
+  Fresh / Stale / Failed / Never), the age buckets and the by-site breakdown, so
+  an orphan is no longer counted as Stale. Any orphans are surfaced in a
+  separate Orphan DB notice (admins only) that links to the cleanup.
+
+Device backups page
+-------------------
+
+- For an orphan, Backup now (and Compare/Download) is hidden and replaced by a
+  red Orphan dashboard cleanup button; Inventory is kept so the stored data can
+  be reviewed first. A device-id that is in neither the table nor the DB now
+  shows a plain "No such device" message instead of the raw engine error.
+
+Cleanup
+-------
+
+- Tools -> Cleanup dashboard is renamed Orphan dashboard cleanup, and its delete
+  now also removes the orphan's inventory rows (device_inventory,
+  device_inventory_component, device_inventory_history) alongside the backup_*
+  tables, in one transaction. The on-disk Orphaned backup cleanup tool cross-
+  links to it.
+
+2.17.16
+=======
+
+- Device backups page: when the backup list cannot be retrieved (e.g. an orphan
+  device -- a dashboard/DB entry whose id is no longer in the device table), the
+  engine output is now shown in the standard dark tool-output box with the per-
+  model "registering model" preamble collapsed, instead of a bare red paragraph
+  dumping the whole registration list. New tool_output_box() helper for
+  consistent tool-output rendering.
+
 2.17.15
 =======
 

@@ -109,7 +109,8 @@ my $src = do { open(my $fh, '<', cgi_path()) or die $!; local $/; <$fh> };
     ok(main::cfg_key_is_secret('DEFAULT_PASSWORD', 1), 'V11: DEFAULT_PASSWORD masked');
     my ($lrf) = $src =~ /sub login_record_failure \{(.*?)\n\}/s;
     like($lrf, qr/begin_work/, 'V11: throttle upsert runs in a transaction');
-    like($lrf, qr/Lost the race.*increment it/s, 'V11: PK-collision retry present');
+    like($lrf, qr/SET failures = failures \+ 1/, 'V11: increment is atomic (no SELECT-then-UPDATE lost update)');
+    like($lrf, qr/Lost the insert race.*failures = failures \+ 1/s, 'V11: PK-collision retry re-runs the atomic increment');
 }
 
 # --- version ----------------------------------------------------------------

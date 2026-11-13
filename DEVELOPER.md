@@ -3,7 +3,7 @@
 **Audience:** engineers extending or maintaining fetchconfig-web.
 **Scope:** architecture, request lifecycle, data structures, the PostgreSQL
 schema, the security model, and step-by-step recipes for adding functionality.
-**Version:** this document tracks fetchconfig-web 2.17.15 (requires fetchconfig
+**Version:** this document tracks fetchconfig-web 2.18.1 (requires fetchconfig
 9.80+ -- the release minimum, `MIN_FETCHCONFIG_VERSION`, bumped for the SNMP
 inventory collection; the optional Backup Dashboard needs the engine's DB writer, fetchconfig
 9.75+, per-version line counts need 9.77+, the Setup devices -> Rename
@@ -1361,8 +1361,20 @@ the writer role*.
 = `ENABLE_DASHBOARD`) is open to every authenticated user: a site-limited user
 sees only their own sites (tiles, trend and By-site scoped via
 `read_device_ids($user)`), an unrestricted user the whole fleet. **All devices**
-and **Cleanup dashboard** are admin-only (`dashboard_allowed`). After login, users
-land on the Overview when the dashboard is enabled (`do_login`). Every tile **and
+and **Orphan dashboard cleanup** are admin-only (`dashboard_allowed`). After login, users
+land on the Overview when the dashboard is enabled (`do_login`).
+
+**Orphans.** A device-id with history/inventory rows but no device-table entry is an
+*orphan* (decommissioned, renamed, or removed outside the app). `device_in_table` and
+`device_has_db_rows` classify one id; `dashboard_orphans` returns the fleet set.
+`dashboard_devices_rows` tags such a row `status => 'orphan'` (so it is never counted
+`stale`), `dash_badge` renders the red **Orphan DB** pill, and the row/backups-page action
+is **Orphan dashboard cleanup** (`action=dashboard_cleanup`, renamed from *Cleanup
+dashboard*) instead of **View**/**Backup now**. `do_dashboard_cleanup_delete` deletes the
+`backup_*` **and** the three `device_inventory*` tables in one writer transaction
+(`db_table_exists`-guarded for older schemas). No new grant: the writer *owns* the inventory
+tables, so it may delete their rows -- the "history append-only, no DELETE grant" note in
+`dbsetup` is about not granting DELETE to a *non-owner*, not the owner. Every tile **and
 panel** on both pages carries a **scope pill** -- `global` (blue) or `restricted`
 (red) -- driven by the `unrestricted` flag the data functions return. `dash_scope_pill($scope)`
 renders it (inline next to a panel heading, or pinned top-right inside a tile via
