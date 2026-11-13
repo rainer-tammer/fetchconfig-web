@@ -3,40 +3,342 @@ fetchconfig-web -- Change Log
 
 Release history for fetchconfig-web, newest version first.
 
+2.17.15
+=======
+
+- Device-table editor: deleting an option now restores it to that card's "+ add
+  option" menu. Previously, adding an option then deleting it removed it from
+  the dropdown for the rest of the session, so it could not be added back (e.g.
+  snmp_inventory_level). The option is re-inserted in sorted order with its
+  correct type; applies to device, model-defaults and Email cards.
+
+2.17.14
+=======
+
+- Performance: the device-table editor's --list-allowed-dirs engine fork (~340
+  ms, the largest remaining cost) is now cached across FastCGI requests, like
+  the -t cache -- reused while the device table is unchanged and younger than
+  the TTL, invalidated at once by any save/table change. Plain CGI is
+  unaffected.
+- dbsetup (PostgreSQL 8.2): inventory sequence ownership now uses ALTER TABLE
+  <seq> OWNER TO instead of ALTER SEQUENCE ... OWNER TO (the latter is 8.3+ and
+  errored on 8.2), guarded by an existence check; CREATE LANGUAGE plpgsql is
+  skipped when the language already exists (no more spurious error in the server
+  log). Existing installs can set the ownership directly -- see the 2.17.14
+  upgrade note.
+
+2.17.13
+=======
+
+- Performance: schema/column existence probes now use pg_catalog (pg_class /
+  pg_attribute) instead of the information_schema views, which are very slow on
+  PostgreSQL 8.2. A single information_schema.tables probe was ~340 ms and
+  dominated the device-table editor render; it is now sub-millisecond. Same fix
+  applied to the inventory viewer, the inventory dashboard, the backup-health
+  check and the schema-version lookup. One-time migration .sql files are
+  unchanged.
+
+2.17.12
+=======
+
+- Diagnostics: with SHOW_RENDER_TIME=1, the device-table editor now appends an
+  HTML comment breaking the server render time into phases (auth/DB, parse,
+  templates -t, inventory DB, row build), and the "Rendered in" line shows the
+  device count. View source to read it. No cost when the flag is off.
+
+2.17.11
+=======
+
+- Performance (FastCGI): the device-table editor forked fetchconfig.pl -t on
+  every load just to check for broken templates. That result is now cached
+  across requests and reused while the device table is unchanged and the result
+  is younger than 60s, so a healthy install forks the engine at most once per
+  minute. A save, or any device-table change, invalidates it immediately. Plain
+  CGI is unaffected.
+
+2.17.10
+=======
+
+- Performance: the device-table editor renders much faster on large fleets.
+  mask_secrets() (run on every escaped value) now short-circuits strings that
+  cannot contain a credential, so the device list is built with a fraction of
+  the work. Output is byte-for-byte identical. In testing, server-side render of
+  2600 devices dropped from ~1.4s to ~0.1s.
+
+2.17.9
+======
+
+- Device-table editor: the "Save changes" button stays greyed out until the
+  editor is dirty, and a save only writes a device table when there are actual
+  changes. It enables on the first edit in any tab (devices, defaults, email,
+  general) and after a Preview round-trip.
+
+2.17.8
+======
+
+- Inventory dashboard: the Needs-attention empty state no longer claims every
+  device was collected while some are still pending their first collection. It
+  now reads "No failed or disabled collections" and points at the Pending tile.
+  (Needs attention still lists failed/disabled only.)
+
+2.17.7
+======
+
+Inventory dashboard: distinguish "pending" from "not configured".
+
+- A device with no inventory row is now split into Pending (SNMP inventory is
+  configured -- on its own line or via a default: line -- but not collected yet)
+  and Not configured (no SNMP credentials). Determined from the device table
+  using the engine enable rule (snmp_inventory != 0 and a community / v3 user
+  present). Separate KPI tiles, and a three-way Collection-coverage bar.
+
+2.17.6
+======
+
+Inventory dashboard: per-panel "Show N" selector.
+
+- By vendor / Top models / OS versions and Needs attention each get a Show N
+  select in the upper-right (5 / 10 / 25 / 50 / 100 / All). Defaults: 10 for the
+  ranked panels, 25 for Needs attention. The choice is saved per panel in the
+  fcweb_invshow cookie and read server-side, so the first render already matches
+  it.
+
+2.17.5
+======
+
+Inventory dashboard fixes.
+
+- Collection status now uses the real status values (successful / failed /
+  disabled); shows OK / Failed / (Disabled) / Not collected.
+- Firmware tile now counts devices that actually have firmware (read from
+  device_inventory_component.fw_version), instead of always showing n/a.
+- Needs attention now lists only devices that failed or are disabled — not
+  successful or never-collected ones.
+- Top models / OS versions now show the vendor in front; long labels wrap.
+  Status label "OK" → "Successful". Added vertical spacing between the
+  dashboard's panel rows. Header now reads "Last (partial) collection attempt
+  seen".
+
+2.17.4
+======
+
+Inventory dashboard. Code + CSS, no database change (reads the existing
+inventory tables).
+
+- New Dashboard -> Inventory: a read-only, fleet-wide roll-up of the SNMP
+  inventory (device_inventory) -- KPI tiles (devices, with/without inventory,
+  failed, stacked, firmware set), collection coverage and status bars, ranked By
+  vendor / Top models / OS versions breakdowns, a data-freshness view (age of
+  the last success), and a Needs attention list (failed / partial / stale
+  devices, each linking to its Inventory data page). Shown only when
+  ENABLE_DASHBOARD = 1; scoped to the viewer's visible devices (global vs
+  restricted scope pill), and degrades to a short notice if the inventory schema
+  is absent or unreadable. Reuses the existing dashboard styling.
+- Docs: README documents the new dashboard, and the Tools-menu entry list is
+  reordered to match the actual menu order.
+
+2.17.3
+======
+
+Devices list: column reorder, plus a documentation note. Code + docs, no DB
+change, no CSS change.
+
+- Devices -> Devices column order is now Model | Device-ID | Hostname | Vendor |
+  HW Model | Site | Comment | Note (Device-ID and Hostname moved up next to
+  Model). The filter row follows the same order (Model, device, hostname, Site,
+  comment). Purely cosmetic: sorting still keys off each header's data-key and
+  filtering off the row data-* attributes, so neither is affected.
+- Docs: README gains a "Secret masking" section describing the two placeholder
+  forms the config/compare/device-table views use -- a quoted value keeps its
+  quotes and masks the contents (""), a bare value becomes the sentinel ?? --
+  and which credential patterns mask_secrets covers. No behaviour change.
+- Docs: new QUICK-INSTALL -- a one-page, command-only install checklist that
+  points back to the matching INSTALL step for each item, for operators who want
+  the fast path.
+- Docs: the rendered HTML now prints in a smaller, print-native type size (body
+  10pt, code blocks 8.5pt) on top of the existing print rules (nav hidden, full-
+  width, wrapped code). Render-only.
+- Docs: documentation consistency pass. Corrected the stated minimum engine
+  version to 9.80 (README/INSTALL had 9.77; MIN_FETCHCONFIG_VERSION is 9.80);
+  added the 2.17 sysName/sysLocation/ sysContact fields to the README inventory
+  summary; added INSTALL upgrade notes and TOC entries for 2.17.0-2.17.3; and
+  refreshed stale version examples. Doc-only.
+
+2.17.2
+======
+
+Two fixes. Code + docs, no DB change.
+
+- Secret masking: a PLANET switch config uses the bare snmp community <value>
+  command (no -server), e.g. snmp community "public" ro or no snmp community
+  public. The config/diff viewer now masks the community in that form too
+  (quoted or bare, with an optional no prefix); the ro/rw access level stays
+  visible. Previously only snmp-server community / set snmp community were
+  masked, so planet-ssh communities showed in cleartext.
+- LICENSE page: LICENSE.html is regenerated from the plain LICENSE master (as
+  INSTALL documents) instead of LICENSE.md; the full licence text now renders
+  inside a <pre> block rather than collapsing into the page lede with a literal
+  `.
+
+2.17.1
+======
+
+Devices list: the HW Model column now wraps instead of truncating. Code + CSS,
+no DB change.
+
+- The capped HW Model column (so it can't dominate the row) lets a long value
+  wrap onto further lines rather than being clipped with a fade (2.16.6) --
+  nothing is hidden. The title tooltip stays.
+- Docs: the rendered reference manual is now README.html (was fetchconfig-web-
+  documentation.html) so every X.md renders to X.html consistently; the page
+  title is unchanged ("fetchconfig-web -- Documentation"). Update any deploy
+  script or bookmark that referenced the old name.
+
+2.17.0
+======
+
+Inventory: device SNMP system-group fields (sysName / sysLocation / sysContact).
+Schema 2.16 -> 2.17; run fetchconfig-web-dbsetup.pl --upgrade.
+
+- Three new nullable text columns on device_inventory -- sysname, syslocation,
+  syscontact (SNMPv2-MIB system-group scalars). Additive only: no change to any
+  existing table, column, grant or index.
+- The per-device Inventory viewer shows them in the Summary table (next to
+  Vendor/Model/Serial); a NULL shows as an em-dash.
+- Current-state only: these are not change-detection triggers and are not
+  written to the inventory history (a rename/relocation is administrative, not a
+  hardware event).
+- fetchconfig-web-dbupdate-2.17.sql (8.2-safe, idempotent, no grant change);
+  @UPDATES gains the 2.17 row with a col_exists signature probe. The columns
+  stay NULL until an engine build that collects them is deployed; one web build
+  runs against both a 2.16 and a 2.17 database.
+
+2.16.6
+======
+
+Devices list: tame the HW Model column. Code + CSS, no DB change.
+
+- The HW Model cell is capped at ~25 characters on one line, with the overflow
+  faded out (CSS mask) instead of widening the column; the full value is in the
+  cell's native title tooltip. No extra DOM -- just a title attribute and a CSS
+  mask (browsers without mask-image support fall back to a plain clip).
+
+2.16.5
+======
+
+Backup Now page tidy-up. Code only, no DB or CSS change.
+
+- Removed the redundant blue "Return to backups for ..." button at the bottom;
+  the green breadcrumb button above the output now reads "Backup view <device>"
+  and links to the same place.
+
+2.16.4
+======
+
+Inventory-view wrapping fix. Code + CSS, no DB change.
+
+- The Components and Change-history tables now use a fixed column grid pinned to
+  the content width, so they can never grow past the content box -- long cells
+  wrap instead (2.16.3 fixed only the Summary "Hardware set" row).
+- Docs: the new "User/secret alias conventions" section rendered literal
+  ->/&rArr; entities as text; they are now plain -> / =>.
+
+2.16.3
+======
+
+Device-table editor: pw: credential aliases (Step 2), plus two view tweaks. Code
++ CSS, no DB change. Alias references need engine 9.79+; the first-character
+escaping of a verbatim value starting with $ or \ needs the engine's de-escape
+grammar (fetchconfig-pw-alias-grammar-engine.md).
+
+- Credential fields (user, pass, enable, snmp_user, snmp_community,
+  snmp_write_community, snmp_authpass, snmp_privpass) become a dropdown of the
+  matching-kind pw: aliases plus a verbatim field. An alias is stored and shown
+  as $Name (never masked, with an info note); a verbatim secret stays masked, a
+  verbatim user name is shown in clear. On save a literal is quoted
+  (comma/whitespace) or leading-escaped (\$/\\), never both; interior \/$ are
+  untouched.
+- New ALIAS_REPLACE_ON_SAVE config key (off | secrets | users | all, default
+  off): fold a verbatim value that matches a defined alias's value back into
+  $Alias on save (compared in memory, never displayed or logged).
+- snmp_level is now a dropdown (noAuthNoPriv / authNoPriv / authPriv, or blank
+  to derive from the passphrases) instead of free text.
+- Inventory view: Hardware set and the change-history Members list show one
+  component per line.
+
+2.16.2
+======
+
+Fix: the 2.16.1 Dismiss-button inline script was emitted malformed (a brace-
+counting bug), which broke the page's other scripts. Now built correctly, with a
+balanced-JS regression test. Code only.
+
+2.16.1
+======
+
+The external device-table-change warning banner gains a Dismiss button: it
+clears the viewer's one-shot notice server-side (audited), without reloading the
+page. Code only.
+
+2.16
+====
+
+Schema level 2.16: adds device_inventory_component.fw_version (firmware / ROMMON
+version), written by the engine's SNMP inventory collector. DB change (one
+nullable column, additive); run fetchconfig-web-dbsetup.pl --upgrade.
+
+- Release minimum engine raised 9.78 -> 9.80 (a soft, non-blocking header
+  warning appears on an older engine).
+- fetchconfig-web-dbupdate-2.16.sql adds fw_version TEXT to
+  device_inventory_component (8.2-safe, idempotent, no grant change).
+- The per-device Inventory viewer gains an FW version column (after SW).
+- Fixed: the About dialog now reads the applied DB schema level live, instead of
+  caching it for the FastCGI process lifetime (it went stale after --upgrade).
+
+2.15
+====
+
+Device Inventory (engine 9.79+): the DB schema, the SNMP inventory editor
+options, and a read-only per-device viewer, plus pw: credential allow-list
+preservation. DB change at schema 2.15 (--upgrade); the feature stays inert
+until an SNMP-inventory engine is configured.
+
+- Schema 2.15 (fetchconfig-web-dbupdate-2.15.sql): three writer-owned tables
+  (device_inventory, device_inventory_component, device_inventory_history) --
+  web login SELECT-only, no foreign keys (all keyed on dev_id), 8.2-safe and
+  idempotent.
+- Device editor: the snmp_ option set (community / version / port / timeout /
+  retries, the SNMPv3 set, snmp_inventory, snmp_fatal, snmp_max_repetitions,
+  snmp_inventory_interval; snmp_profile_file is default:-only), offered via +
+  add option. SNMP credential options are masked like pass=. procurve-snmp's
+  community is renamed to snmp_community.
+- Read-only Inventory page per device (summary, component list, change history),
+  with the same per-site access check as the backups page.
+- The pw: credential allow-list is preserved verbatim from disk and never
+  editable in the web UI; pw: pass values are masked, the $alias stays visible.
+  (Editor alias selection arrived in 2.16.3.)
+- Editor fixes: an empty option value is no longer written as key=; on/off
+  options accept the engine's permissive forms (1/0/yes/no) without blocking a
+  save; every model shows site as a dropdown; an existing default: entry's model
+  is locked (it is the entry key); the Defaults tab is sorted by model with a
+  filter box.
+
 2.14
 ====
 
-Adds Setup devices -> Rename device-id, a web front-end for the fetchconfig
-engine's device-id rename.
+Setup devices -> Rename device-id: a web front-end for the engine's device-id
+rename (requires fetchconfig 9.78+). Privilege-only DB change (--upgrade).
 
-Upgrading: run fetchconfig-web-dbsetup.pl --upgrade (applies fetchconfig-web-
-dbupdate-2.14.sql), or apply that .sql by hand. It is a privilege-only change
-(no table/column change). Requires fetchconfig 9.78+ for the rename itself.
-
-- Setup devices -> Rename device-id (all-sites editors only): rename a device's
-  id everywhere -- the device table, the on-disk backup tree, and (if a history
-  database is configured) the dashboard history. The engine does the work under
-  its table-file lock; the page offers a mandatory dry-run Preview first, then
-  performs the rename on confirmation and shows the engine's transcript. It runs
-  through the sudo helper (like Backup Now) so it can take the lock and move the
-  backup tree; the existing script-path sudoers rule covers it (no new rule).
-  Any two device types are renameable. The fetchconfig-web-owned device note
-  moves with the device, and the rename is written to the audit log. The menu
-  item appears only when the installed engine is 9.78+. In the device-table
-  editor an existing device's Device-ID is now read-only (rename it here
-  instead); a new, unsaved device's id stays editable.
-- Replay DB change: a button that runs the engine's --replay-db-change to flush
-  the history-database outbox (used if a rename finished while the database was
-  unreachable and its update was queued).
-- fetchconfig-web-dbupdate-2.14.sql + dbsetup.pl --upgrade: grant the writer
-  role UPDATE on dev_id for backup_runs and backup_versions (and record DB
-  schema level 2.14), so the engine can carry the id change into the history
-  tables. backup_current already had table-wide UPDATE. Column-level grants need
-  PostgreSQL 8.4+; below 8.4 a whole-table UPDATE is granted instead (the writer
-  owns these tables, so this does not widen effective access). The web login
-  stays SELECT-only.
-- Requires fetchconfig 9.78+ (MIN_FETCHCONFIG_VERSION). Older engines: a non-
-  blocking header warning, and the Rename menu item is hidden.
+- Rename a device id everywhere -- device table, on-disk backup tree, and
+  dashboard history -- under the engine's lock, with a mandatory dry-run
+  Preview; runs through the sudo helper. The device note moves with it and the
+  rename is audited. An existing device's Device-ID becomes read-only in the
+  editor.
+- Replay DB change button: flush the history-database outbox after a rename that
+  queued while the database was unreachable.
+- fetchconfig-web-dbupdate-2.14.sql grants the writer role UPDATE on dev_id for
+  backup_runs / backup_versions (column-scoped on PostgreSQL 8.4+, whole-table
+  below) and records schema 2.14. The web login stays SELECT-only.
 
 2.12
 ====

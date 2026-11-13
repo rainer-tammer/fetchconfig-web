@@ -3,7 +3,7 @@
 This guide takes you from an empty web server to a running **fetchconfig-web**
 instance, and covers upgrading an existing installation. It is the
 operator's checklist; the full feature reference lives in `README.md`
-(rendered as `fetchconfig-web-documentation.html`).
+(rendered as `README.html`).
 
 fetchconfig-web is a single Perl script (`fetchconfig-web.cgi`) that sits
 in front of an existing [fetchconfig](https://github.com/rainer-tammer/fetchconfig)
@@ -30,6 +30,29 @@ repository.
   - [Step 8 -- First login](#step-8----first-login)
 - [Part 3 -- Upgrading](#part-3----upgrading)
   - [Upgrading the script](#upgrading-the-script)
+  - [Upgrading to 2.17.15](#upgrading-to-2.17.15)
+  - [Upgrading to 2.17.14](#upgrading-to-2.17.14)
+  - [Upgrading to 2.17.13](#upgrading-to-2.17.13)
+  - [Upgrading to 2.17.12](#upgrading-to-2.17.12)
+  - [Upgrading to 2.17.11](#upgrading-to-2.17.11)
+  - [Upgrading to 2.17.10](#upgrading-to-2.17.10)
+  - [Upgrading to 2.17.9](#upgrading-to-2.17.9)
+  - [Upgrading to 2.17.8](#upgrading-to-2.17.8)
+  - [Upgrading to 2.17.7](#upgrading-to-2.17.7)
+  - [Upgrading to 2.17.6](#upgrading-to-2.17.6)
+  - [Upgrading to 2.17.5](#upgrading-to-2.17.5)
+  - [Upgrading to 2.17.4](#upgrading-to-2.17.4)
+  - [Upgrading to 2.17.3](#upgrading-to-2.17.3)
+  - [Upgrading to 2.17.2](#upgrading-to-2.17.2)
+  - [Upgrading to 2.17.1](#upgrading-to-2.17.1)
+  - [Upgrading to 2.17.0](#upgrading-to-2.17.0)
+  - [Upgrading to 2.16.2](#upgrading-to-2.16.2)
+  - [Upgrading to 2.16.1](#upgrading-to-2.16.1)
+  - [Upgrading to 2.16](#upgrading-to-2.16)
+  - [Upgrading to 2.15.3](#upgrading-to-2.15.3)
+  - [Upgrading to 2.15.2](#upgrading-to-2.15.2)
+  - [Upgrading to 2.15.1](#upgrading-to-2.15.1)
+  - [Upgrading to 2.15](#upgrading-to-2.15)
   - [Upgrading to 2.14](#upgrading-to-2.14)
   - [Upgrading to 2.11](#upgrading-to-2.11)
   - [Upgrading to 2.10](#upgrading-to-2.10)
@@ -51,8 +74,8 @@ repository.
 
 ### What is in the package
 
-The release archive `fetchconfig-web-2.14.tar` unpacks to a directory
-`fetchconfig-web-2.14/` containing:
+The release archive `fetchconfig-web-2.17.tar` unpacks to a directory
+`fetchconfig-web-2.17/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -69,13 +92,16 @@ The release archive `fetchconfig-web-2.14.tar` unpacks to a directory
 | `fetchconfig-web-dbupdate-2.11.sql` | Idempotent SQL that adds the 2.11 Backup-Dashboard history schema (`schema_migrations`, `backup_current`, `backup_runs`, `backup_versions`; PostgreSQL 8.2+). Schema only -- grants are done by `fetchconfig-web-dbsetup.pl --upgrade`. |
 | `fetchconfig-web-dbupdate-2.12.sql` | Idempotent SQL that adds the 2.12 per-version line-count columns (`backup_versions.lines_added`, `lines_removed`; PostgreSQL 8.2+) for the Changes view. Schema only -- grants are done by `fetchconfig-web-dbsetup.pl --upgrade`. |
 | `fetchconfig-web-dbupdate-2.14.sql` | Idempotent SQL for the 2.14 device-id rename: grants the writer role UPDATE on `dev_id` for `backup_runs` / `backup_versions` and records DB schema level 2.14 (PostgreSQL 8.2+). Column-level grants need 8.4+; below 8.4 it grants whole-table UPDATE instead. Privilege-only -- no table/column change. `fetchconfig-web-dbsetup.pl --upgrade` issues the same grants with the configured writer name. |
+| `fetchconfig-web-dbupdate-2.15.sql` | Idempotent SQL that adds the 2.15 Device-Inventory schema (`device_inventory`, `device_inventory_component`, `device_inventory_history`; PostgreSQL 8.2+) for the engine's SNMP inventory collector. Schema only -- grants are done by `fetchconfig-web-dbsetup.pl --upgrade`. |
+| `fetchconfig-web-dbupdate-2.16.sql` | Idempotent SQL that adds the 2.16 column `device_inventory_component.fw_version` (firmware/ROMMON version; nullable; PostgreSQL 8.2+). Additive, schema only -- **no grant change** (the column inherits the table's existing whole-table privileges). |
+| `fetchconfig-web-dbupdate-2.17.sql` | Idempotent SQL that adds the 2.17 columns `device_inventory.sysname` / `syslocation` / `syscontact` (SNMPv2-MIB system-group values; nullable; PostgreSQL 8.2+). Additive, schema only -- **no grant change** (the columns inherit the table's existing whole-table privileges). |
 | `fetchconfig-web-clean-resets.pl` | Standalone script to prune spent password-reset tokens and stale login-throttle rows (`-h` for help, `-s` to print the role SQL). |
 | `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`: installs, creates, reverts, deletes or renames a template file; reads/deletes a device debug log; and lists `CRON_USER`'s crontab for the schedule viewer (v1.7). |
 | `imageconvert.pl`, `README.imageconvert.md` (+ `.html`/`README.imageconvert`) | Optional helper for embedding a small image as a base64 Perl constant; its manual (Markdown master, with generated HTML and plain-text). |
 | `images/back.jpg` | Login-page backdrop image. |
 | `favicon.ico` | Browser tab/bookmark icon. Optional; copy to the web server's document root (see Step 4) when the application runs on its own vhost or dedicated server. |
 | `help.html` | The in-application Help page (served from the help tree, `<WEB_DIR><HELP_BASE_URL>`). |
-| `README.md`, `fetchconfig-web-documentation.html`, `README` | Full reference documentation (Markdown master, with generated HTML and plain text). |
+| `README.md`, `README.html`, `README` | Full reference documentation (Markdown master, with generated HTML and plain text). |
 | `INSTALL.md`, `INSTALL.html`, `INSTALL` | This guide (Markdown master, with generated HTML and plain text). |
 | `DEVELOPER.md`, `DEVELOPER.html`, `DEVELOPER` | Developer/architecture documentation (Markdown master, with generated HTML and plain text). |
 | `CHANGES.md`, `CHANGES`, `CHANGES.html` | Change log (Markdown master; the plain-text and HTML are generated by `render-doc.py`). |
@@ -90,7 +116,7 @@ The release archive `fetchconfig-web-2.14.tar` unpacks to a directory
 
 ### Requirements
 
-- **fetchconfig 9.77 or newer** already installed and working. fetchconfig-web
+- **fetchconfig 9.80 or newer** already installed and working. fetchconfig-web
   calls `fetchconfig.pl` and reads its device table, repository and template
   directories; it does not replace fetchconfig.
 - **Perl 5.10 or newer.** Tested on Linux and AIX.
@@ -498,6 +524,12 @@ REQUIRE_BCRYPT          = 1
 # engine's db: option. Default 0.
 ENABLE_DASHBOARD        = 0
 
+# --- credential aliases (device_table pw:) ---
+# On save, fold a verbatim credential value that matches a defined pw: alias's
+# value back into the "$Alias". off (default) | secrets (pass-kind fields only) |
+# users (user-kind fields only) | all. Comparison is in memory only; never logged.
+ALIAS_REPLACE_ON_SAVE   = off
+
 # --- misc ---
 SHOW_RENDER_TIME        = 0
 # Syntax highlighting for template-backed ("generic") devices whose template
@@ -513,7 +545,7 @@ JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 # Overrides the version shown in the footer and About dialog. Omit it to show
 # the version the script ships as; the About dialog always shows that one too.
-#APP_VERSION            = 2.14.0
+#APP_VERSION            = 2.17.1
 COPYRIGHT               = 2026 (c) Your Organisation
 ```
 
@@ -589,7 +621,7 @@ mkdir -p $WEB/help/fetchconfig-web $WEB/help/fetchconfig
 cp help.html $WEB/help/                     # the Help page
 
 # "fetchconfig-web - additional help": copy whichever documents you want listed.
-cp fetchconfig-web-documentation.html INSTALL.html CHANGES.html DEVELOPER.html \
+cp README.html INSTALL.html CHANGES.html DEVELOPER.html \
    LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html COPYING.html \
    $WEB/help/fetchconfig-web/
 
@@ -1142,7 +1174,7 @@ chmod 755 /www/cgi-bin/fetchconfig-web.cgi
 cp fetchconfig-web.css /www/pub/fetchconfig-web/css/     # refresh the stylesheet
 cp help.html /www/pub/fetchconfig-web/help/
 # Refresh the Help-menu documentation pages as well (see Step 4):
-cp fetchconfig-web-documentation.html DEVELOPER.html CHANGES.html INSTALL.html \
+cp README.html DEVELOPER.html CHANGES.html INSTALL.html \
    LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html COPYING.html \
    /www/pub/fetchconfig-web/help/fetchconfig-web/
 ```
@@ -1171,6 +1203,215 @@ long-lived `mod_fcgid` workers keep running the old code until recycled, and
 `touch` does not trigger a reload. Run `apachectl graceful` after the copy
 (see *Step 7 -- Web server configuration*). Plain CGI needs no such step.
 
+### Upgrading to 2.17.15
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). Editor fix:
+> deleting an option restores it to the "+ add option" menu. Hard-reload (Ctrl-F5) so the updated
+> JavaScript loads.
+
+### Upgrading to 2.17.14
+
+> **Code upgrade.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). Caches the
+> `--list-allowed-dirs` engine fork across requests (large win on a busy editor). No schema change.
+>
+> **Also includes a `fetchconfig-web-dbsetup.pl` fix** for PostgreSQL 8.2: inventory sequence
+> ownership now uses `ALTER TABLE <seq> OWNER TO` (the old `ALTER SEQUENCE ... OWNER TO` is 8.3+ and
+> errored on 8.2). New installs get it automatically. For an **existing** install whose setup logged
+> that error, set the two sequences' owner directly, as the DB superuser (replace the writer role if
+> different):
+>
+> ```sql
+> ALTER TABLE public.device_inventory_component_id_seq OWNER TO "fetchconfig_dashboard";
+> ALTER TABLE public.device_inventory_history_id_seq   OWNER TO "fetchconfig_dashboard";
+> ```
+>
+> This is cleanup only -- the writer already holds `USAGE, UPDATE` on the sequences, so collection
+> was never broken.
+
+### Upgrading to 2.17.13
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). Performance
+> fix: existence probes use `pg_catalog` instead of the slow `information_schema` views (a large win
+> on PostgreSQL 8.2). No behaviour or schema change.
+
+### Upgrading to 2.17.12
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). Adds a
+> diagnostic: with `SHOW_RENDER_TIME = 1` in the config, the editor appends an HTML comment
+> breaking the server render into phases (view page source). No change when the flag is off.
+
+### Upgrading to 2.17.11
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). A
+> performance fix only -- under FastCGI the editor no longer re-runs `fetchconfig.pl -t` on every
+> load (cached for up to 60s, invalidated at once by any device-table change). No behaviour change.
+
+### Upgrading to 2.17.10
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). A
+> performance fix only -- the device-table editor renders large fleets much faster. No behaviour
+> change, no cache or CSS impact.
+
+### Upgrading to 2.17.9
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). The
+> device-table editor's "Save changes" button now stays greyed out until there are changes; hard-reload
+> (Ctrl-F5) so the updated JavaScript is picked up.
+
+### Upgrading to 2.17.8
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). Corrects the
+> Needs-attention empty-state wording so it does not claim full success while devices are pending.
+
+### Upgrading to 2.17.7
+
+> **Code only, no database step.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). The Inventory
+> dashboard now tells **Pending** (SNMP inventory configured but not collected yet) apart from **Not
+> configured**, read from the device table. Reads the existing `device_table`; no DB change.
+
+### Upgrading to 2.17.6
+
+> **Code + CSS, no database step.** Copy the new `fetchconfig-web.cgi` **and** `fetchconfig-web.css`
+> into `WEB_DIR` as in [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the
+> server). Adds a per-panel **Show N** selector to the Inventory dashboard (vendor / models / OS and
+> needs-attention), remembered in the `fcweb_invshow` cookie. No DB change.
+
+### Upgrading to 2.17.5
+
+> **Code + CSS, no database step.** Copy the new `fetchconfig-web.cgi` **and** `fetchconfig-web.css`
+> into `WEB_DIR` as in [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the
+> server). Fixes the Inventory dashboard's collection-status counts (uses the real
+> `successful`/`failed`/`disabled` values), the firmware tile (counts
+> `device_inventory_component.fw_version`), and the needs-attention list (failed or disabled only);
+> adds vendor prefixes on the model/OS bars and vertical spacing between the panel rows.
+
+### Upgrading to 2.17.4
+
+> **Code + CSS, no database step.** Copy the new `fetchconfig-web.cgi` **and** `fetchconfig-web.css`
+> into `WEB_DIR` as in [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the
+> server). Adds **Dashboard -> Inventory** (a read-only roll-up of the existing `device_inventory`
+> tables); it appears only when `ENABLE_DASHBOARD = 1` and the inventory schema is present. No new
+> tables or grants -- it reads what is already there.
+
+### Upgrading to 2.17.3
+
+> **Code only, no database step, no CSS change.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR`
+> as in [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server).
+> Reorders the **Devices -> Devices** list columns (Model | Device-ID | Hostname | Vendor | HW Model
+> | Site | Comment | Note) and the matching filter row -- purely cosmetic -- and adds a README
+> "Secret masking" section. No behaviour change.
+
+### Upgrading to 2.17.2
+
+> **Code only, no database step, no CSS change.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR`
+> as in [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server). Masks
+> the planet-ssh `snmp community` form in the config viewer and fixes the rendered `LICENSE.html`.
+
+### Upgrading to 2.17.1
+
+> **Code + CSS, no database step.** Copy the new `fetchconfig-web.cgi` **and**
+> `fetchconfig-web.css` into `WEB_DIR` (under FastCGI, `graceful` the server). The Devices-list
+> **HW Model** column now wraps long values instead of truncating them.
+
+### Upgrading to 2.17.0
+
+> **Schema change (three new nullable columns).** Copy the new `fetchconfig-web.cgi` **and**
+> `fetchconfig-web.css` into `WEB_DIR` as in [Upgrading the script](#upgrading-the-script) (under
+> FastCGI, `graceful` the server). Then run `fetchconfig-web-dbsetup.pl --upgrade`, which applies
+> `fetchconfig-web-dbupdate-2.17.sql` -- `ALTER TABLE device_inventory ADD COLUMN sysname /
+> syslocation / syscontact` (SNMPv2-MIB system-group values). Additive and idempotent; **no grant
+> change** (the columns inherit the table's whole-table privileges). The columns stay NULL until an
+> engine build that collects them is deployed, and one web build runs against both a 2.16 and a 2.17
+> database. (This folds in the code/CSS-only 2.16.3-2.16.6 changes if you are coming from 2.16.2.)
+
+### Upgrading to 2.16.2
+
+> **Code only.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in [Upgrading the
+> script](#upgrading-the-script) (under FastCGI, `graceful` the server). **No database step, no CSS
+> change.** Fixes the 2.16.1 **Dismiss** button (its inline script was malformed and threw a JS
+> error). If you deployed 2.16.1, replace it with this.
+
+### Upgrading to 2.16.1
+
+> **Code only.** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in [Upgrading the
+> script](#upgrading-the-script) (under FastCGI, `graceful` the server). **No database step, no CSS
+> change.** Adds a **Dismiss** button to the external device-table change warning banner.
+
+### Upgrading to 2.16
+
+> **Schema change (one new column).** Copy the new `fetchconfig-web.cgi` into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the server; the CSS
+> is unchanged this release, but the version bump re-fetches it once). Then run
+> `fetchconfig-web-dbsetup.pl --upgrade` (as root), which applies
+> `fetchconfig-web-dbupdate-2.16.sql` -- a single `ALTER TABLE device_inventory_component ADD
+> COLUMN fw_version TEXT` (firmware / ROMMON version), or apply that `.sql` by hand. The
+> migration is **additive and idempotent**: no data change, and **no grant change** (the new
+> column inherits the table's existing whole-table privileges). Requires schema 2.15 first.
+>
+> The new column is written by the fetchconfig engine's SNMP inventory collector at
+> **9.80 or newer**; it stays NULL until such an engine runs. The web viewer shows the new
+> **FW version** column only once the column exists, so copying the `.cgi` before running
+> `--upgrade` is harmless (the column is simply not shown yet).
+
+### Upgrading to 2.15.3
+
+> **Code + CSS (`pw:` credential allow-list preserved).** Copy the new
+> `fetchconfig-web.cgi` **and `fetchconfig-web.css`** into `WEB_DIR` as in
+> [Upgrading the script](#upgrading-the-script) (under FastCGI, `graceful` the
+> server). **No database step.** The device table's `pw:` credential allow-list
+> (engine 9.79+) is now preserved verbatim through an editor save -- armored with
+> its `# credential allow list - must be directly edited on the server` comment
+> lines, like the `directory:` list -- and the raw **Device table** view masks all
+> credentials (including the `pw: pass` secrets). The CSS adds a narrow-wrap for
+> the inventory viewer's long **Hardware set** row. The `pw:` list must be edited
+> directly on the server.
+
+### Upgrading to 2.15.2
+
+> **Code + CSS only (Devices-editor columns + one new SNMP option).** Copy the new
+> `fetchconfig-web.cgi` **and `fetchconfig-web.css`** into `WEB_DIR` as in [Upgrading the
+> script](#upgrading-the-script) (under FastCGI, `graceful` the server). **No database
+> step.** The CSS carries the new Devices-tab columns' layout and the version bump
+> re-fetches it once, so copy it alongside the script. The **Devices** list and the
+> device-table editor now show read-only **Vendor** and **HW Model** columns (from the 2.15
+> `device_inventory` table, when present and readable) and the editor offers the new optional
+> `snmp_max_repetitions` option; both are inert without inventory data / an engine at **9.79**.
+
+### Upgrading to 2.15.1
+
+> **Code + docs only (SNMP inventory device-table options).** Copy the new
+> `fetchconfig-web.cgi` into `WEB_DIR` as in [Upgrading the
+> script](#upgrading-the-script) (under FastCGI, `graceful` the server). **No
+> database step** -- the inventory schema shipped in 2.15 and is unchanged. The new
+> optional `snmp_*` device-table options are inert until the fetchconfig engine is at
+> **9.79** (older engines ignore them), so this upgrade is safe to apply any time.
+
+### Upgrading to 2.15
+
+> **New database schema in 2.15** (the Device Inventory tables, for the engine's
+> optional SNMP inventory collector). Copy the new `fetchconfig-web.cgi` into
+> `WEB_DIR` as in [Upgrading the script](#upgrading-the-script) (under FastCGI,
+> `graceful` the server; the CSS is unchanged this release, but the version bump
+> re-fetches it once). Then run `fetchconfig-web-dbsetup.pl --upgrade` (as root),
+> which applies `fetchconfig-web-dbupdate-2.15.sql`, owns the three inventory
+> tables to the writer role and grants the web user `SELECT` -- or apply that
+> `.sql` by hand and grant as in its header. The migration is **additive**: no
+> existing table or column changes, so a dashboard / rename install keeps working.
+>
+> The inventory tables stay **empty and inert** until a fetchconfig engine with
+> SNMP inventory (**9.79 or newer**) is configured to write them; there is no web
+> UI for inventory in this release. If you do not use the history database at all,
+> you may skip the database step -- 2.15 changes nothing else.
+
 ### Upgrading to 2.14
 
 > **Database privilege change in 2.14** (for the device-id rename). Copy the new
@@ -1187,8 +1428,9 @@ long-lived `mod_fcgid` workers keep running the old code until recycled, and
 >
 > The **Rename device-id** feature (Setup devices menu) additionally requires the
 > **fetchconfig engine at 9.78 or newer**; the menu item stays hidden on older
-> engines. `MIN_FETCHCONFIG_VERSION` is 9.78 in this release, so an older engine
-> also raises the usual non-blocking header warning. The rename runs through the
+> engines. `MIN_FETCHCONFIG_VERSION` was 9.78 as of 2.14 (it is 9.80 in the
+> current release), so an older engine also raises the usual non-blocking header
+> warning. The rename runs through the
 > **sudo helper** (like Backup Now, gated on `USE_SUDO_FOR_BACKUP_NOW = 1`) so it
 > can create the device-table lock and move the backup tree -- the existing
 > script-path sudoers rule already covers it, so **no sudoers change is needed**.
@@ -1427,8 +1669,8 @@ Work through this after a fresh install or an upgrade:
       few hundred KB. A bare **500** with
       `exceeds MaxRequestLen` in the error log means `FcgidMaxRequestLen` is
       still at its 128 KB default -- see Step 7.3.
-- [ ] The footer shows the expected version: *fetchconfig-web v2.12 using
-      fetchconfig v9.77*.
+- [ ] The footer shows the expected version: *fetchconfig-web v2.17.3 using
+      fetchconfig v9.80*.
 
 ### Security hardening checklist
 

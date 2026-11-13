@@ -19,8 +19,8 @@ my $initial_log = <<'LOG';
 fetchconfig.pl: info: version 9.71
 fetchconfig.pl: debug: loading device list
 fetchconfig.pl: error: aruba-cx-ssh: there is no latest config
-fetchconfig.pl: info: -----[sphe352879.net.schuler.de]-----
-fetchconfig.pl: dev=sphe352879.net.schuler.de: debug: aruba-cx-ssh: fetched: 558 lines
+fetchconfig.pl: info: -----[swi01.acme.com]-----
+fetchconfig.pl: dev=swi01.acme.com: debug: aruba-cx-ssh: fetched: 558 lines
 fetchconfig.pl: info: done
 LOG
 

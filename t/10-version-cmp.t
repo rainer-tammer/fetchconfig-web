@@ -13,13 +13,13 @@ is(main::version_cmp('9.9','9.60'),  -1, '9.9 < 9.60 (per-component numeric)');
 # tagged components (e.g. 9.44-ACME) compare on the numeric parts
 is(main::version_cmp('9.60-ACME','9.60'), 0, 'tag ignored on trailing component');
 
-# The gate: installed < MIN (9.78) triggers a warning; >= does not.
-for my $c ([qw(9.59 WARN)],[qw(9.74 WARN)],[qw(9.77 WARN)],[qw(9.78 OK)],[qw(10.0 OK)]) {
+# The gate: installed < MIN (9.80) triggers a warning; >= does not.
+for my $c ([qw(9.59 WARN)],[qw(9.74 WARN)],[qw(9.77 WARN)],[qw(9.79 WARN)],[qw(9.80 OK)],[qw(10.0 OK)]) {
     my ($ver,$exp) = @$c;
     my $too_old = main::version_cmp($ver, main::MIN_FETCHCONFIG_VERSION()) < 0;
     is($too_old ? 'WARN' : 'OK', $exp, "gate: installed $ver vs min "
         . main::MIN_FETCHCONFIG_VERSION());
 }
-is(main::MIN_FETCHCONFIG_VERSION(), '9.78', 'MIN_FETCHCONFIG_VERSION is 9.78');
+is(main::MIN_FETCHCONFIG_VERSION(), '9.80', 'MIN_FETCHCONFIG_VERSION is 9.80');
 
 done_testing();

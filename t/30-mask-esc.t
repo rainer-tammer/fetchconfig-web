@@ -8,7 +8,14 @@ my ($cfg) = make_config(); load_cgi($cfg); main::read_config();
 like(main::mask_secrets('user=admin,pass=secret,x=1'), qr/pass=\?\*\*\*\?/, 'pass masked');
 unlike(main::mask_secrets('user=admin,pass=secret'), qr/secret/, 'password value gone');
 like(main::mask_secrets('enable=ena123'), qr/enable=\?\*\*\*\?/, 'enable masked');
-like(main::mask_secrets('community=public'), qr/community=\?\*\*\*\?/, 'community option masked');
+like(main::mask_secrets('community=public'), qr/community=\?\*\*\*\?/, 'community option (legacy) masked');
+# SNMP inventory credential options (device-table option form, 2.15.1): masked
+# despite the snmp_ prefix (no \b before the secret word, like db_pass).
+like(main::mask_secrets('snmp_community=public'),          qr/snmp_community=\?\*\*\*\?/,      'snmp_community masked');
+like(main::mask_secrets('snmp_write_community=rwpub'),     qr/snmp_write_community=\?\*\*\*\?/, 'snmp_write_community masked');
+like(main::mask_secrets(q{snmp_authpass="a b, c"}),        qr/snmp_authpass=\?\*\*\*\?/,        'snmp_authpass masked (quoted)');
+like(main::mask_secrets('snmp_privpass=xyzzy'),            qr/snmp_privpass=\?\*\*\*\?/,        'snmp_privpass masked');
+unlike(main::mask_secrets('snmp_version=2c,snmp_port=161'), qr/\?\*\*\*\?/,                     'non-secret snmp_* not masked');
 # SNMP community in a switch config (space form), masked but access level kept.
 like(main::mask_secrets('snmp-server community "public" operator'),
      qr/community "\*\*\*" operator/, 'ProCurve quoted community masked, level kept');
@@ -16,6 +23,16 @@ unlike(main::mask_secrets('snmp-server community "private" unrestricted'),
        qr/private/, 'quoted community value gone');
 like(main::mask_secrets('snmp-server community private RW'),
      qr/community \?\*\*\*\? RW/, 'bare community masked, RW kept');
+# PLANET (planet-ssh): the bare "snmp community ..." command (no "-server"),
+# quoted or bare, with an optional "no" prefix; the ro/rw access level is kept.
+like(main::mask_secrets('snmp community "public"  ro'),
+     qr/snmp community "\*\*\*"  ro/, 'PLANET quoted community masked, ro kept');
+unlike(main::mask_secrets('snmp community "secret42" ro'), qr/secret42/, 'PLANET quoted community value gone');
+like(main::mask_secrets('snmp community public ro'),
+     qr/snmp community \?\*\*\*\? ro/, 'PLANET bare community masked, ro kept');
+like(main::mask_secrets('no snmp community public'),
+     qr/no snmp community \?\*\*\*\?/, 'PLANET "no snmp community" value masked');
+unlike(main::mask_secrets('no snmp community topsecret'), qr/topsecret/, 'PLANET negation community value gone');
 # Hirschmann: the community is the QUOTED token, which comes AFTER positional
 # keywords (ipaddr/ipmask/ro/rw [+ address]). Mask the quoted string, keep the
 # keywords/address; never mask the keyword as if it were the community.
@@ -149,5 +166,27 @@ like($j, qr/\\n/, 'newline escaped');
 my $hi = main::json_string("caf\xe9");           # latin-1 e-acute byte
 unlike($hi, qr/[^\x00-\x7f]/, 'json_string output is pure ASCII');
 like($hi, qr/\\u00e9/, 'high byte -> \\u00e9');
+
+# --- fast-path guard (2.17.9) -------------------------------------------------
+# mask_secrets short-circuits strings that contain none of the anchor words
+# (pass/enable/community/key/secret, case-insensitive). The contract that makes
+# that correct: any string mask_secrets CHANGES must contain one of those words.
+# These assert the common device-editor values pass through byte-for-byte, so
+# the guard is behaviour-preserving (it makes the editor render ~10x faster).
+for my $plain (
+    'device-42', 'cisco-ios', 'procurve-ssh', 'GMG', 'HAM',
+    'Switch 7 in rack 12', 'Cisco', 'C9300-48P', '10.0.0.1',
+    'sysName: core-sw-01', 'IOS-XE 17.9.4a', 'aruba-cx-ssh',
+) {
+    is(main::mask_secrets($plain), $plain, "fast path leaves '$plain' unchanged");
+}
+# And anything the masker rewrites DOES carry an anchor word (so the guard never
+# skips a string that should be masked). Guards against a future rule anchored
+# on a new word being added without extending the fast-path regex.
+for my $sec ('pass=x', 'enable=y', 'community=z', 'secret 9 abc',
+             'radius-server host 1.1.1.1 key s') {
+    isnt(main::mask_secrets($sec), $sec, "masker still rewrites '$sec'");
+    like($sec, qr/pass|enable|community|key|secret/i, "'$sec' carries an anchor word");
+}
 
 done_testing();

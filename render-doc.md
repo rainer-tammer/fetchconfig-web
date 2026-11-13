@@ -27,12 +27,12 @@ The one exception is the **license** style below: a `LICENSE` input writes the
 HTML and a `.md`, and no plain-text file -- the input already *is* plain text.
 
 Output names: the HTML argument is optional and defaults from the input --
-`README.md` keeps its historical name `fetchconfig-web-documentation.html`, and
-any other `X.md` defaults to `X.html`. The ASCII name is the input without `.md`:
+every `X.md` renders to `X.html` (so `README.md` -> `README.html`). The ASCII
+name is the input without `.md`:
 
 | Input | HTML | ASCII |
 |-------|------|-------|
-| `README.md` | `fetchconfig-web-documentation.html` | `README` |
+| `README.md` | `README.html` | `README` |
 | `INSTALL.md` | `INSTALL.html` | `INSTALL` |
 | `CHANGES.md` | `CHANGES.html` | `CHANGES` |
 | `DEVELOPER.md` | `DEVELOPER.html` | `DEVELOPER` |

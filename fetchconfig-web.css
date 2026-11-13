@@ -166,6 +166,10 @@
   pre.config .cfg-comment-danger { color: #ff7b72; font-weight: 700; }
   .dir-alias-path { margin-left: 0.4em; }
   .dir-alias-warn { margin-left: 0.4em; font-weight: 600; }
+  /* Credential field: pw: alias dropdown + verbatim value + info note. */
+  .cred-alias-sel { margin-right: 0.4em; }
+  .cred-val { margin-right: 0.3em; }
+  .cred-alias-note { margin-left: 0.4em; font-size: 0.9em; font-style: italic; }
   .fr-cmd { margin-left: 0.4em; }
   .opt-hint { margin-left: 0.4em; font-size: 0.9em; }
   pre.config .d-del { color: var(--diff-del); }
@@ -844,6 +848,44 @@
   .dev-row { display: grid; grid-template-columns: 5.5em 2fr 1fr 1.5fr 2fr;
              align-items: center; gap: 0.6em; padding: 0.35em 0.6em;
              border-bottom: 1px solid var(--color-border); }
+  /* With the 2.15 inventory columns (Vendor, HW Model) between Model and Site. The
+     HW Model track is capped (it can be long, e.g. "PLANET, IGS-4215-16P2T2S, IE
+     L2/L4 Managed PoE+ Switch, v1.305b") so it cannot dominate the row; see
+     .dev-row-hwmodel below. */
+  .dev-has-inv .dev-row { grid-template-columns: 5.5em 1.8fr 1fr 1fr minmax(0, 25ch) 1.3fr 1.8fr; }
+  .dev-row-vendor, .dev-row-hwmodel { color: var(--color-muted); }
+  .dev-row-vendor { overflow-wrap: anywhere; }
+  /* HW Model: the column is capped (grid track above) so it stays narrow, but a
+     long value WRAPS onto further lines rather than being truncated -- nothing is
+     hidden. (The cell still carries a title tooltip from render_inventory_cells.) */
+  .dev-row-hwmodel {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .dev-inv-none { color: var(--color-border); }
+  /* Inventory viewer Summary (key/value) table: the label column (th) stays as
+     narrow as its text, and the value column wraps -- so the long hw_set
+     "class:serial, ..." token wraps inside the box instead of running off the
+     page (table.list otherwise sets white-space:nowrap on every cell). */
+  table.list.inv-summary { table-layout: auto; }
+  table.list.inv-summary th { white-space: nowrap; width: 1%; }
+  table.list.inv-summary td { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+  /* Components table: a FIXED layout pinned to width:100% so the table can never
+     grow past its container (the green content box) -- the column widths come from
+     the <colgroup> the viewer emits, and every cell wraps (break long serials /
+     firmware strings anywhere) to fit instead of widening the table. */
+  table.list.inv-components { table-layout: fixed; width: 100%; }
+  table.list.inv-components th,
+  table.list.inv-components td { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+  /* Change-history: same fixed layout so it, too, never grows past the green box;
+     body cells (Note, OS version, Members) wrap. The "Changed" timestamp keeps its
+     own inline nowrap and is given a wide-enough column in the viewer's colgroup. */
+  table.list.inv-history { table-layout: fixed; width: 100%; }
+  table.list.inv-history td { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+  /* The model of an EXISTING default: entry is locked (it is the entry's key);
+     shown as a bold static label rather than a dropdown. */
+  .rec-model-fixed { font-weight: 700; cursor: default; }
   .dev-row.dev-row-open { border: 1px solid var(--color-border); border-radius: 5px;
              background: #fff; margin-bottom: 0.7em; }
   .dev-row-card { grid-column: 1 / -1; }
@@ -898,6 +940,7 @@
      and the toggle becomes a red "Undelete" (btn-danger set in JS) that reverses
      the deletion until the table is saved. */
   .dev-row-deleted .dev-row-id, .dev-row-deleted .dev-row-model,
+  .dev-row-deleted .dev-row-vendor, .dev-row-deleted .dev-row-hwmodel,
   .dev-row-deleted .dev-row-site, .dev-row-deleted .dev-row-comment {
     text-decoration: line-through; color: #9aa1a9; }
   /* Per-site access UI */
@@ -956,7 +999,7 @@
   .dash-panel-last { margin-top: 1.2em; margin-bottom: 0; }
   .dash-panel-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.6em; margin: 0 0 0.9em; }
   .dash-panel-head h2 { font-size: 1.1em; margin: 0; }
-  .dash-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0.9em; }
+  .dash-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0.9em; margin-bottom: 1.2em; }
   .dash-charts .dash-panel { margin-bottom: 0; }
   .dash-bar { display: flex; height: 26px; border-radius: 4px; overflow: hidden; border: 1px solid #e3e8ee; }
   .dash-bar-sm { height: 16px; }
@@ -986,6 +1029,17 @@
   .dash-age-head span:first-child { color: var(--color-muted); }
   .dash-age-track { height: 9px; background: #eef0f2; border-radius: 4px; overflow: hidden; }
   .dash-age-fill { height: 100%; }
+  /* Categorical ranked-bar fill (vendor / model / OS on the inventory dashboard):
+     the neutral accent, not a status colour; "Other" is dimmed. */
+  .dash-age-fill.dash-cat { background: var(--color-accent); }
+  .dash-age-fill.dash-cat.dash-cat-dim { background: var(--color-faint); }
+  /* Ranked-bar label (vendor + model / OS): may wrap to a second line. */
+  .dash-cat-label { min-width: 0; overflow-wrap: anywhere; padding-right: 0.6em; }
+  /* "Show N" per-panel row limit (upper-right of the panel header). */
+  .dash-head-right { display: flex; align-items: center; gap: 0.8em; flex-wrap: wrap; }
+  .dash-show { font-size: 0.82em; color: var(--color-muted); white-space: nowrap; }
+  .dash-show select { font-size: inherit; padding: 0.15em 0.3em; margin-left: 0.3em; }
+  .dash-row-hidden { display: none; }
   .dash-trend-rate { font-family: var(--font-mono); font-size: 1.5em; }
   .dash-trend-line { stroke: var(--dash-fresh); fill: none; stroke-width: 2; }
   .dash-sites { display: flex; flex-direction: column; gap: 0.9em; }

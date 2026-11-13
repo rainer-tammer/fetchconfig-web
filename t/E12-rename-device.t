@@ -25,9 +25,9 @@ close($w);
 load_cgi($cfg); main::read_config();
 
 # --- constants ------------------------------------------------------------
-is(main::APP_VERSION(),          '2.14.0', 'APP_VERSION bumped to 2.14.0');
-is(main::APP_VERSION_INTERNAL(), '2.14.0', 'APP_VERSION_INTERNAL bumped to 2.14.0');
-is(main::MIN_FETCHCONFIG_VERSION(), '9.78', 'MIN_FETCHCONFIG_VERSION -> 9.78');
+is(main::APP_VERSION(),          '2.17.15', 'APP_VERSION bumped to 2.17.15');
+is(main::APP_VERSION_INTERNAL(), '2.17.15', 'APP_VERSION_INTERNAL bumped to 2.17.15');
+is(main::MIN_FETCHCONFIG_VERSION(), '9.80', 'MIN_FETCHCONFIG_VERSION -> 9.80 (SNMP inventory / fw_version)');
 is(main::RENAME_MIN_FETCHCONFIG_VERSION(), '9.78', 'rename needs engine 9.78');
 
 # --- feature gate (engine version) ----------------------------------------

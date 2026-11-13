@@ -117,7 +117,7 @@ no warnings 'once', 'redefine';
     local *CGI::param = sub { my($s,$k)=@_; return 0 if $k eq 'offset'; return; };
     my $out=''; { open(my $fh,'>',\$out); my $sv=select($fh); main::show_notes_data('admin'); select($sv); }
     like($out, qr/"total":1/,                 'notes_data: visible note counted');
-    like($out, qr/rtrtst01loop\.schuler\.de/, 'notes_data: returns the device row');
+    like($out, qr/rtr01loop\.acme\.com/, 'notes_data: returns the device row');
 }
 # Restricted user whose device table does NOT contain the noted device -> hidden.
 {
@@ -133,7 +133,7 @@ no warnings 'once', 'redefine';
 done_testing();
 
 package MNDQ;
-sub selectall_arrayref { return [ {device_id=>'rtrtst01loop.schuler.de', note=>'n', keep=>1, updated=>'2026-10-11 14:37:34'} ]; }
+sub selectall_arrayref { return [ {device_id=>'rtr01loop.acme.com', note=>'n', keep=>1, updated=>'2026-10-11 14:37:34'} ]; }
 sub disconnect {}
 
 package MND;

@@ -256,7 +256,10 @@
     <li>Each row shows the device's <strong>Model</strong>,
         <strong>Site</strong>, <strong>Device-ID</strong>,
         <strong>Hostname</strong>, <strong>Comment</strong> and a
-        <strong>Note</strong> icon. Narrow the list with the <strong>model</strong>
+        <strong>Note</strong> icon. When the engine's SNMP inventory is in use, two
+        read-only columns &mdash; <strong>Vendor</strong> and <strong>HW Model</strong>
+        &mdash; also appear between Model and Site (a dash for a device with no
+        inventory yet). Narrow the list with the <strong>model</strong>
         and <strong>site</strong> drop-downs and the <strong>Device-ID</strong>,
         <strong>Hostname</strong> and <strong>Comment</strong> filter boxes (each
         matches anywhere in that column). The site drop-down also offers
@@ -266,7 +269,8 @@
         remembered between visits.</li>
     <li>Click the <strong>Model</strong>, <strong>Site</strong>,
         <strong>Device-ID</strong> or <strong>Hostname</strong> header to sort by
-        that column (Comment and Note are not sortable).
+        that column (the <strong>Vendor</strong> and <strong>HW Model</strong>
+        columns, when shown, sort too; Comment and Note are not sortable).
         The <strong>Hostname</strong> column
         is smart about IP addresses: numeric addresses sort in real address order
         (so <code>10.1.1.1</code> comes after <code>2.5.7.8</code>, not before)
@@ -373,6 +377,14 @@
         web-managed switches it is the decoded binary config file.</li>
     <li><strong>Compare selected</strong> / <strong>Side by side selected</strong>
         &mdash; see <a href="#help-comparing">Comparing backups</a>.</li>
+    <li><strong>Inventory</strong> &mdash; opens a read-only
+        <strong>Inventory data</strong> page for the device: the SNMP-collected
+        hardware summary (vendor, model, serial, OS version, stack members), the
+        list of components with serial, software and firmware versions, and the
+        change history. If no
+        inventory has been collected yet it explains how to enable SNMP for the
+        device. It needs the fetchconfig engine's SNMP inventory (9.79+) to have
+        run.</li>
   </ul>
   <div class="note"><span class="lbl">Note.</span> The <strong>DL</strong> column
   and the <strong>Download</strong> button are shown only to a user who holds the
@@ -572,9 +584,10 @@
   <h3>Editing devices</h3>
   <ul>
     <li>Each device is a compact <strong>collapsed row</strong> (Device-ID /
-        Model / Site / Comment). Click <strong>Edit</strong> to expand it into a
-        full card of the proper fields for that model, and <strong>Collapse</strong>
-        to fold it again.</li>
+        Model / Site / Comment; with the engine's SNMP inventory in use, also
+        read-only <strong>Vendor</strong> and <strong>HW Model</strong> columns).
+        Click <strong>Edit</strong> to expand it into a full card of the proper
+        fields for that model, and <strong>Collapse</strong> to fold it again.</li>
     <li>Use <em>+ add option</em> to add a recognized option, <em>+ Add device</em>
         / <em>+ Add model defaults</em> to add rows, and the &times; / Delete
         buttons to remove options or whole entries.</li>
@@ -583,6 +596,9 @@
         (100 per page) with First/Prev/Next/Last above and below.</li>
     <li>Every device must have a <strong>site</strong> before the table will
         save.</li>
+    <li>The <strong>Defaults</strong> tab lists the per-model <code>default:</code>
+        cards sorted by model name and has a model-name filter box; this only
+        changes the on-screen order, not how the table is saved.</li>
   </ul>
   <h3>Passwords</h3>
   <p>Stored passwords are shown masked as <code>\__unchanged__/</code>. Leave a
@@ -600,6 +616,15 @@
   command field; report options appear on the General parameters tab when a
   <code>report</code> directory is allow-listed. A table that uses a directory
   not on the list opens with a red warning and cannot be saved until fixed.</p>
+  <h3>Credential allow-list</h3>
+  <p>The device table may also carry a <strong>credential allow-list</strong> (the
+  <code>pw:</code> lines, engine 9.79+) that names reusable login/secret aliases
+  such as <code>$NetUser</code> / <code>$NetPass</code>. Like the directory list it
+  is <strong>edited only on the server</strong>, not in the web UI, and it is kept
+  verbatim when you save the table. In the <strong>Device table</strong> view the
+  secret on each <code>pw: pass</code> line is shown masked; the alias stays
+  visible. Referencing these aliases from inside the device editor is planned for a
+  later version.</p>
   <h3>Generic (template-driven) devices</h3>
   <p>For the <strong>generic</strong> model, the <code>model</code> option is a
   drop-down of the templates fetchconfig reports, scoped to the

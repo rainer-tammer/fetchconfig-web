@@ -110,14 +110,14 @@ WriteMakefile(
 # no special -I. We only override install (below).
 package MY;
 
-# "make doc" regenerates fetchconfig-web-documentation.html from README.md via
+# "make doc" regenerates README.html from README.md via
 # render-doc.py. It requires a Python interpreter (python3 preferred, else
 # python) and fails with a clear message if none is found.
 sub postamble {
     return <<'MAKE';
 # ---- documentation -------------------------------------------------------
 DOC_SRC = README.md
-DOC_OUT = fetchconfig-web-documentation.html
+DOC_OUT = README.html
 
 doc :
 	@py=""; \

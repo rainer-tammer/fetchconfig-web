@@ -162,17 +162,17 @@ like($h, qr{<span class="dbg-ctl">0d</span>},      'CR/LF/NUL padding is dimmed'
     my @ssh = (
         'debug1: Entering interactive session.',
         'debug3: receive packet: type 80',
-        'Warning: Permanently added \'swisit01\' (RSA) to the list of known hosts.',
-        'Authenticated to swisit01.net.schuler.de ([10.195.0.101]:22).',
+        'Warning: Permanently added \'swi01\' (RSA) to the list of known hosts.',
+        'Authenticated to swi01.acme.com ([1.1.1.1]:22).',
         'Transferred: sent 2376, received 137384 bytes, in 6.4 seconds',
         'Bytes per second: sent 371.7, received 21491.2',
         'OpenSSH_9.6p1, OpenSSL 3.0.13',
-        'Verbindung zu swisit01 geschlossen.',      # a localised line
+        'Verbindung zu swi01 geschlossen.',      # a localised line
         'something nobody predicted',
     );
     my @markers = (
-        '# ssh master connection to swisit01 (LogLevel=DEBUG, i.e. ssh -v)',
-        '# telnet session to swisit01 (dump_log; passwords masked)',
+        '# ssh master connection to swi01 (LogLevel=DEBUG, i.e. ssh -v)',
+        '# telnet session to swi01 (dump_log; passwords masked)',
         '# switch session (Net::Telnet dump_log)',
         '# could not connect: timeout',
         '# [secret sent - not logged]',

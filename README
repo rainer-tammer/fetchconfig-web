@@ -1,5 +1,5 @@
-fetchconfig-web
-===============
+fetchconfig-web -- README / Documentation
+=========================================
 
 A Perl CGI front-end for fetchconfig: all program logic in one script,
 fetchconfig-web.cgi, with the stylesheet, fonts, images and help tree deployed
@@ -7,9 +7,9 @@ alongside it and served statically. It shows a "fetchconfig-web" title bar and
 logo on every page, and a Devices / Status / User / Help menu (plus a Setup item
 for accounts with the edit or admin right) in the title bar's nav row:
 
-    Requires fetchconfig 9.77 or newer. fetchconfig-web reads the installed
+    Requires fetchconfig 9.80 or newer. fetchconfig-web reads the installed
     version from <FETCHCONFIG_PATH>/fetchconfig/Constants.pm and shows a warning
-    banner (on every page, after login) if it is older than 9.77 or cannot be
+    banner (on every page, after login) if it is older than 9.80 or cannot be
     determined. The minimum is set by the MIN_FETCHCONFIG_VERSION constant in
     fetchconfig-web.cgi.
 
@@ -30,13 +30,17 @@ for accounts with the edit or admin right) in the title bar's nav row:
 1. Login against the PostgreSQL user database (see "Configuration" and the
    fetchconfig-web-dbsetup.pl setup script below).
 2. List all Device-IDs (parsed from the fetchconfig device table) with their
-   Model, Hostname and Comment, plus a model dropdown and Device-ID / Hostname /
-   Comment filter boxes (all remembered in a cookie across navigation), sortable
-   columns, and a statistics panel (total device count, a live "devices
-   filtered" count, and a per-model breakdown) in the upper-right corner. The
-   Hostname column sorts IPv4 addresses in numeric IP order first (so 10.1.1.1
-   follows 2.5.7.8, not lexically before it), then hostnames/FQDNs
-   alphabetically (IPv6 literals sort with the names).
+   Model, Site, Hostname and Comment, plus a model dropdown and Device-ID /
+   Hostname / Comment filter boxes (all remembered in a cookie across
+   navigation), sortable columns, and a statistics panel (total device count, a
+   live "devices filtered" count, and a per-model breakdown) in the upper-right
+   corner. The Hostname column sorts IPv4 addresses in numeric IP order first
+   (so 10.1.1.1 follows 2.5.7.8, not lexically before it), then hostnames/FQDNs
+   alphabetically (IPv6 literals sort with the names). When the 2.15 inventory
+   schema is present and readable, two extra read-only columns -- Vendor and HW
+   Model, from the engine's SNMP device_inventory data -- appear (sortable)
+   between Model and Site; a device with no inventory row shows a dash. The same
+   two columns also appear in the device-table editor's Devices tab.
 3. A Status page (menu, between Devices and Setup) tabulating every device's
    last-run status from its .status file: Device-ID (clickable), start/end date
    and time, duration, state (success/failed/skipped, colour coded) and changed
@@ -46,11 +50,20 @@ for accounts with the edit or admin right) in the title bar's nav row:
 4. Click a Device-ID -> list its backups, each row showing its index, the
    backup's date (ISO YYYY-MM-DD) and time, size, and full path. The date and
    time are extracted from the backup file's own name. The list also offers per-
-   device actions: Backup now, Compare selected, Side by side selected, and
-   Download (the backup picked in the DL column; that column and button appear
-   only for a user holding the download/copy-unmasked right). The empty-backup
-   and suffix checks are not per-device buttons -- they are repository-wide
-   scans under Tools.
+   device actions: Backup now, Compare selected, Side by side selected,
+   Inventory, and Download (the backup picked in the DL column; that column and
+   button appear only for a user holding the download/copy-unmasked right).
+   Inventory (always shown, between Side by side selected and Download) opens a
+   read-only Inventory data page for that device -- the SNMP-collected summary
+   (status, vendor/model/serial/OS, stack members, hw_set, the SNMP system group
+   -- schema 2.17 -- sysName/sysLocation/sysContact, last
+   attempt/success/change), the component list (class, position, model, serial,
+   SW and -- schema 2.16 -- firmware/ROMMON version, HW rev) and the change
+   history, from the device_inventory* tables (SELECT-only, same per-site access
+   check as the backups page); when no inventory has been collected it shows an
+   info screen on enabling SNMP, and when the schema is absent it points to
+   --upgrade. The empty-backup and suffix checks are not per-device buttons --
+   they are repository-wide scans under Tools.
 5. Click a backup -> view its content in a monospaced <pre> block, with a copy-
    to-clipboard button and syntax highlighting for the recognised model families
    (see "Config syntax highlighting").
@@ -99,11 +112,13 @@ Part 2 -- Installation and configuration
 - The user database
 - Deploying
 - Backup Now and repository write permissions
+- User/secret (password) alias conventions
 
 Part 3 -- Using fetchconfig-web
 - Devices and backups
 - Viewing and comparing backups
 - Backup Dashboard
+- Inventory dashboard
 - Setup devices and the device-table editor
 - Tools
 - User management
@@ -184,8 +199,8 @@ Files
   customise that text.
 - fetchconfig-web-dbsetup.pl -- one-off setup helper for the PostgreSQL user
   database (see "User database" below).
-- fetchconfig-web-documentation.html -- this README rendered as a styled, self-
-  contained HTML manual (linked from the Help page).
+- README.html -- this README rendered as a styled, self-contained HTML manual
+  (linked from the Help page).
 - INSTALL.md + INSTALL.html -- the step-by-step installation and upgrade guide
   (Markdown, and the same rendered to HTML). Start there for a new deployment;
   this README is the full reference.
@@ -209,8 +224,8 @@ Files
 - CHANGES -- the changelog.
 - LICENSE -- the GNU General Public License, version 3 (see "License" below).
 - render-doc.py + render-doc.md -- a build helper (Python 3, standard library
-  only) that renders the Markdown documents to HTML: README.md -> fetchconfig-
-  web-documentation.html and INSTALL.md -> INSTALL.html. Not needed at runtime.
+  only) that renders the Markdown documents to HTML: README.md -> README.html
+  and INSTALL.md -> INSTALL.html. Not needed at runtime.
 
 Part 2 -- Installation and configuration
 ========================================
@@ -225,10 +240,13 @@ Part 2 -- Installation and configuration
 Quick start
 -----------
 
+For a condensed, one-page checklist of just the commands, see QUICK-INSTALL (it
+points back to the matching INSTALL step for each item).
+
 For an experienced operator, the shortest path to a running instance:
 
 1. Install the prerequisites -- Perl with DBI/DBD::Pg, CGI and Algorithm::Diff;
-   PostgreSQL; and fetchconfig 9.77+ (see Requirements).
+   PostgreSQL; and fetchconfig 9.80+ (see Requirements).
 2. Create the user database -- run perl fetchconfig-web-dbsetup.pl (see The user
    database).
 3. Write the configuration -- copy the sample in Configuration to
@@ -450,10 +468,11 @@ You can also create it by hand:
     REQUIRE_BCRYPT          = 1
     SHOW_RENDER_TIME        = 0
     ENABLE_DASHBOARD        = 0
+    ALIAS_REPLACE_ON_SAVE   = off
     GENERIC_SYNTAX          = auto
     TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
     #CRON_USER              = fetchconfig
-    APP_VERSION             = 2.14.0
+    APP_VERSION             = 2.17.1
     COPYRIGHT               = 2026 (c) Rainer Tammer
 
 Format and loading:
@@ -522,6 +541,17 @@ Format and loading:
   SELECT, the dashboard shows guidance instead of data (including, while the
   tables are empty, the exact db: string to paste into the engine). Off by
   default, so nothing changes for installs that don't use it.
+- ALIAS_REPLACE_ON_SAVE (off|secrets|users|all, default off): when saving the
+  device table, fold a verbatim credential value that matches a defined pw:
+  alias's value back into the $Alias reference. off leaves what the user typed
+  untouched; secrets folds pass-kind fields only
+  (pass/enable/snmp_community/snmp_write_community/snmp_authpass/
+  snmp_privpass); users folds user-kind fields only (user/snmp_user); all folds
+  both. The web compares the alias value in memory only -- it is never displayed
+  or written to the audit log. (A credential typed as a $Alias, or chosen from
+  the field's alias dropdown, is always stored as the alias regardless of this
+  setting; this only controls folding a literal that happens to equal an alias's
+  value.) See Credential allow-list (pw:).
 - FETCHCONFIG_PATH and FETCHCONFIG_BIN together locate the fetchconfig
   executable: it is run as <FETCHCONFIG_PATH>/<FETCHCONFIG_BIN> (e.g.
   /usr/local/fetchconfig/fetchconfig.pl). FETCHCONFIG_PATH is also where the
@@ -918,6 +948,102 @@ Either way, no change is needed for viewing, listing, or comparing backups --
 those already work under the web server's own unprivileged user, since the
 existing files are world-readable.
 
+User/secret (password) alias conventions
+----------------------------------------
+
+A credential field on a default: or device line -- user, pass, enable,
+snmp_user, snmp_community, snmp_write_community, snmp_authpass, snmp_privpass --
+holds either a verbatim value or a reference to a pw: alias (see Credential
+allow-list (pw:)). The engine decides which by the first character of the value,
+so a literal value that happens to start with $ or \ has to be written so it is
+not mistaken for an alias. These are the rules; the structured device editor
+writes them for you (you type the real value), but they also apply when the
+table is hand-edited on the server.
+
+How a value is interpreted (first character wins):
+
+- " -> a quoted literal -- fully verbatim, never an alias, and the backslash
+  rules below do not apply inside it. Use quotes for any value that contains a
+  comma or whitespace (required on default:/device lines, which are split on
+  both), and as the simplest way to write a literal that starts with $.
+- $ -> an alias reference -- it must match $Name (^\$[A-Za-z_][A-Za-z0-9_]*$)
+  and resolve to a defined pw: alias of the right kind (user-kind for
+  user/snmp_user; pass-kind for the rest). An undefined or wrong-kind alias is a
+  hard error (the save is rejected), never a silent literal.
+- anything else -> an unquoted literal, with a first-character-only de-escape: a
+  leading \$ becomes $, a leading \\ becomes \, and any other first character is
+  taken as-is. Interior \ and $ are never touched, so ordinary values like
+  DOMAIN\user or pa$$w0rd need no escaping at all.
+
+To force a literal that starts with $ or \, either quote it ("$ecret") or escape
+the first character (\$ecret). You never need both -- a value that needs quoting
+is simply quoted.
+
+  Entered (after pass=): $NetPass (defined)
+  Interpreted as: the alias's value
+  Rule: unquoted $, valid name, defined
+
+  Entered (after pass=): $nope (undefined)
+  Interpreted as: error
+  Rule: undefined alias rejected
+
+  Entered (after pass=): \$abc
+  Interpreted as: $abc
+  Rule: unquoted, leading \$->$
+
+  Entered (after pass=): \\$xyz
+  Interpreted as: \$xyz
+  Rule: unquoted, leading \\->\, rest verbatim
+
+  Entered (after pass=): ab$cd
+  Interpreted as: ab$cd
+  Rule: $ not the first character
+
+  Entered (after pass=): C:\tools
+  Interpreted as: C:\tools
+  Rule: verbatim
+
+  Entered (after pass=): C:\\tools
+  Interpreted as: C:\\tools
+  Rule: interior untouched
+
+  Entered (after pass=): DOMAIN\user
+  Interpreted as: DOMAIN\user
+  Rule: verbatim
+
+  Entered (after pass=): pa\$\$
+  Interpreted as: pa\$\$
+  Rule: interior untouched
+
+  Entered (after pass=): "$abc"
+  Interpreted as: $abc
+  Rule: quoted => fully literal
+
+  Entered (after pass=): "$ab,cd"
+  Interpreted as: $ab,cd
+  Rule: quoted => literal (handles the comma and the $)
+
+  Entered (after pass=): "my,pass"
+  Interpreted as: my,pass
+  Rule: quoted => literal (comma)
+
+  Entered (after pass=): "$NetPass"
+  Interpreted as: $NetPass (the literal, not the alias)
+  Rule: quoted => literal
+
+In the device editor each credential field is a dropdown of the matching-kind
+aliases plus a verbatim field. Pick an alias to store the bare $Name (shown in
+clear, never masked -- it is a name, not a secret); type a value to keep it
+verbatim (a secret stays masked, a user name is shown in clear). The editor
+writes the value in the correct form above automatically -- it quotes a value
+with a comma/space, or escapes a leading $/\, so you only ever type the real
+value. The ALIAS_REPLACE_ON_SAVE setting can additionally fold a verbatim value
+that equals a defined alias's value back into the $Name on save.
+
+    The leading-character escaping (\$/\\) round-trips only through a
+    fetchconfig engine that implements this grammar; the alias reference form
+    (pass=$NetPass) works on engine 9.79+.
+
 Part 3 -- Using fetchconfig-web
 ===============================
 
@@ -1050,8 +1176,10 @@ config" is not IOS syntax but AudioCodes' own parameter-value style: #/##
 comments (including ## section banners), object blocks that open with a header
 line and close with activate/exit, hyphenated parameter names, "quoted strings",
 IPv4 addresses and integers, no <param> negation, and enabled/disabled values.
-The obscured password <blob> obscured lines are highlighted but not masked (like
-the other space-separated secrets, mask_secrets only covers key=value syntax).
+The obscured password <blob> obscured lines are highlighted but not masked: the
+value is already an obscured blob, not a cleartext secret, and this particular
+form is not one of the patterns mask_secrets recognises (see "Secret masking"
+below).
 
 Highlighting is applied only to the single-backup content view -- the compare
 and side-by-side views keep their add/remove/change colouring. Safety invariant:
@@ -1060,6 +1188,35 @@ HTML-escapes and masks pass=/enable= secrets), so stripping the <span>s from the
 output yields byte-for-byte the plain view -- highlighting is purely cosmetic
 and can't leak a secret or inject markup. The copy button copies the DOM's text
 content, so it copies the plain config, not the highlight markup.
+
+Secret masking
+..............
+
+Secret values are never shown in the web UI. The config content and compare
+views, the device-table view and editor, and the per-device option values all
+pass device text through mask_secrets, which replaces credential values --
+pass/enable/password, the SNMP communities (snmp-server community, set snmp
+community, PLANET's bare snmp community, the Hirschmann community ... "secret"
+form, and the community= / snmp_community= option keys), RADIUS/TACACS key
+secrets, db_pass=, wpa-passphrase, and the pw: pass device-table secrets -- with
+a fixed placeholder, while leaving the surrounding syntax (access level,
+address, key type) visible.
+
+Two placeholder forms are used, chosen by whether the original value was quoted:
+
+- a quoted value keeps its quotes and masks only the contents, giving "" -- e.g.
+  snmp community "public" ro becomes snmp community "" ro;
+- a bare (unquoted) value is replaced whole by the sentinel ??, whose ?...?
+  stand in for the quotes that were absent -- e.g. snmp community public ro
+  becomes snmp community ?? ro, and snmp_community=public becomes
+  snmp_community=??.
+
+The two forms are equivalent; nothing in the code keys on the placeholder text,
+so the choice is purely cosmetic. Masking is applied server-side before the
+value reaches the browser (and the highlighter escapes through the same esc()),
+so a masked value cannot be recovered from the page, the copy button, or the
+highlight markup. The unmasked config is available only through Download, to a
+user holding the download/copy-unmasked right.
 
 Navigation menus
 ----------------
@@ -1138,7 +1295,8 @@ pill -- global (the whole fleet, for administrators / unrestricted users) or
 restricted (limited to the sites you may see) -- so a site-limited user can tell
 at a glance whether a number is their slice or the whole fleet.
 
-The Dashboard menu has three entries:
+The Dashboard menu has these backup-health entries (plus Inventory, the separate
+SNMP-inventory roll-up described in Inventory dashboard below):
 
 - Overview ("Backup health") -- a fleet health page: tiles (total / fresh /
   stale / failed / never), a freshness bar, a status donut, a backup-age
@@ -1177,16 +1335,68 @@ On the per-device Backups page, each backup whose integrity checksum is on file
 shows a small SHA1 button that copies the checksum (a change/corruption check,
 not a cryptographic signature).
 
+Inventory dashboard
+-------------------
+
+Optional; shown in the Dashboard menu as Inventory, only when ENABLE_DASHBOARD =
+1. Like the Backup Dashboard it is read-only and reads only what the fetchconfig
+engine (9.80+) writes to the device_inventory table during normal runs; if that
+schema is absent or the web DB user cannot read it, the page shows a short
+notice instead. It aggregates the same SNMP inventory that a device's per-device
+Inventory data page shows, across the whole visible fleet.
+
+Every tile and panel carries the same scope pill as the Backup Dashboard --
+global for administrators / unrestricted users, restricted for a site-limited
+user, whose roll-up then covers only the devices in their sites (the same
+visibility as the Devices list).
+
+The page has:
+
+- KPI tiles -- total devices (in the device table), devices with inventory data,
+  Pending (SNMP inventory is configured but not collected yet), Not configured
+  (no SNMP inventory), failed last collection, stacked units (member_count > 1),
+  and firmware recorded (devices with a real
+  device_inventory_component.fw_version; needs schema 2.16, shows n/a
+  otherwise).
+- Collection coverage -- a three-way split of the fleet: with data (has an
+  inventory row), pending, and not configured. Pending vs not configured is read
+  from the device table, not the DB: a device counts as configured when
+  snmp_inventory is not 0 and it has a community (v1/v2c) or a v3 user --
+  inherited from a default: line or set on the device line -- so a freshly-added
+  device that will be collected on the next run shows as pending, not as not
+  configured.
+- Collection status -- the status field (successful / failed / disabled) shown
+  as Successful / Failed / (Disabled, when any) / Not collected, where Not
+  collected is the devices with no row.
+- By vendor / Top models / OS versions -- ranked bars on the vendor, model and
+  os_version fields, for reading fleet composition and spotting upgrade gaps.
+  The model and OS bars carry the vendor in front (vendor / value); labels
+  longer than 50 characters wrap to a second line. Each panel has a Show N
+  select in its top-right corner (5 / 10 / 25 / 50 / 100 / All, default 10) that
+  limits how many rows are shown.
+- Data freshness -- age of the last successful collection (last_success_at):
+  today / this week / this month / > 30 days.
+- Needs attention -- the working list: every visible device that was not
+  successfully collected (failed or disabled), each linking to its Inventory
+  data page. Successful devices (even with older data) and never-collected
+  devices are not listed. It has the same Show N select (default 25).
+
+Each Show N choice is remembered per panel in the fcweb_invshow cookie (read
+server-side, so the page renders the saved count with no flash).
+
+It is a read-only summary and is not interactively filtered.
+
 Setup devices and the device-table editor
 -----------------------------------------
 
 The Setup devices -> Device table view -- shown in the title bar for the admin
 account ($PROTECTED_USER) or any user granted the device-table edit right --
-displays the raw contents of $DEVICE_TABLE exactly as fetchconfig.pl reads it
-(no parsing or filtering), using the same monospaced block and copy-to-clipboard
-button as the backup content view. It has an Edit device table button that opens
-the structured editor, and (for admins only) a Bulk Edit button -- see "Bulk
-edit" below.
+displays the contents of $DEVICE_TABLE as fetchconfig.pl reads it (no parsing or
+re-ordering), but with credentials masked (pass=, enable=, the SNMP communities,
+db_pass= and the pw: pass secrets), using the same monospaced block and copy-to-
+clipboard button as the backup content view. It has an Edit device table button
+that opens the structured editor, and (for admins only) a Bulk Edit button --
+see "Bulk edit" below.
 
 Because the device table can carry device login credentials on its default:
 lines (the same class of secret the credential-masking on Backup Now exists to
@@ -1231,7 +1441,9 @@ rather than as raw text:
   dot after its Device-ID, so unsaved edits are easy to spot in the list. The
   marker survives a Preview -> Back to editor round-trip.
 - The Devices tab lists devices as lightweight collapsed rows (Device-ID / Model
-  / Site / Comment + an Edit button). Clicking Edit expands that one device: its
+  / Site / Comment + an Edit button; when the 2.15 inventory schema is present
+  and readable, read-only Vendor and HW Model columns from device_inventory
+  appear between Model and Site). Clicking Edit expands that one device: its
   full editable card is fetched on demand (?action=edit_card) and shown inline;
   Edit toggles to Collapse. This keeps the page small and fast even for
   thousands of devices -- only the cards you open are built. Un-expanded devices
@@ -1247,6 +1459,18 @@ rather than as raw text:
   First/Prev/Next/Last navigation shown both above and below the list (all
   devices are still submitted regardless of the visible page). Adding a device
   jumps to page 1.
+- The Defaults (per model) tab lists the per-model default: cards sorted by
+  model name and has a model-name filter box (like the Device-ID filter on the
+  Devices tab). Both are display-only -- the on-disk default: order is preserved
+  on save.
+- On an existing default: card the model is locked (shown as a label, not a
+  dropdown): it is the entry's key, so changing it would silently re-point every
+  device that inherits that model's defaults. To change a model's defaults,
+  delete the entry and add a new one. A brand-new (not-yet-saved) default: card
+  still has an editable model dropdown.
+- Clearing an option's value (or picking an "(unset)" entry) removes the option
+  rather than writing an empty key=, so the device inherits the model's default:
+  value; no option is ever saved with an empty value.
 - Device-ID and Host get wider fields; on save the host is validated as an
   IPv4/IPv6 address or a hostname/FQDN, and Device-IDs must be present, valid,
   and unique.
@@ -1259,11 +1483,13 @@ rather than as raw text:
   edited on the server to carry a value outside the documented set is therefore
   refused on save, with an error naming the record, the option and the accepted
   values.
-- Save changes (green) writes the table. Preview raw table shows the exact text
-  Save would write (passwords masked) without touching the file; it is view-only
-  -- use Back to editor to return and save (your edits are carried forward; only
-  the devices you had expanded come back expanded). Reject all changes (red)
-  reloads the editor from disk, discarding edits.
+- Save changes (green) writes the table. It stays greyed out until you make a
+  change, so a save never rewrites the table with no edits; it enables on the
+  first edit in any tab (devices, defaults, email, general). Preview raw table
+  shows the exact text Save would write (passwords masked) without touching the
+  file; it is view-only -- use Back to editor to return and save (your edits are
+  carried forward; only the devices you had expanded come back expanded). Reject
+  all changes (red) reloads the editor from disk, discarding edits.
 - Request size. The save POSTs every field of every row you expanded, so a very
   large table can approach the request limit ($CGI::POST_MAX, 2 MB; and under
   mod_fcgid FcgidMaxRequestLen, which must not be lower -- see INSTALL.md Step
@@ -1383,14 +1609,42 @@ they have no CLI; procurve-web-1700 also makes user optional, as the switch has
 only a manager password -- see "Web-UI (binary) backups" below).
 
 procurve-snmp (HP ProCurve ProVision, incl. 4000M/8000M, backed up over
-SNMP+TFTP) is the odd one out: it has no user/pass. Instead its mandatory option
-is community (the SNMP read-write community, a masked secret), alongside
-repository/keep mandatory and timeout, snmp_version, oid, remote_file,
-changes_only, on_fetch_run, on_fetch_cat, timezone, filename_append_suffix and
-debug optional. Its backup is an ordinary text config, so it uses the normal
-content view and the Compare / Side by Side diffs (no syntax highlighter). The
-community= option value is masked (as ??) wherever config text is shown, like
-pass=/enable=.
+SNMP+TFTP) is the odd one out: it has no user/pass. Its SNMP read-write
+community is snmp_community (a masked secret; renamed from community in 2.15.1
+and now optional -- it may be inherited from the model's default: line), with an
+optional snmp_write_community (procurve-snmp only). repository/keep stay
+mandatory; otherwise it now carries the full common option set except the
+interactive-login options (user/pass/fetch_timeout) -- so changes_only,
+on_fetch_run, on_fetch_cat, timezone, filename_append_suffix, debug, device
+locking (lock/lock_dir/lock_retry/lock_retry_time), site, comment and the common
+SNMP inventory options (below) are all available -- plus the procurve-snmp-only
+oid and remote_file. The legacy timeout option is kept for now (use snmp_timeout
+for the SNMP timeout). Its backup is an ordinary text config, so it uses the
+normal content view and the Compare / Side by Side diffs (no syntax
+highlighter). The snmp_community= / community= option values are masked (as ??)
+wherever config text is shown, like pass=/enable=.
+
+SNMP inventory options (2.15.1; read by fetchconfig engine 9.80+). Every model
+may carry an optional set of snmp_ options on its default: line or on a device
+line, feeding the engine's SNMP device-inventory collection (the 2.15
+device_inventory tables): snmp_community, snmp_version, snmp_port, snmp_timeout,
+snmp_retries, snmp_max_repetitions, the SNMPv3 snmp_user / snmp_level /
+snmp_authproto / snmp_authpass / snmp_privproto / snmp_privpass, and the
+controls snmp_inventory, snmp_inventory_level, snmp_inventory_interval,
+snmp_inventory_history, snmp_fatal; snmp_profile_file is accepted on a default:
+line only. snmp_inventory_interval (seconds, default 0 = collect every run)
+throttles the SNMP inventory read: when set, a run skips the read if the
+device's last successful inventory is younger than the interval and reuses it
+(DB and .status unchanged), so config backups stay fast on a slow-SNMP device; a
+failed or missing prior forces a fresh read. Give it as a plain integer (e.g.
+86400 = once a day). snmp_max_repetitions (default 25) is the GET-BULK max-
+repetitions for the ENTITY-MIB walk on v2c/v3 -- higher means fewer round-trips
+on a large stack; lower it only if an agent rejects a big bulk response; it is
+ignored for v1 (no GET-BULK). All are optional and are offered in the editor's +
+add option menu (never added to a new device or model automatically). The
+credential options -- snmp_community, snmp_write_community, snmp_authpass,
+snmp_privpass -- are masked secrets. The engine ignores these options until it
+is upgraded to 9.80.
 
 The generic (template-driven) model
 ...................................
@@ -1569,6 +1823,51 @@ from disk. When the allow-list is present:
 When no directory: lines exist, the allow-list is inactive and the path fields
 stay free-text, exactly as before.
 
+Credential allow-list (pw:)
+...........................
+
+The device table may also carry a pw: credential allow-list (fetchconfig engine
+9.79+) that names reusable login/secret aliases, in the same DEFAULT OPTIONS
+SECTION and with the same "edit on the server only" model as directory::
+
+    # credentials
+
+    # credential allow list - must be directly edited on the server
+    pw: user $NetUser backup
+    pw: pass $NetPass "s3cr,et=1"
+    pw: pass $RoCommunity public
+    # credential allow list - must be directly edited on the server
+
+Each line is pw: <kind> <$ALIAS> <value>, where kind is user or pass. The $ALIAS
+can be referenced on default: and device lines in place of a literal credential
+(user=$NetUser, pass=$NetPass, snmp_community=$RoCommunity); it is not mandatory
+for a credential to be in the list.
+
+Security / handling. fetchconfig-web treats the pw: block exactly like the
+directory: one: it is parsed as a verbatim record, never editable in the web UI,
+and on save it is re-emitted unchanged straight from the on-disk table (never
+from the submitted form), wrapped in the # credential allow list - must be
+directly edited on the server armor comments (shown in red in the Setup config
+view). The secret on each pw: pass line is masked (??) wherever config text is
+shown -- the raw Device table view and the editor's masked previews -- while the
+$ALIAS stays visible; pw: user lines (a username only) are shown as-is.
+
+Using aliases in the device editor (2.16.3). Each credential field in the
+structured editor is a combined control: a dropdown of the pw: aliases of the
+matching kind (user-kind for user/snmp_user; pass-kind for pass, enable and the
+SNMP secrets) plus a verbatim value field. Pick an alias to store the bare $Name
+-- it is shown in clear (an alias is a name, not a secret) with a note that the
+field holds an alias, and it is never masked in the device-table view nor
+redacted in the audit log. Type a value instead to keep it verbatim: a secret is
+masked with the keep-placeholder, a user name is shown in clear. A verbatim
+value is written back through the engine's grammar -- an alias emits $Name; a
+literal is either quoted (if it contains a comma or whitespace) or leading-
+escaped (\$/\\, so a real value that starts with $ or \ is not mistaken for an
+alias), never both; interior \/$ are left untouched. The ALIAS_REPLACE_ON_SAVE
+config key (see Configuration) can fold a verbatim value that matches a defined
+alias's value back into the $Alias on save. The pw: block itself stays server-
+only (re-emitted from disk, never written from the form).
+
 User accounts live in a PostgreSQL table, users:
 
   Column: username
@@ -1655,13 +1954,14 @@ utilities, each in its own titled box. All actions re-check the admin
 requirement server-side (not just menu hiding), since they're reachable directly
 by URL.
 
-The full set of entries is: Orphaned backup cleanup, Empty directory cleanup,
-Empty backup cleanup, Restore device table, Device debug logs, Devices without
-backups, Consistent backup suffixes, Check site assignment, Audit log, Login
-failures, Orphaned notes cleanup, Disk space, Show fetchconfig-web.cfg, Show
-schedule, View last fetchconfig schedule log, Templates, Upload report logo,
-Verify email setup, and (when the dashboard is enabled) Cleanup dashboard. The
-sections below describe the main ones in turn.
+The full set of entries, in the order they appear in the menu, is: Audit log,
+Login failures, Consistent backup suffixes, Check site assignment, (when the
+dashboard is enabled) Cleanup dashboard, Device debug logs, Devices without
+backups, Disk space, Empty backup cleanup, Empty directory cleanup, Orphaned
+backup cleanup, Orphaned notes cleanup, Restore device table, Show fetchconfig-
+web.cfg, Show schedule, Verify email setup, Templates, Upload report logo, and
+View last fetchconfig schedule log. The sections below describe the main ones in
+turn.
 
 Orphaned Backup Cleanup
 .......................
@@ -2442,7 +2742,7 @@ Deploy the help tree alongside the stylesheet, e.g.:
     cp fetchconfig-web.css /www/virtual/fetchconfig/htdocs/css/
     cp help.html           /www/virtual/fetchconfig/htdocs/help/
     # copy whichever documents you want in each menu:
-    cp fetchconfig-web-documentation.html INSTALL.html CHANGES.html \
+    cp README.html INSTALL.html CHANGES.html \
        LICENSE.html LICENSE-ADDITIONS.html PRIVACY.html \
        /www/virtual/fetchconfig/htdocs/help/fetchconfig-web/
     cp fetchconfig-documentation.html How-To-add-a-model.html \
@@ -2812,8 +3112,7 @@ or run the suite directly without generating a Makefile:
 
     prove -I t/lib t/
 
-To regenerate the HTML manual (fetchconfig-web-documentation.html) from this
-README, run:
+To regenerate the HTML manual (README.html) from this README, run:
 
     make doc
 

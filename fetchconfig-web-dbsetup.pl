@@ -256,6 +256,23 @@ my @UPDATES = (
     # the file is applied (idempotent) and recorded once. The actual grants are
     # issued both by the .sql (to the table owner) and by do_grants (below).
     [ '2.14', 'fetchconfig-web-dbupdate-2.14.sql', sub { 0 } ],
+    # 2.15 adds the device inventory schema -- three tables written by the engine's
+    # SNMP inventory collector (engine >= 9.79). Signature: the device_inventory
+    # table, so a hand-migrated DB is just recorded, not re-applied.
+    [ '2.15', 'fetchconfig-web-dbupdate-2.15.sql', sub { tbl_exists($_[0], 'device_inventory') } ],
+    # 2.16 adds device_inventory_component.fw_version (firmware/ROMMON version),
+    # a single nullable column. Signature: the column itself, so a hand-migrated
+    # DB is just recorded, not re-applied. Purely additive -- no grant change (the
+    # column inherits the table's existing whole-table privileges).
+    [ '2.16', 'fetchconfig-web-dbupdate-2.16.sql',
+      sub { col_exists($_[0], 'device_inventory_component', 'fw_version') } ],
+    # 2.17 adds device_inventory.sysname / syslocation / syscontact (SNMPv2-MIB
+    # system-group scalars), three nullable columns added together. Signature:
+    # sysname, so a hand-migrated DB is just recorded, not re-applied. Purely
+    # additive -- no grant change (the columns inherit the table's whole-table
+    # privileges).
+    [ '2.17', 'fetchconfig-web-dbupdate-2.17.sql',
+      sub { col_exists($_[0], 'device_inventory', 'sysname') } ],
 );
 
 sub tbl_exists {
@@ -263,6 +280,18 @@ sub tbl_exists {
     my ($x) = $dbh->selectrow_array(
         q{SELECT 1 FROM information_schema.tables
            WHERE table_schema = 'public' AND table_name = ?}, undef, $t);
+    return $x;
+}
+
+# A sequence exists? information_schema.tables does not list sequences, so probe
+# pg_class with relkind 'S' (works on all versions incl. 8.2).
+sub seq_exists {
+    my ($dbh, $s) = @_;
+    my ($x) = $dbh->selectrow_array(
+        q{SELECT 1 FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = 'public' AND c.relname = ? AND c.relkind = 'S'},
+        undef, $s);
     return $x;
 }
 
@@ -317,7 +346,11 @@ sub run_sql_file_dbi {
     # ships it; 8.2 may need it). RaiseError is off, so a failure here is harmless
     # and does not poison the connection (AutoCommit = 1).
     while ($sql =~ s/^[ \t]*CREATE\s+LANGUAGE\s+plpgsql\s*;//im) {
-        $dbh->do('CREATE LANGUAGE plpgsql');
+        # Only create it when absent, so an existing plpgsql does not log a
+        # spurious ERROR ("language plpgsql already exists") in the server log.
+        my ($has) = $dbh->selectrow_array(
+            q{SELECT 1 FROM pg_catalog.pg_language WHERE lanname = 'plpgsql'});
+        $dbh->do('CREATE LANGUAGE plpgsql') unless $has;
     }
     return unless $sql =~ /\S/;
     $dbh->do($sql)
@@ -437,6 +470,39 @@ sub do_grants {
     }
     print "Granted: web user \"$webuser\" SELECT; writer \"$writer\" SELECT+INSERT+UPDATE"
         . ($pgver && $pgver < 80400 ? " (table-level UPDATE; PostgreSQL < 8.4)" : "") . ".\n";
+
+    # --- Device inventory tables (schema 2.15) ------------------------------
+    # Writer-owned like the backup tables, so the engine maintains its own data
+    # (snapshot-replace DELETE, op=rename UPDATE) without a superuser. All grants
+    # are whole-table -- inventory needs no column-scoped UPDATE, so unlike the
+    # backup tables above there is NO 8.4-vs-8.2 branch here. device_inventory /
+    # device_inventory_component get full DML (snapshot-replace needs DELETE);
+    # device_inventory_history gets SELECT+INSERT+UPDATE but NO DELETE grant
+    # (append-only audit; the UPDATE is only for op=rename rewriting dev_id;
+    # append-only is enforced by the engine's single write path). The surrogate
+    # ids come from explicit sequences (8.2 house style), so the writer needs
+    # USAGE+UPDATE on them or INSERT fails.
+    if (tbl_exists($dbh, 'device_inventory')) {
+        for my $t (qw(device_inventory device_inventory_component device_inventory_history)) {
+            next unless tbl_exists($dbh, $t);
+            $dbh->do("ALTER TABLE $t OWNER TO $qw")
+                or die_clean("ALTER TABLE $t OWNER TO failed: " . $dbh->errstr);
+        }
+        for my $s (qw(device_inventory_component_id_seq device_inventory_history_id_seq)) {
+            next unless seq_exists($dbh, $s);
+            # "ALTER SEQUENCE ... OWNER TO" is PostgreSQL 8.3+. "ALTER TABLE <seq>
+            # OWNER TO" sets a sequence's owner on every version including 8.2
+            # (sequences are relations), and matches the table loop above.
+            $dbh->do("ALTER TABLE $s OWNER TO $qw")
+                or die_clean("ALTER TABLE $s OWNER TO failed: " . $dbh->errstr);
+        }
+        $dbh->do("GRANT SELECT ON device_inventory, device_inventory_component, device_inventory_history TO $qu");
+        $dbh->do("GRANT SELECT, INSERT, UPDATE, DELETE ON device_inventory, device_inventory_component TO $qw");
+        $dbh->do("GRANT SELECT, INSERT, UPDATE ON device_inventory_history TO $qw");
+        $dbh->do("GRANT USAGE, UPDATE ON SEQUENCE device_inventory_component_id_seq, device_inventory_history_id_seq TO $qw");
+        print "Granted: inventory tables (schema 2.15) -> owner/writer \"$writer\""
+            . " (history append-only, no DELETE grant); web user \"$webuser\" SELECT.\n";
+    }
 }
 
 sub do_upgrade {
@@ -1028,6 +1094,14 @@ COPYRIGHT               = 2026 (c) Rainer Tammer
 # Requires the history schema -- run "fetchconfig-web-dbsetup.pl --upgrade" -- and
 # the engine's "db:" option set on the device_table "default:" line.
 ENABLE_DASHBOARD        = 0
+
+# --- Credential aliases (device_table pw:) ---
+# On save, fold a verbatim credential value that matches a defined pw: alias's
+# value back into the "\$Alias" reference. off (default) = never touch what the
+# user typed; secrets = pass-kind fields only (pass/enable/snmp_community/...);
+# users = user-kind fields only (user/snmp_user); all = both. Reading an alias's
+# value to compare is done in memory only -- it is never displayed or logged.
+ALIAS_REPLACE_ON_SAVE   = off
 
 # --- PostgreSQL user database ---
 DBinst                  = $dbname

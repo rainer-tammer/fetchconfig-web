@@ -491,6 +491,13 @@
   }
 
   @media print{
+    /* Smaller, print-native type: scale the root (all rem-based headings and
+       spacing) and the body (prose + em-based inline code) down from the 16px
+       screen size; code blocks a touch smaller again since config/diff output
+       is dense. */
+    html{font-size:10pt;}
+    body{font-size:10pt;}
+    pre{font-size:8.5pt;}
     .sidebar,.mobile-bar{display:none !important;}
     .layout{display:block;}
     a{color:inherit;text-decoration:none;}
@@ -519,7 +526,7 @@
       <span class="brand-name">fetchconfig-web</span>
     </div>
     <div class="brand-meta">
-      <span class="pill">v2.12.27</span>
+      <span class="pill">v2.17.3</span>
       <span class="pill">GPL&#8209;3.0+</span>
     </div>
 
@@ -538,7 +545,7 @@
       <p class="lede"><strong>Additional terms and conditions pursuant to Section 7 of the GNU General Public License, Version 3 (GPLv3).</strong></p>
       
       <div class="hero-stats">
-        <div class="hero-stat"><span class="num">2.12.27</span><span class="label">version</span></div>
+        <div class="hero-stat"><span class="num">2.17.3</span><span class="label">version</span></div>
         <div class="hero-stat"><span class="num">Perl FCGI/CGI</span><span class="label">language</span></div>
         <div class="hero-stat"><span class="num">PostgreSQL</span><span class="label">user database</span></div>
         <div class="hero-stat"><span class="num">Devices / Status / Tools</span><span class="label">web pages</span></div>

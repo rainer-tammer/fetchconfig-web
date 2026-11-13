@@ -3,10 +3,13 @@
 **Audience:** engineers extending or maintaining fetchconfig-web.
 **Scope:** architecture, request lifecycle, data structures, the PostgreSQL
 schema, the security model, and step-by-step recipes for adding functionality.
-**Version:** this document tracks fetchconfig-web 2.14 (requires fetchconfig
-9.78+; the optional Backup Dashboard needs the engine's DB writer, fetchconfig
-9.75+, per-version line counts need 9.77+, and the Setup devices -> Rename
-device-id feature needs the engine's `--rename-device-id`, fetchconfig 9.78+).
+**Version:** this document tracks fetchconfig-web 2.17.15 (requires fetchconfig
+9.80+ -- the release minimum, `MIN_FETCHCONFIG_VERSION`, bumped for the SNMP
+inventory collection; the optional Backup Dashboard needs the engine's DB writer, fetchconfig
+9.75+, per-version line counts need 9.77+, the Setup devices -> Rename
+device-id feature needs the engine's `--rename-device-id`, fetchconfig 9.78+,
+and the SNMP device inventory collection -- including the 2.16 `fw_version`
+column -- needs fetchconfig 9.80+).
 
 ---
 
@@ -65,6 +68,14 @@ requests** or data leaks from one user's request into the next.
   `read_config()`'s error string, if any. It does *not* clear `$cgi` --
   `handle_request()` assigns that fresh per request. **If you add a
   request-scoped cache or global, you MUST clear it here.**
+  * One cache is deliberately *not* cleared here: `$_templates_t_persist`, the
+    cross-request cache of `fetchconfig.pl -t` (see `run_templates_t`). `-t`
+    forks a full engine process; persisting its result across FastCGI requests
+    avoids that fork on every editor load. It is validated on use by a cheap
+    device-table stat signature (`_templates_t_sig`) plus a `TEMPLATES_T_TTL`
+    (60s) ceiling, and cleared outright by `_invalidate_table_caches()` after a
+    save. Under plain CGI the process is per-request, so it is always undef and
+    the behaviour is identical to re-forking every time.
 * `main()` is the **dispatcher**: it reads `action`, enforces the POST-only
   guard, resolves the session, runs the CSRF and site-scope guards, then runs
   the `if/elsif` dispatch chain.
@@ -194,7 +205,7 @@ flowchart TD
   [[ render: page_head .. page_foot ]]
 ```
 
-The dispatch is a long `if/elsif` chain on `$action` (~120 actions). Each branch
+The dispatch is a long `if/elsif` chain on `$action` (~130 actions). Each branch
 calls a handler sub. **Read-only** actions (`view_report`, `status`, `compare`,
 `compare_devices`, `compare_device_versions`, `rename_device_id` (the rename
 *form*), ...) render directly. **State-changing** actions (`login`, `user_save`,
@@ -297,7 +308,8 @@ short note rather than a (possibly stale) diagram.
 | `%COMMON_OPTS` | hash of `{type,mandatory}` | device-table options available on every model (incl. the universal `debug`) |
 | `%MODEL_CATALOG` | hash: model -> `{option => {type,mandatory}}` | per-model editor option sets, built from `%COMMON_OPTS` + extras |
 | `%EMAIL_OPTS` | hash | option set for the device-table `email:` directive |
-| `$SECRET_KEEP` | scalar | placeholder token shown in the editor for an unchanged masked secret |
+| `$SECRET_KEEP` | scalar | placeholder token shown in the editor for an unchanged masked secret (real secrets only, never an alias) |
+| `%CRED_FIELD_KIND` | hash: field -> `user`\|`pass` | credential fields that accept a `pw:` `$Alias`, and the alias kind each takes (2.16.3) |
 | `%STATE_CHANGING` | set | CSRF/POST-guarded actions (section 4) |
 | `%AUDIT_SECRET_KEY` | set | field names whose values are redacted in the audit log |
 | `%LOGIN_LANDING` | set | action names that are valid post-login redirect targets |
@@ -306,11 +318,20 @@ short note rather than a (possibly stale) diagram.
 
 ### Device-table option entry shape
 
-Each option is `{ type => '<validator>', mandatory => 0|1 }`. `type` selects an
+Each catalog option is `{ type => '<validator>', mandatory => 0|1 }`. `type` selects an
 input widget and a validator (`secret` -> masked field with show toggle,
-`enum_onoff` -> on/off, `path` -> allow-listed directory, `int`, `enum_site`,
-`debug`, ...). The parsed device table and the catalog together drive the
-editor UI and the save-time validation (`cfg_value_problem`).
+`enum_onoff` -> on/off, `enum_snmp_level` -> noAuthNoPriv/authNoPriv/authPriv,
+`path` -> allow-listed directory, `int`, `enum_site`, `debug`, ...). The parsed device
+table and the catalog together drive the editor UI and the save-time validation
+(`cfg_value_problem`).
+
+A parsed option **value** is normally the pair `[$key, $value]`. A credential field
+(one in `%CRED_FIELD_KIND`) may carry a third element, `[$key, '$Alias', 'alias']`,
+tagging the value as a `pw:` alias reference rather than a literal. `cred_parse_value`
+sets the tag on read (a defined `$Name`); `cred_serialize_value` emits it bare on write,
+and emits a literal with quote-XOR-leading-escape (first-character-only `\$`/`\\`).
+`fold_cred_aliases` (gated by `ALIAS_REPLACE_ON_SAVE`) turns a verbatim value that equals
+a defined alias's value into the alias on save. See `fetchconfig-pw-alias-grammar-engine.md`.
 
 ---
 
@@ -396,6 +417,10 @@ Security is layered; the important mechanisms:
   <hash>` (universal), SNMP community, RADIUS/TACACS keys, WPA passphrases,
   Aruba CX controller/auth-server keys, bare indented `key` lines, etc. Masking
   runs **before** syntax highlighting, so the highlighter never sees cleartext.
+* A `pw:` credential **alias** (`$Name`) is a name, not a secret: `mask_secrets`,
+  `mask_secrets_opt` and `audit_redact` leave a bare `$Name` visible in a credential slot,
+  while a verbatim secret value is still masked/redacted. The `pw:` block itself is
+  server-only (re-emitted from disk, `pw: pass` values masked by `mask_pw_pass`).
 * `valid_report_name` / `template_path_ok` / the directory allow-lists
   (`read_allowed_dirs`) prevent path traversal for report/template/file access.
 
@@ -773,6 +798,150 @@ erDiagram
 | expired_at | BIGINT | when expired |
 | lines_added | INTEGER | lines added vs the previous version (ignore-aware; 2.12, engine 9.77+). NULL = baseline / not yet counted; 0/0 = only ignored lines changed |
 | lines_removed | INTEGER | lines removed vs the previous version |
+
+#### Device inventory tables (2.15+)
+
+Written by the fetchconfig engine's optional **SNMP inventory** collector (tables
+added schema 2.15; `device_inventory_component.fw_version` added 2.16;
+`device_inventory.sysname` / `syslocation` / `syscontact` added 2.17; engine 9.80+)
+through the same backup-history outbox. Same conventions as the dashboard tables above:
+naive local wall-clock epoch `BIGINT` timestamps, **no foreign keys** (all key on
+`dev_id`), **writer-owned** (web login `SELECT` only). Read by the **Inventory data**
+viewer (`show_device_inventory`, 2.16+) and, fleet-wide, by the **Dashboard -> Inventory**
+page (`show_inventory_dashboard`, action `inventory_dashboard`, 2.17.4) -- a read-only roll-up
+gated on `$ENABLE_DASHBOARD`, scoped to the viewer's visible devices via `read_device_ids`,
+aggregating in Perl against one `SELECT` of the summary rows (no new SQL per metric). Each ranked
+panel and the needs-attention list render every row and carry a per-panel **Show N** select; the
+count is read server-side from the `fcweb_invshow` cookie (so the first paint honours it) and an
+inline script re-applies it and rewrites the cookie on change (2.17.6). A device with no inventory
+row is split into **pending** vs **not configured** (2.17.7) by resolving the engine enable rule
+against the device table (`parse_device_table` → per-model `default:` layering under the device
+line: `snmp_inventory != 0` and a community / v3 user present); so the DB alone never decides
+"not configured". The device-table editor exposes the `snmp_*` options that drive collection.
+
+The three 2.17 system-group fields (`sysname`/`syslocation`/`syscontact`, SNMPv2-MIB) are
+**current-state only**: upserted on the headline row each successful run, shown in the
+viewer's Summary, but **not** change-detection triggers (`hw_set`/`os_version` remain the
+only history triggers) -- a rename or relocation is administrative churn, not a hardware
+event. The viewer selects them behind a `pg_attribute`/`information_schema` probe so one
+build runs against a 2.16 or a 2.17 database.
+
+```mermaid
+erDiagram
+    DEVICE_TABLE     ||..o{ DEVICE_INVENTORY           : "dev_id (config, no FK)"
+    DEVICE_INVENTORY ||..o{ DEVICE_INVENTORY_COMPONENT : "dev_id (logical, no FK)"
+    DEVICE_INVENTORY ||..o{ DEVICE_INVENTORY_HISTORY   : "dev_id (logical, no FK)"
+
+    DEVICE_INVENTORY {
+        text dev_id PK
+        text status "disabled|successful|failed"
+        text source "snmp|cli|null"
+        text vendor
+        text vendor_raw
+        text model
+        text serial
+        text os_version
+        smallint member_count
+        text hw_set "change_token"
+        text sysname "SNMPv2-MIB sysName (2.17)"
+        text syslocation "SNMPv2-MIB sysLocation (2.17)"
+        text syscontact "SNMPv2-MIB sysContact (2.17)"
+        bigint last_attempt_at
+        bigint last_success_at
+        bigint changed_at
+    }
+    DEVICE_INVENTORY_COMPONENT {
+        bigint id PK "sequence"
+        text dev_id
+        smallint member_index
+        text comp_class "chassis|module|powerSupply|transceiver"
+        text comp_position
+        text model
+        text serial
+        text sw_version
+        text fw_version
+        text hw_rev
+        boolean is_primary
+    }
+    DEVICE_INVENTORY_HISTORY {
+        bigint id PK "sequence"
+        text dev_id UK "unique_dev_id_changed_at"
+        bigint changed_at UK
+        text hw_set
+        text member_serials
+        text os_version
+        text note "initial|members|os|both"
+    }
+    DEVICE_TABLE {
+        text dev_id "on_disk_config_file"
+    }
+```
+
+**device_inventory** -- one row per device that has (or had) inventory, upserted on
+each successful/failed run; `disabled` is **UPDATE-only** (never INSERTed), so a
+never-inventory device has no row and shows disabled via the device-table left join.
+
+| Column | Type | Notes |
+|---|---|---|
+| dev_id | TEXT PK | device id |
+| status | TEXT NOT NULL | `disabled` / `successful` / `failed` (CHECK) |
+| source | TEXT | `snmp` / `cli` / NULL (NULL when disabled) |
+| vendor | TEXT | canonical vendor |
+| vendor_raw | TEXT | as reported |
+| model | TEXT | master/display model |
+| serial | TEXT | master/display serial (flips with the stack master) |
+| os_version | TEXT | |
+| member_count | SMALLINT | stack members |
+| hw_set | TEXT | canonical `class:serial` set -- the change token (NULL until first success, kept through later failures) |
+| last_attempt_at | BIGINT | run epoch; set on successful/failed, untouched on disabled |
+| last_success_at | BIGINT | run epoch of the last successful collection |
+| changed_at | BIGINT | run epoch of the last hw_set/os change |
+
+**device_inventory_component** -- serial-bearing parts; **snapshot-replaced** on a
+successful run (`DELETE WHERE dev_id=?` then insert the set). Indexed on `dev_id`
+and on `serial`. No natural key (ENTITY-MIB names/serials repeat within a device).
+
+| Column | Type | Notes |
+|---|---|---|
+| id | BIGINT PK (sequence) | row handle only (churns under replace) |
+| dev_id | TEXT NOT NULL | device id |
+| member_index | SMALLINT | stack member / switch number |
+| comp_class | TEXT NOT NULL | `chassis` / `module` / `powerSupply` / `transceiver` (CHECK) |
+| comp_position | TEXT | ENTITY-MIB name/locator (descriptive; named `comp_position` because `position` is a reserved word) |
+| model | TEXT | |
+| serial | TEXT NOT NULL | only serial-bearing parts are stored |
+| sw_version | TEXT | |
+| fw_version | TEXT | firmware / ROMMON version (added in schema 2.16) |
+| hw_rev | TEXT | |
+| is_primary | BOOLEAN DEFAULT FALSE | true on the stack-master chassis |
+
+**device_inventory_history** -- change-triggered audit; one row per detected
+hardware/OS change (not per run). `UNIQUE (dev_id, changed_at)` is both the
+replay-idempotency key and the lookup index. Append-only (the writer has
+`SELECT, INSERT, UPDATE` but **no `DELETE`** grant; the `UPDATE` is only for the
+engine's `op=rename`), so it survives device removal.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | BIGINT PK (sequence) | |
+| dev_id | TEXT NOT NULL | device id |
+| changed_at | BIGINT | run epoch the change was detected |
+| hw_set | TEXT | canonical set at this point |
+| member_serials | TEXT | readable `idx:model:serial, ...` for display |
+| os_version | TEXT | |
+| note | TEXT | `initial` / `members` / `os` / `both` |
+
+**Write path (engine, for context).** The collector emits `op=inv_current` and
+`op=inv_component` on the backup-history outbox; the drain's `_apply_op` upserts
+`device_inventory`, snapshot-replaces the components on success, and -- capturing
+the prior `hw_set`/`os_version` *before* the upsert -- derives the history row when
+either changed. All timestamps are the **run epoch** (not drain time), so the audit
+stays honest on a late-drained outbox and `changed_at` is deterministic for the
+UNIQUE guard. The inventory ops share the per-file transaction with the
+backup-history ops, gated by a **schema-presence pre-check** (a pre-2.15 database
+skips inventory DML rather than poisoning the transaction and wedging the drain).
+Created and granted by `fetchconfig-web-dbsetup.pl --upgrade`; see
+`fetchconfig-web-dbupdate-2.15.sql` and the engine contract.
 
 ### 8.2 Connection and grants
 

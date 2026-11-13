@@ -22,8 +22,8 @@
 #           python render-doc.py CHANGES.md             # -> CHANGES.html + CHANGES
 #           python render-doc.py README.imageconvert.md # -> .html + README.imageconvert
 #
-# The output HTML name defaults from the input (README.md keeps the historical
-# fetchconfig-web-documentation.html); the ASCII name is the input without .md.
+# The output HTML name defaults from the input (X.md -> X.html, so README.md ->
+# README.html); the ASCII name is the input without .md.
 # Standard library only, and runs unchanged on Python 3 and Python 2.7.18.
 #
 # It parses the README's Markdown (## sections, ###/#### headings, GitHub
@@ -84,22 +84,19 @@ def _usage(msg):
     sys.stderr.write(
         "render-doc.py: %s\n"
         "Usage:  python render-doc.py [input.md] [output.html]\n"
-        "  e.g.  python render-doc.py README.md  fetchconfig-web-documentation.html\n"
-        "        python render-doc.py INSTALL.md fetchconfig-web-install.html\n"
+        "  e.g.  python render-doc.py README.md   README.html\n"
+        "        python render-doc.py INSTALL.md  INSTALL.html\n"
         "Note: the SCRIPT name (render-doc.py) comes first, then the Markdown\n"
         "input, then the HTML output. Do not run 'python INSTALL.md ...'.\n"
         % msg)
     sys.exit(2)
 
 README_IN = sys.argv[1] if len(sys.argv) > 1 else 'README.md'
-# Output HTML name: explicit 2nd arg wins; else derive from the input. README.md
-# keeps its historical name (fetchconfig-web-documentation.html); any other
-# X.md defaults to X.html (so `render-doc.py CHANGES.md` / `INSTALL.md` work
-# without a second argument).
+# Output HTML name: explicit 2nd arg wins; else derive from the input --
+# X.md -> X.html for every document (README.md -> README.html, CHANGES.md ->
+# CHANGES.html, ...), so each invocation works without a second argument.
 if len(sys.argv) > 2:
     HTML_OUT = sys.argv[2]
-elif os.path.basename(README_IN).lower() == 'readme.md':
-    HTML_OUT = 'fetchconfig-web-documentation.html'
 else:
     HTML_OUT = re.sub(r'\.(md|markdown)$', '', README_IN, flags=re.I) + '.html'
 
@@ -601,6 +598,13 @@ STYLE = r"""<style>
   }
 
   @media print{
+    /* Smaller, print-native type: scale the root (all rem-based headings and
+       spacing) and the body (prose + em-based inline code) down from the 16px
+       screen size; code blocks a touch smaller again since config/diff output
+       is dense. */
+    html{font-size:10pt;}
+    body{font-size:10pt;}
+    pre{font-size:8.5pt;}
     .sidebar,.mobile-bar{display:none !important;}
     .layout{display:block;}
     a{color:inherit;text-decoration:none;}

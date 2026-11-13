@@ -92,12 +92,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.14.0';
+use constant APP_VERSION => '2.17.15';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.14.0';
+use constant APP_VERSION_INTERNAL => '2.17.15';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -105,7 +105,7 @@ use constant DEFAULT_COPYRIGHT => 'Copyright (c) 2026, Rainer Tammer';
 
 # Minimum fetchconfig version this release needs. Checked at run time against
 # fetchconfig's own fetchconfig::Constants::version() (see check_fetchconfig_version).
-use constant MIN_FETCHCONFIG_VERSION => '9.78';
+use constant MIN_FETCHCONFIG_VERSION => '9.80';
 
 # --- Help menu "additional help" scan (see help_scan_dir / help_extract_title) ---
 # Each of the two help subdirectories (fetchconfig/, fetchconfig-web/) is
@@ -248,6 +248,7 @@ my ($DEVICE_TABLE,
     $SMTP_USER,
     $SMTP_PASS,
     $EMAIL_FROM,
+    $ALIAS_REPLACE_ON_SAVE,
     $SITE_URL);
 
 ################################################################################
@@ -328,6 +329,7 @@ my @CFG_KEYS = (
     [ 'TRUST_FORWARDED_PROTO',  'bool',      '0',                                      '0 | 1 (trust X-Forwarded-Proto from a reverse proxy)' ],
     [ 'SHOW_RENDER_TIME',       'bool',      '0',                                      '0 | 1' ],
     [ 'ENABLE_DASHBOARD',       'bool',      '0',                                      '0 | 1 (show the Backup Dashboard; needs the history schema + engine db:)' ],
+    [ 'ALIAS_REPLACE_ON_SAVE',  'enum',      'off',                                    'off | secrets | users | all' ],
     [ 'WEB_DIR',                'path_opt',  '/www/virtual/fetchconfig/htdocs',        'absolute filesystem path' ],
     [ 'BASE_URL',               'url',       '/',                                      'absolute URL path' ],
     [ 'CSS_BASE_URL',           'url',       '/css',                                   'absolute URL path' ],
@@ -601,6 +603,13 @@ sub read_config {
     # option; with it 1 but the schema/data absent, the dashboard shows guidance.
     $ENABLE_DASHBOARD = (defined $kv->{ENABLE_DASHBOARD} && $kv->{ENABLE_DASHBOARD} =~ /^[01]$/)
                      ? $kv->{ENABLE_DASHBOARD} : 0;
+    # On save, fold a verbatim credential value that matches a defined pw: alias's
+    # value back into the "$Alias" reference. off (default) = never; secrets =
+    # pass-kind fields only; users = user-kind fields only; all = both. Reading an
+    # alias's value to compare is done in memory only (never displayed/logged).
+    $ALIAS_REPLACE_ON_SAVE = (defined $kv->{ALIAS_REPLACE_ON_SAVE}
+                              && $kv->{ALIAS_REPLACE_ON_SAVE} =~ /^(off|secrets|users|all)$/i)
+                     ? lc($kv->{ALIAS_REPLACE_ON_SAVE}) : 'off';
     # Require bcrypt (Crypt::Bcrypt) for password hashing. Default 1: new hashes
     # are never written as the weaker Apache MD5 ($apr1$), and login is disabled
     # with a clear notice if the module is unavailable. Set 0 only on a stack
@@ -1256,7 +1265,25 @@ our $_sites_cache;
 our %_user_sites_cache;
 our $_allowed_dirs_cache;
 our $_templates_t_cache;
+# Cross-request cache for `fetchconfig.pl -t` (see run_templates_t). Unlike the
+# per-request caches above it is DELIBERATELY NOT cleared in reset_request_state:
+# under FastCGI it lets a healthy install skip the engine fork on back-to-back
+# editor loads. Invalidated by a device-table change (stat signature) or a TTL,
+# and cleared explicitly after a save (_invalidate_table_caches).
+our $_templates_t_persist;
+# Cross-request cache for `fetchconfig.pl --list-allowed-dirs` (see
+# read_allowed_dirs), same rationale and lifecycle as $_templates_t_persist: that
+# fork is ~340ms and ran on every editor load. Not cleared per request; keyed on
+# the device-table signature + TTL; dropped on save (_invalidate_table_caches).
+our $_allowed_dirs_persist;
+# TTL (seconds) for the cross-request engine-fork caches (-t and
+# --list-allowed-dirs). A device-table change is detected immediately via the
+# stat signature; this only bounds how long a template-FILE change (not in that
+# signature) can go unseen before the next load re-forks. Defined here, above its
+# first use in read_allowed_dirs, so the `use constant` is compiled in time.
+use constant TEMPLATES_T_TTL => 60;
 our $_template_used_cache;   # set of template paths referenced by a generic device
+our $_pw_aliases_cache;      # parsed pw: alias block (name -> {kind,value}); derives from the device table
 
 # Byte-oriented output: the page is declared UTF-8 (HTTP header + <meta
 # charset>), and config content is passed through as raw UTF-8 bytes. We use
@@ -1288,6 +1315,7 @@ sub reset_request_state {
     $_allowed_dirs_cache    = undef;
     $_templates_t_cache     = undef;
     $_template_used_cache   = undef;
+    $_pw_aliases_cache      = undef;
     _syntax_cache_reset();
     # Re-read the config file each request so an edited /etc/fetchconfig-web.cfg
     # takes effect without restarting Apache (matches plain-CGI behaviour,
@@ -1309,9 +1337,12 @@ sub reset_request_state {
 # Parameters: none
 ################################################################################
 sub _invalidate_table_caches {
-    $_templates_t_cache   = undef;
-    $_allowed_dirs_cache  = undef;
+    $_templates_t_cache    = undef;
+    $_templates_t_persist  = undef;   # table just changed -> drop the cross-request -t cache
+    $_allowed_dirs_cache   = undef;
+    $_allowed_dirs_persist = undef;   # and the cross-request --list-allowed-dirs cache
     $_template_used_cache = undef;
+    $_pw_aliases_cache    = undef;
     _syntax_cache_reset();
 }
 
@@ -1430,6 +1461,7 @@ my %STATE_CHANGING = map { $_ => 1 } qw(
   note_delete
   notes_orphan_delete
   reset_do
+  external_change_ack
   upload_logo
   delete_logo
   delete_debug
@@ -1607,6 +1639,10 @@ sub main {
             show_dashboard_cleanup($user);
         } elsif ($action eq 'dashboard_cleanup_delete') {
             do_dashboard_cleanup_delete($user);
+        } elsif ($action eq 'device_inventory') {
+            show_device_inventory($user);
+        } elsif ($action eq 'inventory_dashboard') {
+            show_inventory_dashboard($user);
         } elsif ($action eq 'help') {
             show_help($user);
         } elsif ($action eq 'setup') {
@@ -1664,6 +1700,8 @@ sub main {
             show_login_failures_data($user);
         } elsif ($action eq 'clear_login_failures') {
             do_clear_login_failures($user);
+        } elsif ($action eq 'external_change_ack') {
+            do_external_change_ack($user);
         } elsif ($action eq 'note_get') {
             show_note_get($user);
         } elsif ($action eq 'note_save') {
@@ -1819,6 +1857,48 @@ sub db_connect {
 }
 
 ################################################################################
+# db_table_exists / db_column_exists
+#
+# Fast catalog existence checks. We query pg_catalog directly instead of the
+# SQL-standard information_schema views: on PostgreSQL 8.2 those views are very
+# slow (each is a join over the whole catalog with per-row ACL checks). A single
+# `information_schema.tables` probe in the device-table editor measured ~340 ms
+# -- by far the largest part of the render -- while the pg_class / pg_attribute
+# lookups below are indexed on name and return in well under a millisecond.
+# Both return 1/0, take the public schema by default, and never die (a probe on
+# a dead/undef handle is simply "does not exist"). Identifiers are matched in
+# their PostgreSQL-folded (lower-case) form, as the old information_schema
+# probes already did.
+#
+# Parameters:
+#   $dbh, $table[, $schema]            / $dbh, $table, $column[, $schema]
+################################################################################
+sub db_table_exists {
+    my ($dbh, $table, $schema) = @_;
+    return 0 unless $dbh;
+    $schema = 'public' unless defined $schema && $schema ne '';
+    my ($ok) = $dbh->selectrow_array(
+        q{SELECT 1 FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = ? AND c.relname = ? AND c.relkind IN ('r','v','m','p')},
+        undef, $schema, $table);
+    return $ok ? 1 : 0;
+}
+sub db_column_exists {
+    my ($dbh, $table, $column, $schema) = @_;
+    return 0 unless $dbh;
+    $schema = 'public' unless defined $schema && $schema ne '';
+    my ($ok) = $dbh->selectrow_array(
+        q{SELECT 1 FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_class c     ON c.oid = a.attrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = ? AND c.relname = ? AND a.attname = ?
+             AND a.attnum > 0 AND NOT a.attisdropped},
+        undef, $schema, $table, $column);
+    return $ok ? 1 : 0;
+}
+
+################################################################################
 # FastCGI accept-loop state (see the Run section at the end). $IN_REQUEST is
 # true while a request is being handled, so the SIGTERM handler knows whether
 # it may _exit immediately (idle) or must let the request finish first.
@@ -1841,7 +1921,7 @@ our $RUN_MODE = 'CGI';
 # Device-table option keys whose values are secret and must NEVER be stored in
 # the audit log (logged as "***" instead). Password changes for USERS never
 # reach audit() at all.
-my %AUDIT_SECRET_KEY = map { $_ => 1 } qw(pass enable snmp_community community db_pass);
+my %AUDIT_SECRET_KEY = map { $_ => 1 } qw(pass enable snmp_community snmp_write_community snmp_authpass snmp_privpass community db_pass);
 
 ################################################################################
 # audit_is_secret
@@ -1861,6 +1941,8 @@ sub audit_is_secret { my ($k) = @_; defined $k && $AUDIT_SECRET_KEY{lc $k} ? 1 :
 sub audit_redact {
     my ($field, $val) = @_;
     return $val unless audit_is_secret($field);
+    # A pw: alias reference ("$Name") is a name, not a secret -- record it as-is.
+    return $val if is_cred_field($field) && cred_is_alias_token($val);
     return (defined $val && $val ne '') ? '***' : $val;   # keep empty as empty
 }
 
@@ -2150,6 +2232,35 @@ sub audit_check_device_table_change {
         app_state_set($dbh, "external_notice:$username", $msg, $username);
     }
     $dbh->disconnect;
+}
+
+################################################################################
+# do_external_change_ack
+#
+# "Dismiss" button on the external-change warning banner: clear this user's
+# one-shot notice so the banner does not reappear, and audit the acknowledgement.
+# The tripwire's content token was already re-baselined at detection, so there is
+# no global state to change here -- this only dismisses the per-user notice.
+# State-changing (POST + CSRF, enforced by the dispatcher); answered as a tiny
+# text/plain 200 for the banner's fetch() so the page is not reloaded (on the
+# editor that would lose in-progress edits).
+#
+# Parameters:
+#   $user
+################################################################################
+sub do_external_change_ack {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    if ($dbh) {
+        # Web user has UPDATE but not DELETE on app_state, so clear by emptying.
+        app_state_set($dbh, "external_notice:$user", '', $user);
+        $dbh->disconnect;
+    }
+    audit(action => 'external_change_ack', username => $user,
+          object_type => 'table', object_id => _basename($DEVICE_TABLE // ''),
+          detail => 'dismissed the external device-table change notice');
+    print std_header(-type => 'text/plain', -status => '200 OK');
+    print "ok\n";
 }
 
 ################################################################################
@@ -2830,6 +2941,14 @@ our %SITE_CTX;
 # Populated by model_defaults_init() from the parsed records.
 our %MODEL_DEFAULTS;
 
+# Per-device inventory headline (vendor + hardware model) read from the 2.15
+# device_inventory table, shown as read-only columns in the Devices editor.
+# Populated once per editor render by device_inventory_summary_init(). The
+# columns are shown only when the inventory schema is present and readable
+# ($DEVICE_INVENTORY_AVAILABLE); otherwise the editor looks exactly as before.
+our %DEVICE_INVENTORY;              # dev_id => { vendor => <str>, model => <str> }
+our $DEVICE_INVENTORY_AVAILABLE = 0;
+
 ################################################################################
 # model_defaults_init
 #
@@ -2851,6 +2970,40 @@ sub model_defaults_init {
             $MODEL_DEFAULTS{$m}{$k} = $v;
         }
     }
+}
+
+################################################################################
+# device_inventory_summary_init
+#
+# Load the headline vendor + hardware model for every device from the 2.15
+# device_inventory table into %DEVICE_INVENTORY, so the Devices editor can show
+# them as read-only columns. Sets $DEVICE_INVENTORY_AVAILABLE only when the
+# schema is present AND readable by the (SELECT-only) web DB user -- so a plain
+# install with no DB, no inventory schema, or no grant simply shows no columns.
+# Read-only and defensive: any failure leaves the map empty and the flag false.
+################################################################################
+sub device_inventory_summary_init {
+    %DEVICE_INVENTORY = ();
+    $DEVICE_INVENTORY_AVAILABLE = 0;
+    return unless $ENABLE_DASHBOARD;          # DB feature off -> no inventory
+    my $dbh = db_connect() or return;
+    # Fast pg_catalog probe (the SQL-standard catalog views are ~340ms on PG 8.2).
+    unless (db_table_exists($dbh, 'device_inventory')) { $dbh->disconnect; return; }
+    my $rows = $dbh->selectall_arrayref(
+        q{SELECT dev_id, vendor, vendor_raw, model FROM device_inventory});
+    if (!$rows && $dbh->err) { $dbh->disconnect; return; }   # missing SELECT grant
+    $DEVICE_INVENTORY_AVAILABLE = 1;
+    for my $row (@{ $rows || [] }) {
+        my ($did, $vendor, $vraw, $model) = @$row;
+        next unless defined $did;
+        my $v = (defined $vendor && $vendor ne '') ? $vendor
+              : (defined $vraw   && $vraw   ne '') ? $vraw : '';
+        $DEVICE_INVENTORY{$did} = {
+            vendor => $v,
+            model  => (defined $model ? $model : ''),
+        };
+    }
+    $dbh->disconnect;
 }
 
 ################################################################################
@@ -4191,10 +4344,7 @@ sub dashboard_deny {
 sub dashboard_schema_state {
     my ($dbh) = @_;
     return 'missing' unless $dbh;
-    my ($have) = $dbh->selectrow_array(
-        q{SELECT 1 FROM information_schema.tables
-           WHERE table_schema = 'public' AND table_name = 'backup_current'});
-    return 'missing' unless $have;
+    return 'missing' unless db_table_exists($dbh, 'backup_current');
     my $cnt = $dbh->selectrow_array('SELECT count(*) FROM backup_current');
     if (!defined $cnt) {
         # permission denied (or similar) -> treat as no SELECT grant
@@ -6254,6 +6404,11 @@ sub show_device_list {
     my ($devices, $err) = read_device_ids($user);
     my $load_secs = Time::HiRes::tv_interval($t0);
 
+    # Read-only Vendor + HW-Model columns from the 2.15 device_inventory table,
+    # shown only when that schema is present and readable (see the helper).
+    device_inventory_summary_init();
+    my $inv_cols = $DEVICE_INVENTORY_AVAILABLE;
+
     print std_header(-type => 'text/html', -charset => 'UTF-8');
     print page_head('Devices', $user, 'full');
 
@@ -6290,6 +6445,10 @@ sub show_device_list {
             print qq{<option value="} . esc(lc $m) . qq{">} . esc($m) . qq{</option>\n};
         }
         print qq{</select>\n};
+        print qq{<input type="text" id="dev-filter" class="filter-box" }
+            . qq{placeholder="Filter device&hellip;" autocomplete="off">\n};
+        print qq{<input type="text" id="host-filter" class="filter-box" }
+            . qq{placeholder="Filter hostname&hellip;" autocomplete="off">\n};
         print qq{<select id="site-filter" class="filter-select">\n};
         print qq{<option value="">(all sites)</option>\n};
         for my $sc (@site_codes) {
@@ -6300,10 +6459,6 @@ sub show_device_list {
         }
         print qq{<option value="\0none">(no site)</option>\n};
         print qq{</select>\n};
-        print qq{<input type="text" id="dev-filter" class="filter-box" }
-            . qq{placeholder="Filter device&hellip;" autocomplete="off">\n};
-        print qq{<input type="text" id="host-filter" class="filter-box" }
-            . qq{placeholder="Filter hostname&hellip;" autocomplete="off">\n};
         print qq{<input type="text" id="comment-filter" class="filter-box" }
             . qq{placeholder="Filter comment&hellip;" autocomplete="off">\n};
         print qq{<button type="button" id="clear-filter" class="btn">Clear filter</button>\n};
@@ -6335,9 +6490,13 @@ sub show_device_list {
         print qq{<table class="list" id="dev-table">\n}
             . qq{<tr>}
             . qq{<th class="sortable" data-key="model">Model<span class="sort-ind"></span></th>}
-            . qq{<th class="sortable" data-key="site">Site<span class="sort-ind"></span></th>}
             . qq{<th class="sortable" data-key="dev">Device-ID<span class="sort-ind"></span></th>}
             . qq{<th class="sortable" data-key="host">Hostname<span class="sort-ind"></span></th>}
+            . ($inv_cols
+                ? qq{<th class="sortable" data-key="vendor">Vendor<span class="sort-ind"></span></th>}
+                . qq{<th class="sortable" data-key="hwmodel">HW Model<span class="sort-ind"></span></th>}
+                : '')
+            . qq{<th class="sortable" data-key="site">Site<span class="sort-ind"></span></th>}
             . qq{<th>Comment</th>}
             . qq{<th>Note</th>}
             . qq{</tr>\n};
@@ -6347,19 +6506,34 @@ sub show_device_list {
         for my $d (@$devices) {
             my $link = script_url() . '?dev=' . CGI::escape($d->{id});
             my $site = defined $d->{site} ? $d->{site} : '';
+            # Vendor + HW model from the inventory map (blank when no inventory
+            # row for this device); shown and sortable only when $inv_cols.
+            my $iv      = $inv_cols ? ($DEVICE_INVENTORY{$d->{id}} || {}) : {};
+            my $ivendor = defined $iv->{vendor} ? $iv->{vendor} : '';
+            my $ihw     = defined $iv->{model}  ? $iv->{model}  : '';
+            my $inv_data = $inv_cols
+                ? qq{data-vendor="} . esc(lc $ivendor) . qq{" }
+                . qq{data-hwmodel="} . esc(lc $ihw) . qq{" }
+                : '';
+            my $inv_td = $inv_cols
+                ? qq{<td>} . ($ivendor ne '' ? esc($ivendor) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
+                . qq{<td>} . ($ihw ne '' ? esc($ihw) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
+                : '';
             # data-host = lowercased host for the substring filter;
             # data-host-key = a sort key that orders IPv4 numerically first,
             # then hostnames/FQDNs (and IPv6) alphabetically (see host_sort_key).
             print qq{<tr data-model="} . esc(lc $d->{model}) . qq{" }
+                . $inv_data
                 . qq{data-site="} . esc($site ne '' ? lc $site : "\0none") . qq{" }
                 . qq{data-dev="} . esc(lc $d->{id}) . qq{" }
                 . qq{data-host="} . esc(lc $d->{host}) . qq{" }
                 . qq{data-host-key="} . esc(host_sort_key($d->{host})) . qq{" }
                 . qq{data-comment="} . esc(lc $d->{comment}) . qq{">}
                 . qq{<td>} . esc($d->{model}) . qq{</td>}
-                . qq{<td>} . ($site ne '' ? esc($site) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
                 . qq{<td><a href="} . esc($link) . qq{">} . esc($d->{id}) . qq{</a></td>}
                 . qq{<td>} . esc($d->{host}) . qq{</td>}
+                . $inv_td
+                . qq{<td>} . ($site ne '' ? esc($site) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
                 . qq{<td>} . esc($d->{comment}) . qq{</td>}
                 . qq{<td class="note-cell">} . note_icon_button($d->{id}, $notes_present->{$d->{id}}) . qq{</td>}
                 . qq{</tr>\n};
@@ -7944,6 +8118,701 @@ JS
 }
 
 ################################################################################
+# show_device_inventory
+#
+# Read-only per-device SNMP inventory viewer (?action=device_inventory&dev=...).
+# Reads the 2.15 device_inventory* tables (the web DB user has SELECT only). All
+# timestamps are the naive local wall-clock epoch, rendered with dash_fmt_ts
+# (gmtime, no tz conversion). Always reachable from the backups page; it degrades
+# gracefully when the schema is absent or no inventory has been collected yet.
+#
+# Parameters:
+#   $user
+################################################################################
+sub show_device_inventory {
+    my ($user) = @_;
+    my $dev = $cgi->param('dev') // '';
+
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+
+    unless (valid_id($dev)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">Invalid device id.</p>\n};
+        print page_foot();
+        return;
+    }
+    # Per-site guard (as on the backups page): a site-limited user must not read
+    # another site's inventory just by typing the URL.
+    unless (device_accessible($user, $dev)) {
+        print page_head('Error', $user);
+        print qq{<p class="error">Device not found.</p>\n};
+        print page_foot();
+        return;
+    }
+
+    print page_head('Inventory data', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="}
+        . esc(script_url() . '?dev=' . CGI::escape($dev))
+        . qq{">&larr; Backups for } . esc($dev) . qq{</a></p>\n};
+    print qq{<div class="tool-section" id="inventory-section">\n};
+    print qq{<h2 class="tool-section-title">Inventory data &mdash; } . esc($dev) . qq{</h2>\n};
+
+    my $dbh = db_connect();
+    if (!$dbh) {
+        print qq{<p class="error">The database is not reachable.</p>\n};
+        print qq{</div>\n}; print page_foot(); return;
+    }
+
+    # Schema present? Fast pg_catalog probe (the standard catalog views are slow on 8.2).
+    unless (db_table_exists($dbh, 'device_inventory')) {
+        print qq{<div class="login-notice"><p><strong>The inventory schema is not installed.</strong></p>}
+             . qq{<p>Run <code>fetchconfig-web-dbsetup.pl --upgrade</code> to create the }
+             . qq{<code>device_inventory</code> tables, then reload.</p></div>\n};
+        $dbh->disconnect; print qq{</div>\n}; print page_foot(); return;
+    }
+
+    # The system-group columns (sysname/syslocation/syscontact) exist only on
+    # schema 2.17+, so probe once and select them conditionally -- one cgi build
+    # runs against both a 2.16 and a 2.17 database.
+    my $has_sys = db_column_exists($dbh, 'device_inventory', 'sysname');
+    my $sys_cols = $has_sys ? q{, sysname, syslocation, syscontact} : q{};
+    my $cur = $dbh->selectrow_hashref(
+        qq{SELECT status, source, vendor, vendor_raw, model, serial, os_version,
+                 member_count, hw_set, last_attempt_at, last_success_at, changed_at$sys_cols
+            FROM device_inventory WHERE dev_id = ?}, undef, $dev);
+
+    if (!$cur && $dbh->err) {
+        # Readable table but the SELECT failed -> missing SELECT grant.
+        print qq{<div class="login-notice"><p><strong>The database user cannot read the inventory tables.</strong></p>}
+             . qq{<p>The web DB user is missing <code>SELECT</code>. Run }
+             . qq{<code>fetchconfig-web-dbsetup.pl --upgrade</code> to grant it, then reload.</p></div>\n};
+        $dbh->disconnect; print qq{</div>\n}; print page_foot(); return;
+    }
+    if (!$cur) {
+        # No row at all -> inventory has never been collected for this device.
+        print inventory_enable_help_html($dev);
+        $dbh->disconnect; print qq{</div>\n}; print page_foot(); return;
+    }
+
+    # --- Summary -----------------------------------------------------------
+    my $status = defined $cur->{status} ? $cur->{status} : '';
+    my $vendor = defined $cur->{vendor} ? $cur->{vendor} : '';
+    if (defined $cur->{vendor_raw} && $cur->{vendor_raw} ne '' && $cur->{vendor_raw} ne $vendor) {
+        $vendor = ($vendor ne '' ? "$vendor ($cur->{vendor_raw})" : $cur->{vendor_raw});
+    }
+    print qq{<h3>Summary</h3>\n<table class="list inv-summary">\n};
+    my @rows = (
+        ['Status',        $status],
+        ['Source',        $cur->{source}],
+        ['Vendor',        $vendor],
+        ['Model',         $cur->{model}],
+        ['Serial',        $cur->{serial}],
+        # SNMPv2-MIB system-group (device's own configured name/location/contact),
+        # schema 2.17+; current-state only (not a change trigger). NULL -> em-dash.
+        ($has_sys ? (
+            ['sysName',     $cur->{sysname}],
+            ['sysLocation', $cur->{syslocation}],
+            ['sysContact',  $cur->{syscontact}],
+        ) : ()),
+        ['OS version',    $cur->{os_version}],
+        ['Stack members', $cur->{member_count}],
+        ['Hardware set',  $cur->{hw_set}],
+        ['Last attempt',  dash_fmt_ts($cur->{last_attempt_at})],
+        ['Last success',  dash_fmt_ts($cur->{last_success_at})],
+        ['Last change',   dash_fmt_ts($cur->{changed_at})],
+    );
+    for my $r (@rows) {
+        my ($k, $v) = @$r;
+        $v = defined $v ? "$v" : '';
+        # The .inv-summary table (CSS) keeps the label column (th) as narrow as its
+        # text and lets the value column wrap -- so the long hw_set "class:serial,
+        # ..." token wraps inside the box instead of running off the page.
+        my $cell;
+        if ($v eq '') {
+            $cell = qq{<span class="muted">&mdash;</span>};
+        } elsif ($k eq 'Hardware set') {
+            # One component per line: hw_set is a comma-separated list of
+            # "class:serial" tokens, which runs off the page on a big stack.
+            $cell = join('<br>', map { esc($_) } split /,\s*/, $v);
+        } else {
+            $cell = esc($v);
+        }
+        print qq{<tr><th>} . esc($k) . qq{</th><td>} . $cell . qq{</td></tr>\n};
+    }
+    print qq{</table>\n};
+    if ($status eq 'disabled') {
+        print qq{<p class="muted">Inventory is currently <strong>disabled</strong> for this device }
+             . qq{(no <code>snmp_*</code> configured); any values above are the last collected.</p>\n};
+    } elsif ($status eq 'failed') {
+        print qq{<p class="muted">The last collection <strong>failed</strong>; the values above are the }
+             . qq{last good data (last confirmed } . esc(dash_fmt_ts($cur->{last_success_at})) . qq{).</p>\n};
+    }
+
+    # --- Components (snapshot of the last successful run) -------------------
+    # fw_version (firmware/ROMMON) is the 2.16 column; it may be absent on a DB
+    # still at schema 2.15, so probe the catalog and include it only when present
+    # -- selecting a missing column would 42703 and break the whole viewer.
+    my $has_fw = db_column_exists($dbh, 'device_inventory_component', 'fw_version');
+    my $comps = $dbh->selectall_arrayref(
+        qq{SELECT member_index, comp_class, comp_position, model, serial,
+                 sw_version, } . ($has_fw ? qq{fw_version, } : qq{}) . qq{hw_rev, is_primary
+            FROM device_inventory_component WHERE dev_id = ?
+           ORDER BY member_index, comp_class, id}, { Slice => {} }, $dev);
+    print qq{<h3>Components</h3>\n};
+    if (!$comps || !@$comps) {
+        print qq{<p class="muted">No component rows (components are recorded on a successful collection).</p>\n};
+    } else {
+        # Fixed column proportions (table-layout:fixed keeps the table inside the
+        # green box; the cells wrap). The long free-text columns get the most room;
+        # the FW version column exists only on schema 2.16+ ($has_fw), so emit two
+        # colgroups that each sum to 100%.
+        my $colgroup = $has_fw
+            ? qq{<colgroup><col style="width:6%"><col style="width:8%"><col style="width:19%">}
+            . qq{<col style="width:12%"><col style="width:11%"><col style="width:15%">}
+            . qq{<col style="width:17%"><col style="width:6%"><col style="width:6%"></colgroup>\n}
+            : qq{<colgroup><col style="width:6%"><col style="width:9%"><col style="width:24%">}
+            . qq{<col style="width:14%"><col style="width:13%"><col style="width:22%">}
+            . qq{<col style="width:6%"><col style="width:6%"></colgroup>\n};
+        print qq{<table class="list inv-components">\n} . $colgroup
+            . qq{<tr><th>Member</th><th>Class</th><th>Position</th>}
+            . qq{<th>Model</th><th>Serial</th><th>SW</th>}
+            . ($has_fw ? qq{<th>FW version</th>} : qq{})
+            . qq{<th>HW rev</th><th>Primary</th></tr>\n};
+        for my $c (@$comps) {
+            my $prim = (defined $c->{is_primary}
+                        && ($c->{is_primary} eq 't' || $c->{is_primary} eq '1'
+                            || $c->{is_primary} eq 'true')) ? 'yes' : '';
+            print qq{<tr>}
+                . qq{<td>} . esc(defined $c->{member_index} ? $c->{member_index} : '') . qq{</td>}
+                . qq{<td>} . esc(defined $c->{comp_class} ? $c->{comp_class} : '') . qq{</td>}
+                . qq{<td>} . esc(defined $c->{comp_position} ? $c->{comp_position} : '') . qq{</td>}
+                . qq{<td>} . esc(defined $c->{model} ? $c->{model} : '') . qq{</td>}
+                . qq{<td>} . esc(defined $c->{serial} ? $c->{serial} : '') . qq{</td>}
+                . qq{<td>} . esc(defined $c->{sw_version} ? $c->{sw_version} : '') . qq{</td>}
+                . ($has_fw ? qq{<td>} . esc(defined $c->{fw_version} ? $c->{fw_version} : '') . qq{</td>} : qq{})
+                . qq{<td>} . esc(defined $c->{hw_rev} ? $c->{hw_rev} : '') . qq{</td>}
+                . qq{<td>} . esc($prim) . qq{</td></tr>\n};
+        }
+        print qq{</table>\n};
+    }
+
+    # --- Change history ----------------------------------------------------
+    my $hist = $dbh->selectall_arrayref(
+        q{SELECT changed_at, note, os_version, member_serials
+            FROM device_inventory_history WHERE dev_id = ?
+           ORDER BY changed_at DESC, id DESC}, { Slice => {} }, $dev);
+    print qq{<h3>Change history</h3>\n};
+    if (!$hist || !@$hist) {
+        print qq{<p class="muted">No change history yet.</p>\n};
+    } else {
+        print qq{<table class="list inv-history">\n}
+            . qq{<colgroup><col style="width:17%"><col style="width:16%"><col style="width:33%"><col style="width:34%"></colgroup>\n}
+            . qq{<tr><th>Changed</th><th>Note</th><th>OS version</th><th>Members</th></tr>\n};
+        for my $h (@$hist) {
+            print qq{<tr>}
+                . qq{<td style="white-space:nowrap">} . esc(dash_fmt_ts($h->{changed_at})) . qq{</td>}
+                . qq{<td>} . esc(defined $h->{note} ? $h->{note} : '') . qq{</td>}
+                . qq{<td>} . esc(defined $h->{os_version} ? $h->{os_version} : '') . qq{</td>}
+                . qq{<td class="inv-members">}
+                . join('<br>', map { esc($_) } split /,\s*/, (defined $h->{member_serials} ? $h->{member_serials} : ''))
+                . qq{</td>}
+                . qq{</tr>\n};
+        }
+        print qq{</table>\n};
+    }
+
+    $dbh->disconnect;
+    print qq{</div>\n};
+    print page_foot();
+}
+
+################################################################################
+# dash_wrap_label
+#
+# HTML for a ranked-bar label on the inventory dashboard: HTML-escaped, with a
+# single <br> inserted when the text runs longer than $limit characters (broken
+# at the last space at or before the limit, or hard-broken when there is no
+# space). The vendor/model and vendor/OS bars carry the vendor in front, so some
+# labels get long.
+#
+# Parameters:
+#   $s      the label text
+#   $limit  max characters before a line break is inserted (default 50)
+################################################################################
+sub dash_wrap_label {
+    my ($s, $limit) = @_;
+    $limit ||= 50;
+    return esc($s) if length($s) <= $limit;
+    my $pos = rindex($s, ' ', $limit);
+    $pos = $limit if $pos < 1;
+    my $head = substr($s, 0, $pos);
+    my $tail = substr($s, $pos); $tail =~ s/^\s+//;
+    return esc($head) . '<br>' . esc($tail);
+}
+
+################################################################################
+# dash_show_select
+#
+# The "Show N" <select> for an inventory-dashboard panel header: options 5 / 10 /
+# 25 / 50 / 100 / All (All = value 0), with $cur preselected. data-key ties it to
+# its panel (data-show-key) for the inline show/hide script; the choice persists
+# in the fcweb_invshow cookie.
+#
+# Parameters:
+#   $key   panel key (vendor | models | os | attention)
+#   $cur   currently selected count (0 = All)
+################################################################################
+sub dash_show_select {
+    my ($key, $cur) = @_;
+    $cur = 0 unless defined $cur && $cur =~ /^\d+\z/;
+    my $s = qq{<label class="dash-show">Show <select class="dash-show-sel" data-key="}
+          . esc($key) . qq{">};
+    for my $o (5, 10, 25, 50, 100, 0) {
+        my $sel = ($o == $cur) ? ' selected' : '';
+        $s .= qq{<option value="$o"$sel>} . ($o == 0 ? 'All' : $o) . qq{</option>};
+    }
+    $s .= qq{</select></label>};
+    return $s;
+}
+
+################################################################################
+# show_inventory_dashboard
+#
+# Fleet-wide roll-up of the SNMP inventory (2.15+ device_inventory): coverage,
+# collection status, vendor / model / OS-version breakdowns, firmware and stack
+# counts, data freshness, and a "needs attention" list. Read-only and defensive,
+# exactly like the Devices-list inventory columns: it needs $ENABLE_DASHBOARD
+# (the DB feature) plus a present, SELECT-readable device_inventory table;
+# otherwise it shows a friendly notice and nothing else.
+#
+# The denominator is the viewer's VISIBLE device set (read_device_ids applies the
+# same per-user site scoping as the Devices list), so a site-limited user sees a
+# roll-up of just their sites; the scope pill says global vs restricted.
+#
+# Parameters:
+#   $user
+################################################################################
+sub show_inventory_dashboard {
+    my ($user) = @_;
+    return dashboard_deny($user, 'The dashboard features are not enabled.')
+        unless $ENABLE_DASHBOARD;
+
+    my $dbh = db_connect();
+
+    # Inventory availability: the summary table must be present and SELECT-readable
+    # (the web DB user is SELECT-only). Load the summary rows once.
+    my $inv_ok = 0;
+    my %inv;
+    # Firmware is a per-COMPONENT fact (device_inventory_component.fw_version, 2.16),
+    # not a summary column; collect the set of devices that have any real firmware.
+    my ($have_fw_col, %fw_dev) = (0);
+    if ($dbh) {
+        if (db_table_exists($dbh, 'device_inventory')) {
+            my $rows = $dbh->selectall_arrayref(
+                q{SELECT dev_id, status, vendor, vendor_raw, model, os_version,
+                         member_count, last_success_at, last_attempt_at
+                    FROM device_inventory});
+            if ($rows) {                       # undef + err => missing SELECT grant
+                $inv_ok = 1;
+                for my $r (@$rows) {
+                    my ($did, $st, $ven, $vraw, $mod, $os, $mc, $ls, $la) = @$r;
+                    next unless defined $did;
+                    my $v = (defined $ven  && $ven  ne '') ? $ven
+                          : (defined $vraw && $vraw ne '') ? $vraw : '';
+                    $inv{$did} = {
+                        status       => (defined $st  ? $st  : ''),
+                        vendor       => $v,
+                        model        => (defined $mod ? $mod : ''),
+                        os           => (defined $os  ? $os  : ''),
+                        members      => (defined $mc  ? $mc  : 0),
+                        last_success => $ls,
+                        last_attempt => $la,
+                    };
+                }
+                # Firmware coverage: one DISTINCT scan of the component table, when the
+                # fw_version column exists (web schema 2.16+).
+                $have_fw_col = db_column_exists($dbh, 'device_inventory_component', 'fw_version');
+                if ($have_fw_col) {
+                    my $fwr = $dbh->selectall_arrayref(
+                        q{SELECT DISTINCT dev_id FROM device_inventory_component
+                           WHERE fw_version IS NOT NULL AND fw_version <> ''});
+                    $fw_dev{ $_->[0] } = 1 for @{ $fwr || [] };
+                }
+            }
+        }
+    }
+
+    # Visible device set, site-scoped centrally by read_device_ids.
+    my $acc = $dbh ? user_site_access($dbh, $user) : { unrestricted => 1 };
+    my $unrestricted = $acc->{unrestricted} ? 1 : 0;
+    my ($devices, $err) = read_device_ids($user, $acc);
+    $dbh->disconnect if $dbh;
+
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    print page_head('Inventory dashboard', $user, 'full');
+    print qq{<h1 class="dash-h1">Device inventory</h1>\n};
+
+    if ($err) {
+        print qq{<p class="error">} . esc($err) . qq{</p>\n};
+        print page_foot(); return;
+    }
+    unless ($inv_ok) {
+        print qq{<div class="login-notice">}
+            . qq{<p><strong>Inventory data is not available.</strong></p>}
+            . qq{<p>The <code>device_inventory</code> schema is missing or the web DB user cannot }
+            . qq{read it. Run <code>fetchconfig-web-dbsetup.pl --upgrade</code> to add and grant it, }
+            . qq{then make sure SNMP inventory is enabled on the devices (fetchconfig 9.80+).</p></div>\n};
+        print page_foot(); return;
+    }
+
+    my $scope = $unrestricted ? 'global' : 'restricted';
+
+    # Per-panel "Show N" counts, persisted in the fcweb_invshow cookie (written
+    # client-side on change; read here so the first render already honours it, no
+    # flash). 0 = All. Defaults: 10 for the ranked panels, 25 for needs-attention.
+    my %show = (vendor => 10, models => 10, os => 10, attention => 25);
+    {
+        my %cj = CGI::Cookie->fetch;
+        if (my $c = $cj{'fcweb_invshow'}) {
+            for my $pair (split /,/, $c->value) {
+                my ($k, $v) = split /:/, $pair, 2;
+                $show{$k} = $v if defined $k && exists $show{$k} && defined $v && $v =~ /^\d+\z/;
+            }
+        }
+    }
+
+    # Resolve, from the device table, which visible devices actually have SNMP
+    # inventory *configured* -- so a device configured (on its own line or via a
+    # default: line) but not yet collected shows as "pending", not "not configured".
+    # Enable rule (engine 9.80): snmp_inventory != 0 AND credentials present
+    # (snmp_community / snmp_write_community for v1/v2c, or snmp_user for v3).
+    # snmp_inventory defaults on and snmp_inventory_level is irrelevant here; a
+    # device with no SNMP credentials is simply not configured.
+    my (%model_snmp, %dev_cfg);
+    if (open(my $fh, '<', $DEVICE_TABLE)) {
+        local $/; my $content = <$fh>; close $fh;
+        my $recs = parse_device_table($content);
+        for my $r (@$recs) {
+            next unless $r->{kind} eq 'default';
+            $model_snmp{ $r->{model} }{ $_->[0] } = $_->[1] for @{ $r->{opts} || [] };
+        }
+        for my $r (@$recs) {
+            next unless $r->{kind} eq 'device';
+            my %o; $o{ $_->[0] } = $_->[1] for @{ $r->{opts} || [] };
+            $dev_cfg{ $r->{id} } = { model => $r->{model}, opt => \%o };
+        }
+    }
+    my $inv_configured = sub {
+        my ($id) = @_;
+        my $d = $dev_cfg{$id} or return 0;      # not in the table -> not configured
+        my $md = $model_snmp{ $d->{model} } || {};
+        my $o  = $d->{opt};
+        my $eff = sub { my $k = shift; exists $o->{$k} ? $o->{$k} : $md->{$k}; };
+        my $inv = $eff->('snmp_inventory');
+        $inv = '1' unless defined $inv && $inv ne '';
+        return 0 if $inv =~ /^\s*(0|off|no|false)\s*$/i;   # explicitly disabled
+        my $ver = $eff->('snmp_version');
+        $ver = '2c' unless defined $ver && $ver ne '';
+        $ver = lc $ver; $ver =~ s/^snmp//; $ver =~ s/^v//;  # v2c / snmpv2c -> 2c
+        my $has = sub { my $v = $eff->($_[0]); defined $v && $v ne ''; };
+        return ($ver eq '3')
+            ? ($has->('snmp_user') ? 1 : 0)
+            : (($has->('snmp_community') || $has->('snmp_write_community')) ? 1 : 0);
+    };
+
+    # ----- aggregate over the visible devices --------------------------------
+    # device_inventory.status is one of 'successful' | 'failed' | 'disabled' (schema
+    # CHECK). A device with NO row is either configured-but-not-yet-collected
+    # ("pending") or genuinely "not configured", told apart via the device table.
+    my $total = scalar @$devices;
+    my ($with, $pending, $notcfg) = (0, 0, 0);
+    my ($ok, $failed, $disabled) = (0, 0, 0);
+    my (%vendor, %model, %os);
+    my ($fw_set, $stacked) = (0, 0);
+    my ($f_today, $f_week, $f_month, $f_old) = (0, 0, 0, 0);
+    my $last_run;                           # max last_attempt_at seen
+    my @attention;
+    my $now = time();
+    for my $d (@$devices) {
+        my $row = $inv{ $d->{id} };
+        if (!$row) {                          # no row: pending (configured) or not configured
+            if ($inv_configured->($d->{id})) { $pending++; } else { $notcfg++; }
+            next;
+        }
+        $with++;
+        my $st = $row->{status};
+        if    ($st eq 'successful') { $ok++; }
+        elsif ($st eq 'failed')     { $failed++; }
+        elsif ($st eq 'disabled')   { $disabled++; }
+
+        # Breakdowns use the retained last-known data (set on a successful run and
+        # retained through later failed/disabled runs); skip empties so a row that
+        # never succeeded does not show as "(unknown)". Models and OS versions are
+        # grouped WITH the vendor in front (same model/version string can appear
+        # under more than one vendor).
+        my $vp = $row->{vendor} ne '' ? "$row->{vendor} / " : '';
+        $vendor{ $row->{vendor} }++       if $row->{vendor} ne '';
+        $model{  "$vp$row->{model}" }++   if $row->{model}  ne '';
+        $os{     "$vp$row->{os}" }++      if $row->{os}     ne '';
+        $stacked++ if ($row->{members} || 0) > 1;
+        $fw_set++  if $fw_dev{ $d->{id} };
+        $last_run = $row->{last_attempt}
+            if defined $row->{last_attempt} && $row->{last_attempt} =~ /^\d+\z/
+            && (!defined $last_run || $row->{last_attempt} > $last_run);
+
+        my $ls = $row->{last_success};
+        if (defined $ls && $ls =~ /^\d+\z/) {
+            my $age = $now - $ls;
+            if    ($age < 86400)      { $f_today++; }
+            elsif ($age < 7 * 86400)  { $f_week++; }
+            elsif ($age < 30 * 86400) { $f_month++; }
+            else                      { $f_old++; }
+        }
+
+        # Needs attention = has a row but was not successfully collected (failed or
+        # disabled). Successful devices are fine (even if the data is older); devices
+        # with no row are simply not configured and are excluded.
+        if ($st eq 'failed' || $st eq 'disabled') {
+            my ($cls, $sev) = $st eq 'failed' ? ('failed', 0) : ('never', 1);
+            push @attention, {
+                dev => $d->{id}, vendor => $row->{vendor}, model => $row->{model},
+                disp => $st, cls => $cls, sev => $sev,
+                last_success => $ls,
+                _age => (defined $ls && $ls =~ /^\d+\z/) ? ($now - $ls) : 2_000_000_000,
+            };
+        }
+    }
+
+    my $none = $pending + $notcfg;           # all devices with no inventory row
+    my $pc = sub { my ($n) = @_; $total ? sprintf('%.1f%% of fleet', 100 * $n / $total) : ''; };
+
+    # ----- KPI tiles ---------------------------------------------------------
+    print qq{<section class="dash-tiles">};
+    print dash_tile('Devices',        $total,  'in the device table',           '',       $scope);
+    print dash_tile('With inventory', $with,   $pc->($with),                    'fresh',  $scope);
+    print dash_tile('Pending',        $pending,'configured, not collected yet', 'stale',  $scope);
+    print dash_tile('Not configured', $notcfg, 'no SNMP inventory configured',  'never',  $scope);
+    print dash_tile('Failed',         $failed, 'last collection',              'failed', $scope);
+    print dash_tile('Stacked',        $stacked,'members > 1',                   '',       $scope);
+    print dash_tile('Firmware',
+                    ($have_fw_col ? "$fw_set" : 'n/a'),
+                    ($have_fw_col
+                        ? ($with ? sprintf('%.0f%% of collected', 100 * $fw_set / ($with || 1)) : 'none collected')
+                        : 'needs schema 2.16'),
+                    '', $scope);
+    print qq{</section>\n};
+
+    if (defined $last_run) {
+        print qq{<p class="dash-sub">Last (partial) collection attempt seen: <strong>}
+            . esc(dash_fmt_ts($last_run)) . qq{</strong> (UTC).</p>\n};
+    }
+
+    # ----- coverage + status segmented bars ----------------------------------
+    my $wt = sub { my ($n) = @_; $total ? sprintf('%.3f%%', 100 * $n / $total) : '0'; };
+
+    print qq{<section class="dash-charts">};
+
+    # Coverage: with data / configured-but-pending / not configured (from the
+    # device-table SNMP config, so "pending" is told apart from "not configured").
+    print qq{<div class="dash-panel">}
+        . qq{<div class="dash-panel-head"><h2>Collection coverage} . dash_scope_pill($scope) . qq{</h2>}
+        . qq{<span class="dash-legend">}
+        . qq{<span><span class="dash-swatch dash-seg-fresh"></span>with data</span>}
+        . qq{<span><span class="dash-swatch dash-seg-stale"></span>pending</span>}
+        . qq{<span><span class="dash-swatch dash-seg-never"></span>not configured</span></span></div>}
+        . qq{<div class="dash-bar">}
+        . qq{<div class="dash-seg-fresh" style="width:} . $wt->($with)    . qq{"></div>}
+        . qq{<div class="dash-seg-stale" style="width:} . $wt->($pending) . qq{"></div>}
+        . qq{<div class="dash-seg-never" style="width:} . $wt->($notcfg)  . qq{"></div></div>}
+        . qq{<div class="dash-tally"><span>With data <strong>$with</strong></span>}
+        . qq{<span>Pending <strong>$pending</strong></span>}
+        . qq{<span>Not configured <strong>$notcfg</strong></span></div></div>};
+
+    # Collection status: OK (successful) / Failed / Disabled (only when any) / Not collected.
+    my $dis_seg = $disabled
+        ? qq{<div class="dash-seg-stale" style="width:} . $wt->($disabled) . qq{"></div>} : '';
+    my $dis_leg = $disabled
+        ? qq{<span><span class="dash-swatch dash-seg-stale"></span>disabled</span>} : '';
+    my $dis_tal = $disabled ? qq{<span>Disabled <strong>$disabled</strong></span>} : '';
+    print qq{<div class="dash-panel">}
+        . qq{<div class="dash-panel-head"><h2>Collection status} . dash_scope_pill($scope) . qq{</h2>}
+        . qq{<span class="dash-legend">}
+        . qq{<span><span class="dash-swatch dash-seg-fresh"></span>successful</span>}
+        . qq{<span><span class="dash-swatch dash-seg-failed"></span>failed</span>}
+        . $dis_leg
+        . qq{<span><span class="dash-swatch dash-seg-never"></span>not collected</span></span></div>}
+        . qq{<div class="dash-bar">}
+        . qq{<div class="dash-seg-fresh"  style="width:} . $wt->($ok)     . qq{"></div>}
+        . qq{<div class="dash-seg-failed" style="width:} . $wt->($failed) . qq{"></div>}
+        . $dis_seg
+        . qq{<div class="dash-seg-never"  style="width:} . $wt->($none)   . qq{"></div></div>}
+        . qq{<div class="dash-tally"><span>Successful <strong>$ok</strong></span>}
+        . qq{<span>Failed <strong>$failed</strong></span>}
+        . $dis_tal
+        . qq{<span>Not collected <strong>$none</strong></span></div></div>};
+
+    print qq{</section>\n};
+
+    # ----- ranked breakdowns: vendor / model / OS ----------------------------
+    # Every entry is rendered; the "Show N" select (persisted per panel in the
+    # fcweb_invshow cookie) hides the rest. Server hides rows beyond N up front so
+    # the first paint already matches the cookie; the inline script re-applies on
+    # change. Bars scale to the top (always-shown) value, so hiding never rescales.
+    my $rank_panel = sub {
+        my ($title, $counts, $key) = @_;
+        my $n = $show{$key};
+        my @keys = sort { $counts->{$b} <=> $counts->{$a} || $a cmp $b } keys %$counts;
+        my $distinct = scalar @keys;
+        my $max = 0; for (@keys) { $max = $counts->{$_} if $counts->{$_} > $max; }
+        $max ||= 1;
+        my $h = qq{<div class="dash-panel" data-show-key="} . esc($key) . qq{">}
+              . qq{<div class="dash-panel-head"><h2>} . esc($title) . qq{</h2>}
+              . qq{<div class="dash-head-right"><span class="dash-psub">$distinct distinct</span>}
+              . dash_show_select($key, $n) . qq{</div></div><div class="dash-age">};
+        my $i = 0;
+        for my $k (@keys) {
+            my $c  = $counts->{$k};
+            my $pw = sprintf('%.1f%%', 100 * $c / $max); $pw = '2px' if $c == 0;
+            my $hide = ($n > 0 && $i >= $n) ? ' dash-row-hidden' : '';
+            $h .= qq{<div data-show-row class="$hide"><div class="dash-age-head">}
+                . qq{<span class="dash-cat-label">} . dash_wrap_label($k, 50)
+                . qq{</span><span class="dash-num">$c</span></div>}
+                . qq{<div class="dash-age-track"><div class="dash-age-fill dash-cat" }
+                . qq{style="width:$pw"></div></div></div>};
+            $i++;
+        }
+        $h .= qq{</div></div>};
+        return $h;
+    };
+    print qq{<section class="dash-charts">};
+    print $rank_panel->('By vendor',  \%vendor, 'vendor');
+    print $rank_panel->('Top models', \%model,  'models');
+    print $rank_panel->('OS versions', \%os,    'os');
+    print qq{</section>\n};
+
+    # ----- data freshness ----------------------------------------------------
+    {
+        my $maxf = $f_today; for ($f_week, $f_month, $f_old) { $maxf = $_ if $_ > $maxf; }
+        $maxf ||= 1;
+        my $bar = sub {
+            my ($lbl, $n, $seg) = @_;
+            my $pw = sprintf('%.1f%%', 100 * $n / $maxf); $pw = '2px' if $n == 0;
+            return qq{<div><div class="dash-age-head"><span>} . esc($lbl)
+                 . qq{</span><span class="dash-num">$n</span></div>}
+                 . qq{<div class="dash-age-track"><div class="dash-age-fill dash-seg-$seg" }
+                 . qq{style="width:$pw"></div></div></div>};
+        };
+        print qq{<section class="dash-panel">}
+            . qq{<div class="dash-panel-head"><h2>Data freshness} . dash_scope_pill($scope) . qq{</h2>}
+            . qq{<span class="dash-psub">age of the last successful collection</span></div>}
+            . qq{<div class="dash-age">}
+            . $bar->('Today',      $f_today, 'fresh')
+            . $bar->('This week',  $f_week,  'fresh')
+            . $bar->('This month', $f_month, 'stale')
+            . $bar->('> 30 days',  $f_old,   'failed')
+            . qq{</div></section>\n};
+    }
+
+    # ----- needs attention ---------------------------------------------------
+    @attention = sort { $a->{sev} <=> $b->{sev} || $b->{_age} <=> $a->{_age}
+                        || $a->{dev} cmp $b->{dev} } @attention;
+    my $att_total = scalar @attention;
+    my $an = $show{attention};
+    my $att_shown = ($an > 0 && $an < $att_total) ? $an : $att_total;
+    print qq{<section class="dash-panel dash-panel-last" data-show-key="attention">};
+    print qq{<div class="dash-panel-head"><h2>Needs attention} . dash_scope_pill($scope) . qq{</h2>}
+        . qq{<div class="dash-head-right"><span class="dash-psub">$att_total device}
+        . ($att_total == 1 ? '' : 's')
+        . qq{ not successfully collected (failed or disabled)</span>}
+        . ($att_total ? dash_show_select('attention', $an) : '') . qq{</div></div>};
+    if ($att_total) {
+        print qq{<table class="chg-lb"><thead><tr><th>Device-ID</th><th>Vendor</th>}
+            . qq{<th>Model</th><th>Status</th><th>Last success</th></tr></thead><tbody>};
+        my $i = 0;
+        for my $a (@attention) {
+            my $link = esc(script_url() . '?action=device_inventory&dev=' . CGI::escape($a->{dev}));
+            my $ls   = (defined $a->{last_success} && $a->{last_success} =~ /^\d+\z/)
+                     ? esc(dash_fmt_ts($a->{last_success})) : qq{<span class="muted">never</span>};
+            my $hide = ($an > 0 && $i >= $an) ? ' class="dash-row-hidden"' : '';
+            print qq{<tr data-show-row$hide><td class="chg-dev"><a href="$link">} . esc($a->{dev}) . qq{</a></td>}
+                . qq{<td>} . ($a->{vendor} ne '' ? esc($a->{vendor}) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
+                . qq{<td>} . ($a->{model}  ne '' ? esc($a->{model})  : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
+                . qq{<td><span class="dash-badge dash-badge-$a->{cls}">} . esc($a->{disp}) . qq{</span></td>}
+                . qq{<td>$ls</td></tr>};
+            $i++;
+        }
+        print qq{</tbody></table>};
+        print qq{<p class="dash-hint"><span data-show-info>Showing $att_shown of $att_total</span>. }
+            . qq{Open a device to see its full inventory.</p>};
+    }
+    else {
+        # No failures/disabled. Don't claim full success while devices are still
+        # pending their first collection -- point at the Pending tile instead.
+        my $msg = 'No failed or disabled collections.';
+        if ($pending) {
+            $msg .= ' ' . $pending . ($pending == 1 ? ' device pending its' : ' devices pending their')
+                  . ' first collection &mdash; see the Pending tile.';
+        }
+        print qq{<p class="dash-ok">$msg</p>};
+    }
+    print qq{</section>\n};
+
+    # Inline script: the "Show N" selects show/hide rows per panel and persist the
+    # choice in the fcweb_invshow cookie (0 = All). The server already rendered the
+    # cookie's N, so this only drives subsequent changes.
+    print <<'JS';
+<script>
+(function(){
+  var CK='fcweb_invshow';
+  function read(){var o={},m=document.cookie.match(/(?:^|;\s*)fcweb_invshow=([^;]*)/);
+    if(m){decodeURIComponent(m[1]).split(',').forEach(function(p){var kv=p.split(':');if(kv.length===2)o[kv[0]]=kv[1];});}return o;}
+  function write(o){var s=Object.keys(o).map(function(k){return k+':'+o[k];}).join(',');
+    document.cookie=CK+'='+encodeURIComponent(s)+';path=/;max-age=31536000';}
+  function apply(key,n){
+    var panel=document.querySelector('[data-show-key="'+key+'"]');if(!panel)return;
+    var rows=panel.querySelectorAll('[data-show-row]'),shown=0;
+    for(var i=0;i<rows.length;i++){var hide=(n>0&&i>=n);
+      rows[i].className=rows[i].className.replace(/\s*dash-row-hidden/g,'');
+      if(hide)rows[i].className+=' dash-row-hidden';else shown++;}
+    var info=panel.querySelector('[data-show-info]');
+    if(info)info.textContent='Showing '+shown+' of '+rows.length;
+  }
+  var cur=read();
+  var sels=document.querySelectorAll('select.dash-show-sel');
+  for(var i=0;i<sels.length;i++){(function(sel){
+    var key=sel.getAttribute('data-key');
+    if(cur[key]!==undefined){sel.value=cur[key];apply(key,parseInt(sel.value,10)||0);}
+    sel.addEventListener('change',function(){var n=parseInt(sel.value,10)||0;apply(key,n);
+      var o=read();o[key]=sel.value;write(o);});
+  })(sels[i]);}
+})();
+</script>
+JS
+
+    print page_foot();
+}
+
+# "No inventory yet -> enable SNMP" info panel, shown when a device has no
+# device_inventory row (the feature has never collected for it).
+sub inventory_enable_help_html {
+    my ($dev) = @_;
+    my $edit = esc(script_url() . '?action=edit_table');
+    return qq{<div class="login-notice">}
+         . qq{<p><strong>No inventory data for this device yet.</strong></p>}
+         . qq{<p>SNMP inventory is gathered by the fetchconfig engine (9.80+) during a normal }
+         . qq{backup run, once SNMP is enabled for the device. To enable it, add an SNMP read }
+         . qq{community (or an SNMPv3 user) to this device or its model's <code>default:</code> }
+         . qq{line in <a href="$edit">Setup devices &rarr; Edit device table</a>:</p>}
+         . qq{<ul>}
+         . qq{<li><code>snmp_community=&lt;ro-community&gt;</code> &mdash; SNMP v1/v2c (the usual case), or</li>}
+         . qq{<li><code>snmp_user=&lt;v3-user&gt;</code> plus <code>snmp_authpass</code>/<code>snmp_privpass</code> &mdash; SNMPv3.</li>}
+         . qq{</ul>}
+         . qq{<p>Inventory is then collected on the next run; add <code>snmp_inventory_level=2</code> }
+         . qq{to also capture optics. (These options are ignored until the engine is at 9.80.)</p>}
+         . qq{</div>\n};
+}
+
+################################################################################
 # show_backup_list
 #
 # Parameters:
@@ -8024,6 +8893,9 @@ sub show_backup_list {
         print qq{<button type="submit" form="compare-form" name="action" value="compare" class="btn">Compare selected</button>\n};
         print qq{<button type="submit" form="compare-form" name="action" value="sidebyside" class="btn">Side by side selected</button>\n};
     }
+    # Inventory viewer for this device (read-only; always shown -- the page itself
+    # handles "no inventory yet / enable SNMP" and a missing schema gracefully).
+    print qq{<a class="btn" href="} . esc(script_url() . '?action=device_inventory&dev=' . CGI::escape($dev)) . qq{">Inventory</a>\n};
     if ($show_table) {
         # (The per-device "Check for empty backups" button was removed: the
         # table shows every backup's byte size, and a 0-byte backup row is
@@ -11857,7 +12729,7 @@ sub show_backup_now {
     print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url()) . qq{">&larr; Devices</a>}
         . qq{<span class="sep">/</span>}
         . qq{<a class="btn btn-green" href="} . esc(script_url() . '?dev=' . CGI::escape($dev)) . qq{">}
-        . esc($dev) . qq{</a></p>\n};
+        . qq{Backup view } . esc($dev) . qq{</a></p>\n};
     print qq{<div class="tool-section" id="backup-now-section">\n};
     print qq{<h2 class="tool-section-title">Backup Now: } . esc($dev) . qq{</h2>\n};
 
@@ -11868,8 +12740,6 @@ sub show_backup_now {
         local $RUN_KEEPALIVE = html_keepalive();
         ($output, $status, $err, $aborted) = run_backup_now($dev);
     }
-    my $return_link = script_url() . '?dev=' . CGI::escape($dev);
-
     # The request was terminated mid-run: nobody receives the page any more,
     # so only audit it (the child is already killed, the temp table removed).
     if ($aborted) {
@@ -11912,8 +12782,6 @@ sub show_backup_now {
         print copy_button_script();
     }
 
-    print qq{<p><a class="btn" href="} . esc($return_link) . qq{">}
-        . qq{Return to backups for } . esc($dev) . qq{</a></p>\n};
     print qq{</div>\n};   # .tool-section (Backup Now)
     print page_foot();
 }
@@ -19621,18 +20489,21 @@ sub show_setup {
     if (defined $flash_msg && $flash_msg ne '') { print qq{<p class="success">} . esc($flash_msg) . qq{</p>\n}; }
     if (defined $flash_err && $flash_err ne '') { print qq{<p class="error">} . esc($flash_err) . qq{</p>\n}; }
     print qq{<p class="muted">Raw contents of <code>} . esc($DEVICE_TABLE)
-        . qq{</code>, exactly as fetchconfig.pl reads it. This may include }
-        . qq{device credentials on <code>default:</code> lines &mdash; }
-        . qq{treat this page accordingly. Use <strong>Setup devices</strong> in }
-        . qq{the menu to edit or bulk-edit the table.</p>\n};
+        . qq{</code>, as fetchconfig.pl reads it, with credentials masked }
+        . qq{(<code>pass=</code>, <code>enable=</code>, the SNMP communities and }
+        . qq{the <code>pw:</code> secrets). Treat this page as sensitive. Use }
+        . qq{<strong>Setup devices</strong> in the menu to edit or bulk-edit the }
+        . qq{table.</p>\n};
 
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
     } else {
         print qq{<div class="config-wrap">\n};
         print copy_button_html();
+        # Secrets are masked in this view (mask_secrets covers pass=/enable=/the
+        # SNMP communities/db_pass=, and the pw: credential allow-list).
         print qq{<pre class="config" id="config-content">}
-            . color_comment_lines($content) . qq{</pre>\n};
+            . color_comment_lines(mask_secrets($content)) . qq{</pre>\n};
         print qq{</div>\n};
         print copy_button_script();
     }
@@ -19652,14 +20523,67 @@ sub show_setup {
 # "unrecognized" chips -- so nothing is ever silently dropped, and a model
 # not in the catalog at all falls back to the common option set.
 #
-# Types: secret (masked), bool (on/off, written as key=1 / key=0 except
-# 'debug' which is on/off), int, recipients (';'-separated for email 'to'),
+# Types: secret (masked), bool (written as key=1 / key=0), debug (on/off),
+# enum_onoff (on/off, used by snmp_inventory etc. -- accepts the engine's
+# permissive booleans on save), int, recipients (';'-separated for email 'to'),
 # enum_timezone ('hide'), enum_tls (off/starttls/ssl),
-# enum_transport (ssh/telnet/auto), path, text.
+# enum_transport (ssh/telnet/auto), enum_site (site-code dropdown),
+# enum_template (generic model= template dropdown),
+# enum_snmp_inv_level (snmp_inventory_level 1|2 dropdown),
+# report_url / report_logo / report_hide (email report widgets), path, text.
 ################################################################################
 
 # Options common to every device model (from the fetchconfig README).
+# SNMP inventory options (read by fetchconfig engine 9.80+). All OPTIONAL and
+# usable on a model's default: line and on device lines; the engine ignores them
+# until 9.80, so they are harmless beforehand. The four credential options are
+# secrets (masked). snmp_profile_file is default:-only (default_only => 1) -- the
+# editor offers it in "+ add option" only on the default: line. snmp_write_community
+# is procurve-snmp-only, so it is added in that model's entry, not here.
+my %SNMP_OPTS = (
+    snmp_community         => { type => 'secret',     mandatory => 0 },
+    snmp_version           => { type => 'text',       mandatory => 0 },
+    snmp_port              => { type => 'int',        mandatory => 0 },
+    snmp_timeout           => { type => 'int',        mandatory => 0 },
+    snmp_retries           => { type => 'int',        mandatory => 0 },
+    snmp_max_repetitions   => { type => 'int',        mandatory => 0 },
+    snmp_user              => { type => 'text',       mandatory => 0 },
+    snmp_level             => { type => 'enum_snmp_level', mandatory => 0 },
+    snmp_authproto         => { type => 'text',       mandatory => 0 },
+    snmp_authpass          => { type => 'secret',     mandatory => 0 },
+    snmp_privproto         => { type => 'text',       mandatory => 0 },
+    snmp_privpass          => { type => 'secret',     mandatory => 0 },
+    snmp_inventory         => { type => 'enum_onoff', mandatory => 0 },
+    snmp_inventory_level   => { type => 'enum_snmp_inv_level', mandatory => 0 },
+    snmp_inventory_interval=> { type => 'int',        mandatory => 0 },
+    snmp_inventory_history => { type => 'enum_onoff', mandatory => 0 },
+    snmp_fatal             => { type => 'enum_onoff', mandatory => 0 },
+    snmp_profile_file      => { type => 'text',       mandatory => 0, default_only => 1 },
+);
+
+# Credential fields that accept a pw: alias ($Name) in place of a literal value,
+# and the alias KIND each takes (engine 9.79 pw: directive; see
+# fetchconfig-web-inventory-options.md §2 and fetchconfig-pw-alias-grammar-engine.md).
+# user-kind: user / snmp_user. pass-kind: pass / enable and the SNMP secrets.
+# NOTE: a model-specific "password=" is NOT here -- the engine resolves aliases
+# only in these exact slots, so password= stays a plain secret field.
+my %CRED_FIELD_KIND = (
+    user                 => 'user',
+    snmp_user            => 'user',
+    pass                 => 'pass',
+    enable               => 'pass',
+    snmp_community        => 'pass',
+    snmp_write_community  => 'pass',
+    snmp_authpass        => 'pass',
+    snmp_privpass        => 'pass',
+);
+sub is_cred_field   { my ($k) = @_; return defined $k && exists $CRED_FIELD_KIND{$k}; }
+sub cred_field_kind { my ($k) = @_; return defined $k ? $CRED_FIELD_KIND{$k} : undef; }
+# A bare "$Name" alias reference (the whole value), matching the engine charset.
+sub cred_is_alias_token { my ($v) = @_; return defined $v && $v =~ /^\$[A-Za-z_][A-Za-z0-9_]*\z/; }
+
 my %COMMON_OPTS = (
+    %SNMP_OPTS,
     user                   => { type => 'text',   mandatory => 1 },
     pass                   => { type => 'secret', mandatory => 1 },
     repository             => { type => 'path',   mandatory => 1 },
@@ -19693,6 +20617,16 @@ my %COMMON_OPTS = (
 #   %extra
 ################################################################################
 sub _model_opts { my (%extra) = @_; return { %COMMON_OPTS, %extra }; }
+
+# Like _model_opts, but for a model with NO interactive login: the common set
+# (incl. lock*, timeout, changes_only, site, debug, the snmp_* inventory options,
+# ...) MINUS user/pass/fetch_timeout, plus the per-model extras passed in. This
+# keeps such a model in sync with %COMMON_OPTS instead of a hand-maintained copy.
+sub _model_opts_nologin {
+    my %o = (%COMMON_OPTS, @_);
+    delete @o{ qw(user pass fetch_timeout) };
+    return \%o;
+}
 
 # Per-model option catalog. Models sharing a shape are built from the common
 # set. Group A adds mandatory 'enable'; the cisco-ios family also adds
@@ -19826,30 +20760,26 @@ my %MODEL_CATALOG = do {
                                            user => { type => 'text', mandatory => 0 }),
 
         # HP ProCurve ProVision (incl. 4000M/8000M) backed up over SNMP+TFTP.
-        # No user/pass: authentication is the read-WRITE SNMP "community"
-        # (masked), whose write access arms the TFTP export. The backup is a
-        # normal text config, so it gets the usual diff/side-by-side views
-        # and no syntax highlighter. Built from the common options minus the
-        # credential/fetch_timeout ones, plus the SNMP-specific options.
-        'procurve-snmp'   => {
-            community              => { type => 'secret', mandatory => 1 },
-            repository             => { type => 'path',   mandatory => 1 },
-            keep                   => { type => 'int',    mandatory => 1 },
-            timeout                => { type => 'int',    mandatory => 0 },
-            snmp_version           => { type => 'text',   mandatory => 0 },
-            oid                    => { type => 'text',   mandatory => 0 },
-            remote_file            => { type => 'text',   mandatory => 0 },
-            changes_only           => { type => 'bool',   mandatory => 0 },
-            on_fetch_run           => { type => 'path',   mandatory => 0 },
-            on_fetch_cat           => { type => 'bool',   mandatory => 0 },
-            timezone               => { type => 'enum_timezone', mandatory => 0 },
-            filename_append_suffix => { type => 'text',   mandatory => 0 },
-            debug                  => { type => 'debug',  mandatory => 0 },
-            comment                => { type => 'text',   mandatory => 0 },
-            to                     => { type => 'recipients', mandatory => 0 },
-        },
+        # No user/pass: authentication is the read-WRITE SNMP community (snmp_community,
+        # masked), whose write access arms the TFTP export. The backup is a normal text
+        # config, so it gets the usual diff/side-by-side views and no syntax highlighter.
+        # Built from the COMMON options MINUS the interactive-login ones (user/pass/
+        # fetch_timeout) -- so it inherits lock*, timeout, changes_only, site, debug, the
+        # snmp_* set, repository/keep (mandatory), etc. -- plus its SNMP+TFTP specifics.
+        'procurve-snmp'   => _model_opts_nologin(
+            snmp_write_community => { type => 'secret', mandatory => 0 },  # procurve-snmp only (optional RW community)
+            oid                  => { type => 'text',   mandatory => 0 },
+            remote_file          => { type => 'text',   mandatory => 0 },
+        ),
     );
 };
+
+# Every model must expose the universal per-device 'site' option as an enum_site
+# dropdown: show_edit_table() auto-adds an empty site= to every device row, and
+# render_option_field needs the catalog type to draw the dropdown (not a text box).
+# Hand-built entries that opt out of %COMMON_OPTS (e.g. procurve-snmp) would
+# otherwise render site as plain text, so guarantee it here for ALL models.
+$_->{site} ||= { type => 'enum_site', mandatory => 0 } for values %MODEL_CATALOG;
 
 # Options recognized by the "email:" directive (not a device model).
 my %EMAIL_OPTS = (
@@ -19952,9 +20882,18 @@ sub parse_opts {
         next unless defined $pair;
         if ($pair =~ /^([^=]+)=(.*)$/s) {
             my $k = opt_trim($1);
-            my $v = dequote_value(opt_trim($2));
             next if $k eq '';
-            push @opts, [$k, $v];
+            my $raw = opt_trim($2);
+            if (is_cred_field($k)) {
+                # Credential value: a bare defined "$Alias" is an alias reference
+                # (tagged with a 3rd element 'alias'); anything else is a literal,
+                # de-escaped first-char-only (\$->$, \\->\). See
+                # fetchconfig-pw-alias-grammar-engine.md.
+                my ($cv, $meta) = cred_parse_value($k, $raw);
+                push @opts, (defined $meta ? [$k, $cv, $meta] : [$k, $cv]);
+            } else {
+                push @opts, [$k, dequote_value($raw)];
+            }
         }
         # A fragment without '=' is a malformed option; fetchconfig logs it
         # and skips it. We skip it too (the editor can't show a keyless
@@ -20013,27 +20952,67 @@ sub dequote_value {
 #   $opts
 #   $comma_only
 ################################################################################
+# cred_parse_value -- interpret a credential field's RAW on-disk token into
+# (value, meta): meta 'alias' for a defined "$Alias" reference, else undef for a
+# literal. A literal is de-escaped first-character-only (\$->$, \\->\); a quoted
+# value is already fully literal. Inverse of cred_serialize_value.
+sub cred_parse_value {
+    my ($k, $raw) = @_;
+    my $kind = cred_field_kind($k);
+    if (cred_is_alias_token($raw) && pw_alias_defined($raw, $kind)) {
+        return ($raw, 'alias');
+    }
+    my $lit = dequote_value($raw);
+    # Unquoted value: first-character-only de-escape. A quoted value ($raw starts
+    # with ") was fully literal, so dequote_value already produced the final value.
+    $lit =~ s/^\\(?=[\$\\])// if $raw !~ /^"/;
+    return ($lit, undef);
+}
+
+# cred_serialize_value -- turn a credential (value, meta) into its on-disk token.
+# An alias emits bare "$Name". A literal is EITHER quoted (comma/whitespace) OR
+# leading-escaped (\$ / \\) -- never both (quote XOR escape). See
+# fetchconfig-pw-alias-grammar-engine.md.
+sub cred_serialize_value {
+    my ($v, $meta, $comma_only) = @_;
+    return $v if defined $meta && $meta eq 'alias';     # bare $Name
+    $v = '' unless defined $v;
+    my $needs_quote = $comma_only
+        ? ($v =~ /,/ || $v =~ /^".*"$/s)
+        : ($v =~ /[,\s]/ || $v =~ /^".*"$/s);
+    if ($needs_quote) {
+        (my $q = $v) =~ s/(["\\])/\\$1/g;
+        return qq{"$q"};                                # quoted = literal; leading $ safe
+    }
+    return "\\$v" if $v =~ /^[\$\\]/;                    # escape a leading $ or \
+    return $v;
+}
+
 sub serialize_opts {
     my ($opts, $comma_only) = @_;
     return join(',', map {
-        my ($k, $v) = @$_;
+        my ($k, $v, $meta) = @$_;
         $v = '' unless defined $v;
-        # A value is quoted only when it would otherwise change how the line
-        # parses. Options are comma-separated, so a comma always needs
-        # quoting. For device/default lines the whole line is also split on
-        # whitespace, so whitespace needs quoting too -- but on the email:
-        # line ($comma_only) the value runs to the next comma, so a value
-        # with spaces (e.g. footer="(c) 2026 ...") does NOT need quotes and
-        # is written bare. We also keep quotes if the value already looks
-        # quoted, so a literal quoted value survives.
-        my $needs_quote = $comma_only
-            ? ($v =~ /,/ || $v =~ /^".*"$/s)
-            : ($v =~ /[,\s]/ || $v =~ /^".*"$/s);
-        if ($needs_quote) {
-            (my $q = $v) =~ s/(["\\])/\\$1/g;
-            $v = qq{"$q"};
+        if (is_cred_field($k)) {
+            "$k=" . cred_serialize_value($v, $meta, $comma_only);
+        } else {
+            # A value is quoted only when it would otherwise change how the line
+            # parses. Options are comma-separated, so a comma always needs
+            # quoting. For device/default lines the whole line is also split on
+            # whitespace, so whitespace needs quoting too -- but on the email:
+            # line ($comma_only) the value runs to the next comma, so a value
+            # with spaces (e.g. footer="(c) 2026 ...") does NOT need quotes and
+            # is written bare. We also keep quotes if the value already looks
+            # quoted, so a literal quoted value survives.
+            my $needs_quote = $comma_only
+                ? ($v =~ /,/ || $v =~ /^".*"$/s)
+                : ($v =~ /[,\s]/ || $v =~ /^".*"$/s);
+            if ($needs_quote) {
+                (my $q = $v) =~ s/(["\\])/\\$1/g;
+                $v = qq{"$q"};
+            }
+            "$k=$v";
         }
-        "$k=$v";
     } @$opts);
 }
 
@@ -20101,6 +21080,13 @@ sub parse_device_table {
         # web UI (it is the security allow-list; read/written server-side only).
         if ($trimmed =~ /^directory\s*:/i) {
             push @records, { kind => 'directory', raw => $line };
+            next;
+        }
+        # pw: credential allow-list line (engine 9.80+) -- same security model as
+        # directory:: kept verbatim, NEVER editable in the web UI, re-emitted from
+        # disk on save (never from potentially-forged form data).
+        if ($trimmed =~ /^pw\s*:/i) {
+            push @records, { kind => 'pw', raw => $line };
             next;
         }
         # db: directive -- the dashboard history database (default-level, one
@@ -20180,8 +21166,42 @@ sub normalize_dir_opts {
         } elsif (defined $k && $k eq 'report_dir') {
             push @out, [$k, alias_for_value('report', $v)];
         } else {
-            push @out, [$k, $v];
+            push @out, $pair;   # preserve any 3rd element (e.g. credential alias meta)
         }
+    }
+    return \@out;
+}
+
+################################################################################
+# fold_cred_aliases
+#
+# On save, replace a verbatim credential value that matches a defined pw: alias's
+# value with the "$Alias" reference, per ALIAS_REPLACE_ON_SAVE (off|secrets|users
+# |all). A value already an alias (meta) or empty is left alone. The alias values
+# are compared in memory only -- never displayed or logged.
+#
+# Parameters:
+#   $opts
+################################################################################
+sub fold_cred_aliases {
+    my ($opts) = @_;
+    my $mode = $ALIAS_REPLACE_ON_SAVE || 'off';
+    return $opts unless $opts && $mode ne 'off';
+    my @out;
+    for my $pair (@$opts) {
+        my ($k, $v, $meta) = @$pair;
+        if (is_cred_field($k) && !(defined $meta && $meta eq 'alias')
+            && defined $v && $v ne '') {
+            my $kind  = cred_field_kind($k);
+            my $apply = ($mode eq 'all')
+                     || ($mode eq 'secrets' && $kind eq 'pass')
+                     || ($mode eq 'users'   && $kind eq 'user');
+            if ($apply) {
+                my $name = pw_alias_for_value($v, $kind);
+                if (defined $name) { push @out, [$k, $name, 'alias']; next; }
+            }
+        }
+        push @out, $pair;
     }
     return \@out;
 }
@@ -20201,9 +21221,9 @@ sub serialize_records {
         elsif ($r->{kind} eq 'device')  { push @devices,  $r; }
         elsif ($r->{kind} eq 'other')   { push @unknown,  $r; }
         elsif ($r->{kind} eq 'db')      { push @db,       $r; }
-        # 'comment' and 'directory' records are dropped here: the directory:
-        # allow-list is re-emitted verbatim from disk below, never from the
-        # (potentially forged) form data.
+        # 'comment', 'directory' and 'pw' records are dropped here: the
+        # directory: and pw: allow-lists are re-emitted verbatim from disk below,
+        # never from the (potentially forged) form data.
     }
 
     my @out;
@@ -20218,6 +21238,20 @@ sub serialize_records {
         push @out, '# directory allow list - must be directly edited on the server';
         push @out, @{ directory_raw_block() };
         push @out, '# directory allow list - must be directly edited on the server';
+        push @out, '';
+    }
+
+    # pw: credential allow-list -- same model as directory: above. Read straight
+    # from the on-disk device table and written back unchanged, armored with the
+    # "must be directly edited on the server" comment lines. Never taken from the
+    # form. The aliases it defines ($NetUser, $NetPass, ...) may be used on
+    # default: / device lines in place of a literal credential.
+    my $pw_raw = pw_raw_block();
+    if (@$pw_raw) {
+        push @out, '# credentials', '';
+        push @out, '# credential allow list - must be directly edited on the server';
+        push @out, @$pw_raw;
+        push @out, '# credential allow list - must be directly edited on the server';
         push @out, '';
     }
 
@@ -20271,7 +21305,7 @@ sub serialize_records {
         # Blank line between the groups of default: lines for different
         # models (consecutive lines for the same model stay together).
         push @out, '' if defined $prev_model && $r->{model} ne $prev_model;
-        push @out, "default:\t$r->{model}\t" . serialize_opts(normalize_dir_opts($r->{opts}));
+        push @out, "default:\t$r->{model}\t" . serialize_opts(fold_cred_aliases(normalize_dir_opts($r->{opts})));
         $prev_model = $r->{model};
     }
     push @out, '';
@@ -20285,7 +21319,7 @@ sub serialize_records {
     push @out, '# DEVICES SECTION', '';
     push @out, '# model        dev-unique-id                      hostname                      device-specific-options', '';
     for my $r (@devices) {
-        my $o = serialize_opts(normalize_dir_opts($r->{opts}));
+        my $o = serialize_opts(fold_cred_aliases(normalize_dir_opts($r->{opts})));
         push @out, join("\t", $r->{model}, $r->{id}, $r->{host})
                  . ($o ne '' ? "\t$o" : '');
     }
@@ -20427,7 +21461,41 @@ sub render_option_field {
     my $ev = esc(defined $val ? $val : '');
 
     my $control;
-    if ($type eq 'secret') {
+    if (is_cred_field($key)) {
+        # Combined credential control: a dropdown of pw: aliases of the matching
+        # KIND + a verbatim text/password field. Picking an alias stores the bare
+        # "$Name" (shown in clear, not masked, with an info note). A verbatim
+        # secret is masked with the keep-placeholder; a verbatim user name is
+        # shown in clear. reconstruct_records_from_form combines the two fields
+        # (the alias wins when chosen). See fetchconfig-pw-alias-grammar-engine.md.
+        my $kind      = cred_field_kind($key);
+        my $is_secret = ($kind eq 'pass');
+        my $is_alias  = (defined $val && cred_is_alias_token($val) && pw_alias_defined($val, $kind)) ? 1 : 0;
+        my $asel = qq{<select name="} . esc($rk) . qq{_alias_} . esc($key) . qq{" class="cred-alias-sel">}
+                 . qq{<option value="">(enter value)</option>};
+        for my $a (pw_alias_names($kind)) {
+            my $s = ($is_alias && $a eq $val) ? ' selected' : '';
+            $asel .= qq{<option value="} . esc($a) . qq{"$s>} . esc($a) . qq{</option>};
+        }
+        $asel .= qq{</select>};
+        # Verbatim field: empty while an alias is chosen (the alias select carries
+        # the value); masked keep-placeholder for an existing secret; clear for a
+        # user name. type=password only for secrets.
+        my $shown = $is_alias ? ''
+                  : $is_secret ? ((defined $val && $val ne '') ? esc($SECRET_KEEP) : '')
+                  : esc(defined $val ? $val : '');
+        my $itype = $is_secret ? 'password' : 'text';
+        my $ihide = $is_alias ? ' style="display:none;"' : '';
+        my $inp = qq{<input type="$itype" name="} . esc($name) . qq{" value="$shown" class="cred-val" autocomplete="new-password"$ihide>};
+        my $rev = $is_secret
+            ? qq{<button type="button" class="reveal-btn" tabindex="-1"$ihide>show</button>} : '';
+        my $note_txt = $is_secret
+            ? 'Alias - resolved from the credential list, not a real secret.'
+            : 'Alias - resolved from the credential list, not a real user name.';
+        my $note = qq{<span class="cred-alias-note muted"} . ($is_alias ? '' : ' style="display:none;"') . qq{>}
+                 . esc($note_txt) . qq{</span>};
+        $control = $asel . ' ' . $inp . ($rev ne '' ? ' ' . $rev : '') . ' ' . $note;
+    } elsif ($type eq 'secret') {
         # Show a keep-placeholder for an existing value; the presence of the
         # value is flagged so an empty submit is distinguishable from "kept".
         my $shown = (defined $val && $val ne '') ? esc($SECRET_KEEP) : '';
@@ -20603,13 +21671,54 @@ sub render_option_field {
         }
         $control .= qq{</select>};
     } elsif ($type eq 'enum_onoff') {
-        # on / off selector (write_report).
-        my $v = defined $val ? $val : '';
+        # on / off selector. fetchconfig booleans are permissive (on/off, 1/0,
+        # yes/no), so a table may carry any of them -- map an incoming alias to
+        # the canonical on/off the dropdown offers. Otherwise an existing "1"
+        # (e.g. snmp_inventory=1) would match no option, show as "(unset)", and
+        # be dropped if the row were saved. On save the editor writes on/off,
+        # which the engine treats identically to 1/0/yes/no.
+        my $v = defined $val ? lc $val : '';
+        $v = 'on'  if $v eq '1' || $v eq 'yes';
+        $v = 'off' if $v eq '0' || $v eq 'no';
         $control = qq{<select name="} . esc($name) . qq{">}
                  . qq{<option value=""}  . ($v eq '' ? ' selected' : '') . qq{>(unset)</option>}
                  . qq{<option value="on"}  . ($v eq 'on'  ? ' selected' : '') . qq{>on</option>}
                  . qq{<option value="off"} . ($v eq 'off' ? ' selected' : '') . qq{>off</option>}
                  . qq{</select>};
+    } elsif ($type eq 'enum_snmp_inv_level') {
+        # SNMP inventory depth (snmp_inventory_level): only 1 or 2 -- there is NO
+        # "(unset)" entry. To inherit the model's default: value, remove the option
+        # entirely (the x button); an empty "snmp_inventory_level=" is never written.
+        # Defaults to 1 when the stored value is not 2.
+        my $v = defined $val ? $val : '';
+        $control = qq{<select name="} . esc($name) . qq{">}
+                 . qq{<option value="1"} . ($v eq '2' ? '' : ' selected') . qq{>1 = chassis+modules+PSUs</option>}
+                 . qq{<option value="2"} . ($v eq '2' ? ' selected' : '') . qq{>2 = chassis+modules+PSUs+optics</option>}
+                 . qq{</select>};
+    } elsif ($type eq 'enum_snmp_level') {
+        # SNMPv3 security level (snmp_level): noAuthNoPriv / authNoPriv / authPriv.
+        # Optional -- an empty value lets the engine DERIVE the level from which
+        # passphrases are set; the explicit choice only asserts a minimum. The
+        # current value is matched case-insensitively and a stored value that is
+        # not one of the three is kept as a disabled "(current)" option so it is
+        # not silently dropped.
+        my $v = defined $val ? $val : '';
+        my %canon = (noauthnopriv => 'noAuthNoPriv',
+                     authnopriv   => 'authNoPriv',
+                     authpriv     => 'authPriv');
+        my $cl = lc $v;
+        my $known = exists $canon{$cl};
+        $control = qq{<select name="} . esc($name) . qq{">}
+                 . qq{<option value=""} . ($v eq '' ? ' selected' : '') . qq{>(derive from passphrases)</option>};
+        if ($v ne '' && !$known) {
+            $control .= qq{<option value="} . esc($v) . qq{" selected disabled>}
+                      . esc($v) . qq{ (current, unknown)</option>};
+        }
+        for my $lv (qw(noAuthNoPriv authNoPriv authPriv)) {
+            my $sel = ($known && $canon{$cl} eq $lv) ? ' selected' : '';
+            $control .= qq{<option value="$lv"$sel>$lv</option>};
+        }
+        $control .= qq{</select>};
     } elsif ($type eq 'report_url') {
         # Free-text URL with a gray hint showing the suggested report endpoint.
         $control = qq{<input type="text" name="} . esc($name) . qq{" value="$ev" size="44">}
@@ -20761,7 +21870,7 @@ sub render_option_field {
 #   $is_email
 ################################################################################
 sub render_add_option {
-    my ($rk, $model_or_email, $present, $is_email) = @_;
+    my ($rk, $model_or_email, $present, $is_email, $is_default) = @_;
     my @keys = $is_email ? (sort keys %EMAIL_OPTS) : model_option_keys($model_or_email);
     my %have = map { $_ => 1 } @$present;
     # A repeatable option (e.g. report_hide) stays in the menu even when one is
@@ -20783,6 +21892,14 @@ sub render_add_option {
     # "site" is always present on a device (added automatically, not deletable),
     # so it is never offered in the "+ add option" menu.
     @avail = grep { $_ ne 'site' } @avail unless $is_email;
+    # default:-only options (e.g. snmp_profile_file) are offered in "+ add option"
+    # on the default: line only, never on a device row.
+    unless ($is_default) {
+        @avail = grep {
+            my $sp = $is_email ? $EMAIL_OPTS{$_} : option_spec($model_or_email, $_);
+            !($sp && $sp->{default_only});
+        } @avail;
+    }
     my $opts = join('', map {
         my $spec = $is_email ? $EMAIL_OPTS{$_} : option_spec($model_or_email, $_);
         my $t = $spec ? $spec->{type} : 'text';
@@ -20864,6 +21981,14 @@ sub edit_table_db_fields_html {
 sub show_edit_table {
     my ($user) = @_;
     my $render_t0 = [Time::HiRes::gettimeofday()];
+    # Phase timing (diagnostic): with SHOW_RENDER_TIME=1 the editor appends an
+    # HTML comment listing where the server render time goes, so a slow editor
+    # load can be attributed to a phase (auth/DB, parse, templates -t, inventory
+    # DB, row render) rather than guessed at. A no-op closure when the flag is off.
+    my @_phase;
+    my $_mark = $SHOW_RENDER_TIME
+        ? sub { push @_phase, [ $_[0], Time::HiRes::tv_interval($render_t0) ] }
+        : sub { };
 
     # Tripwire: note if the device table changed outside the app since the app
     # last wrote it (logged once; see audit_check_device_table_change).
@@ -20888,6 +22013,7 @@ sub show_edit_table {
     site_ctx_init($dbh, $user);
     my $site_acc = user_site_access($dbh, $user);
     $dbh->disconnect if $dbh;
+    $_mark->('auth+site DB');
 
     # Two ways in: normally we read the current table from disk. When
     # arriving from the Preview page's "Back to editor" button
@@ -20915,6 +22041,8 @@ sub show_edit_table {
         $records = parse_device_table($content);
     }
 
+    $_mark->('slurp+parse table');
+
     # Every device should carry a site= so the editor shows the (red) "no site
     # assigned" dropdown. Add an empty site option to any device that lacks one,
     # so it is visible and selectable (it serializes back only if a real site is
@@ -20940,6 +22068,7 @@ sub show_edit_table {
     # as the template viewer instead of the editor -- editing with broken
     # template data would be misleading and a save could be rejected anyway.
     my $t_err = template_t_error_html(run_templates_t());
+    $_mark->('templates -t');
     if ($t_err ne '') {
         print $t_err;
         print page_foot();
@@ -21008,9 +22137,15 @@ sub show_edit_table {
     # "Reject all changes" reloads the editor fresh from disk (discarding the
     # in-progress edits), after a confirm. It is a form of its own so the
     # confirm dialog + GET reload are not tangled with the edit form's POST.
+    # The Save button starts disabled (greyed) and only writes when there are
+    # edits. It is enabled when this render already carries pending changes (a
+    # Preview round-trip re-emits r{n}_edited / r{n}_deleted inputs); otherwise the
+    # client script enables it on the first edit. Preview raw table is never gated.
+    my $has_edits = grep { /_(?:edited|deleted)\z/ } $cgi->param();
+    my $save_dis  = $has_edits ? '' : ' disabled';
     print qq{<div class="save-row">}
         . qq{<button type="submit" name="action" value="preview_table" class="btn">Preview raw table</button>}
-        . qq{<button type="submit" name="action" value="save_table" class="btn btn-green">Save changes</button>}
+        . qq{<button type="submit" name="action" value="save_table" id="save-table-btn" class="btn btn-green"$save_dis>Save changes</button>}
         . qq{<a class="btn btn-danger" href="} . esc(script_url() . '?action=edit_table')
         . qq{" data-confirm="Reject all changes and reload the table from disk?" }
         . qq{data-confirm-danger="y">Reject all changes</a>}
@@ -21046,8 +22181,10 @@ sub show_edit_table {
     # round-trip untouched.
     my @models = known_models();
     model_defaults_init($records);   # for the blue "default" flag on device rows
+    device_inventory_summary_init(); # vendor + HW-model columns (read-only, 2.15 inventory)
+    $_mark->('model+inventory init DB');
 
-    my (@dev_html, @def_html, @email_html, @hidden_html);
+    my (@dev_html, @def_html, @email_html, @hidden_html, @def_admin);
     # Read-only defaults for a limited user are merged per model (last value
     # wins, as fetchconfig reads them), so one box shows all of a model's
     # options rather than one box per device-table line.
@@ -21094,7 +22231,12 @@ sub show_edit_table {
         if ($r->{kind} eq 'email') {
             push @email_html, render_record_card($rk, $r, 'email');
         } elsif ($r->{kind} eq 'default') {
-            push @def_html, render_record_card($rk, $r, 'default');
+            # Collected as [sort-key, html]. The Defaults tab shows the cards
+            # sorted by model name, but this is DISPLAY ONLY: each card keeps its
+            # original record index ($rk), and the save-time reconstruct loop
+            # walks records by index, so the on-disk default: order is preserved.
+            push @def_admin, [ lc(defined $r->{model} ? $r->{model} : ''),
+                               render_record_card($rk, $r, 'default') ];
         } elsif ($r->{kind} eq 'device') {
             push @dev_html, (($from_form && ($r->{_was_expanded} || $r->{_edited}))
                 ? render_device_expanded_row($orig_idx, $r, $r->{_was_expanded} ? 1 : 0)
@@ -21105,6 +22247,7 @@ sub show_edit_table {
     # reconstruct loop reaches every record. On from_form the indices are the
     # original disk positions (_form_idx) and may be sparse/compacted, so take
     # max(_form_idx)+1 rather than the (smaller) array length.
+    $_mark->('build device rows');
     my $rec_count = scalar @$records;
     for my $r (@$records) {
         $rec_count = $r->{_form_idx} + 1
@@ -21133,7 +22276,10 @@ sub show_edit_table {
         $site_filter_opts .= qq{<option value="} . esc($sc) . qq{">} . esc($sc) . qq{</option>};
     }
     $site_filter_opts .= qq{<option value="\x00none">(no site)</option>} if $have_untagged;
-    print qq{<div class="tab-panel" data-panel="devices">\n};
+    # When the 2.15 inventory schema is present + readable, the device rows gain
+    # two read-only columns (Vendor, HW Model); the panel class switches the grid.
+    my $inv_cls = $DEVICE_INVENTORY_AVAILABLE ? ' dev-has-inv' : '';
+    print qq{<div class="tab-panel$inv_cls" data-panel="devices">\n};
     print qq{<div class="panel-actions">}
         . qq{<button type="button" class="btn" id="add-device">+ Add device</button>}
         . qq{<span class="edit-filter">}
@@ -21158,6 +22304,9 @@ sub show_edit_table {
     print qq{<div class="dev-row dev-row-head"><span></span>}
         . qq{<span class="dev-row-id">Device-ID</span>}
         . qq{<span class="dev-row-model">Model</span>}
+        . ($DEVICE_INVENTORY_AVAILABLE
+            ? qq{<span class="dev-row-vendor">Vendor</span>}
+            . qq{<span class="dev-row-hwmodel">HW Model</span>} : '')
         . qq{<span class="dev-row-site">Site</span>}
         . qq{<span class="dev-row-comment">Comment</span></div>\n}
         if $dev_total;
@@ -21169,22 +22318,47 @@ sub show_edit_table {
         my $secs = Time::HiRes::tv_interval($render_t0);
         my $str  = $secs < 1 ? sprintf('%dms', int($secs * 1000 + 0.5))
                              : sprintf('%.2fs', $secs);
-        print qq{<p class="render-time">Rendered in } . esc($str) . qq{</p>\n};
+        print qq{<p class="render-time">Rendered in } . esc($str)
+            . qq{ (} . scalar(@dev_html) . qq{ devices)</p>\n};
+        # Per-phase breakdown as an HTML comment: each entry is the time SINCE
+        # the previous mark, so the slow phase is obvious. View source to read it.
+        $_mark->('total');
+        my @lines; my $prev = 0;
+        for my $p (@_phase) {
+            my ($lbl, $at) = @$p;
+            push @lines, sprintf('  %-26s %6.0f ms', $lbl, ($at - $prev) * 1000);
+            $prev = $at;
+        }
+        print "<!-- render phases (ms since previous mark):\n"
+            . join("\n", @lines) . "\n-->\n";
     }
     print qq{</div>\n};
 
     # For a limited (read-only) user, render one merged box per model now.
     if (!$unrestricted) {
-        for my $m (@def_model_order) {
+        # Display-only sort by model name (a read-only user cannot save, so the
+        # on-disk order is irrelevant here; the admin path below keeps it).
+        for my $m (sort { lc($a) cmp lc($b) } @def_model_order) {
             push @def_html, render_merged_default_readonly($m, $def_merged{$m});
         }
     }
+
+    # Admin: order the per-model default cards by model name for display only.
+    # Save order follows each card's record index, so the on-disk default: order
+    # is unchanged -- only the device editor shows the models sorted.
+    @def_html = map { $_->[1] } sort { $a->[0] cmp $b->[0] } @def_admin if $unrestricted;
 
     # Defaults tab
     print qq{<div class="tab-panel" data-panel="defaults" style="display:none;">\n};
     print qq{<div class="panel-actions">}
         . ($unrestricted ? qq{<button type="button" class="btn" id="add-default">+ Add model defaults</button>} : '')
+        . qq{<span class="edit-filter">}
+        . qq{<input type="text" id="edit-def-filter" class="filter-box" placeholder="Filter model&hellip;" autocomplete="off">}
+        . qq{<button type="button" class="btn" id="edit-def-clear">Clear</button>}
+        . qq{</span>}
         . qq{</div>\n};
+    print qq{<p class="no-match" id="edit-def-no-match" style="display:none;">}
+        . qq{No model defaults match your filter.</p>\n};
     if (@def_html) {
         print join('', @def_html);
     } else {
@@ -21231,12 +22405,14 @@ sub show_edit_table {
 sub model_opts_script {
     my @parts;
     my %types;   # option name -> catalog type, for the client "+ add option" menu
+    my %defonly; # option name -> 1 when default:-only (e.g. snmp_profile_file)
     my $note = sub {
         my ($k, $sp) = @_;
         my $t = ($sp && $sp->{type}) ? $sp->{type} : 'text';
         # A real type wins over a prior 'text' (e.g. generic's model=enum_template
         # must not be shadowed by another model that lists 'model' as plain text).
         $types{$k} = $t if !exists $types{$k} || $types{$k} eq 'text';
+        $defonly{$k} = 1 if $sp && $sp->{default_only};
     };
     for my $m (known_models()) {
         my @keys = model_option_keys($m);
@@ -21249,8 +22425,10 @@ sub model_opts_script {
     $note->($_, $EMAIL_OPTS{$_}) for sort keys %EMAIL_OPTS;
     my $obj  = '{' . join(',', @parts) . '}';
     my $tobj = '{' . join(',', map { qq{"$_":"$types{$_}"} } sort keys %types) . '}';
+    my $dobj = '{' . join(',', map { qq{"$_":1} } sort keys %defonly) . '}';
     return qq{<script>window.__FCWEB_MODEL_OPTS = $obj;\n}
-         . qq{window.__FCWEB_OPT_TYPES = $tobj;</script>\n};
+         . qq{window.__FCWEB_OPT_TYPES = $tobj;\n}
+         . qq{window.__FCWEB_DEFAULT_ONLY = $dobj;</script>\n};
 }
 
 ################################################################################
@@ -21318,6 +22496,7 @@ sub reconstruct_records_from_form {
         # Collect the submitted options for this record into a key=>value
         # map (last write wins, though keys are unique per record).
         my %submitted;
+        my %submitted_meta;    # credential key -> 'alias' when the value is a $Name reference
         my @submitted_order;   # order options first appeared in the form
         my %repeat;            # repeatable key -> [ values in index order ]
         for my $pname (@all_params) {
@@ -21368,8 +22547,19 @@ sub reconstruct_records_from_form {
                 my $ov = orig_option_value($orig, $n, $key);
                 $val = defined $ov ? $ov : '';
             }
+            # Credential fields carry a companion "${rk}_alias_${key}" select: a
+            # non-empty value means the user chose a pw: alias, which wins over the
+            # verbatim field and is tagged 'alias' so serialize emits it bare.
+            my $meta;
+            if (is_cred_field($key)) {
+                my $alias = $cgi->param("${rk}_alias_${key}");
+                $alias = '' unless defined $alias;
+                $alias =~ s/^\s+|\s+$//g;
+                if ($alias ne '') { $val = $alias; $meta = 'alias'; }
+            }
             push @submitted_order, $key unless exists $submitted{$key};
             $submitted{$key} = $val;
+            $submitted_meta{$key} = $meta if defined $meta;
         }
 
         # Preserve the ORIGINAL option order: emit the record's original
@@ -21395,10 +22585,13 @@ sub reconstruct_records_from_form {
                     push @opts, [$k, $rv];
                 }
             } elsif (exists $submitted{$k}) {
-                # An empty site= is the "no site assigned" placeholder -- do not
-                # write it to the table (keeps untagged devices unchanged).
-                return if $k eq 'site' && (!defined $submitted{$k} || $submitted{$k} eq '');
-                push @opts, [$k, $submitted{$k}];
+                # An option is NEVER written with an empty value ("key="): a cleared
+                # or added-but-unfilled field, or an "(unset)"/"(default)" enum choice,
+                # means "not set" -- the option is dropped so it inherits the model's
+                # default: value. (This generalises the old site-only placeholder rule.)
+                return if !defined $submitted{$k} || $submitted{$k} eq '';
+                my $m = $submitted_meta{$k};
+                push @opts, (defined $m ? [$k, $submitted{$k}, $m] : [$k, $submitted{$k}]);
             }
         };
         for my $k (@orig_keys) {
@@ -21669,7 +22862,14 @@ sub validate_records {
                     enum_timezone  => ['', 'hide'],
                     enum_tls       => ['off', 'starttls', 'ssl'],
                     enum_transport => ['ssh', 'telnet', 'auto'],
-                    enum_onoff     => ['', 'on', 'off'],
+                    # fetchconfig booleans are permissive: on/off, 1/0, yes/no.
+                    # The editor WRITES the canonical on/off, but a table written
+                    # by the engine (e.g. snmp_inventory=1) or by hand may carry
+                    # any of these -- accept them all so the save is not blocked
+                    # over a value the engine honours. Compared case-insensitively
+                    # below, so On/YES/No also pass.
+                    enum_onoff     => ['', 'on', 'off', '1', '0', 'yes', 'no'],
+                    enum_snmp_inv_level => ['', '1', '2'],
                 );
                 if ($t eq 'int') {
                     # Digits only, and bounded in length: every int option here
@@ -22723,7 +23923,7 @@ sub do_bulk_save {
 ################################################################################
 sub render_merged_default_readonly {
     my ($model, $merged) = @_;
-    my $h = qq{<div class="rec-card rec-readonly">\n};
+    my $h = qq{<div class="rec-card rec-readonly" data-model="} . esc($model) . qq{">\n};
     $h .= qq{<div class="rec-head"><strong>default:</strong> } . esc($model) . qq{</div>\n};
     $h .= qq{<div class="opt-list">\n};
     for my $k (@{ $merged->{order} }) {
@@ -22748,8 +23948,12 @@ sub render_merged_default_readonly {
 sub mask_secrets_opt {
     my ($k, $v) = @_;
     return $v unless defined $k;
+    # A pw: alias reference ("$Name") is a name, not a secret -- show it as-is.
+    return $v if is_cred_field($k) && cred_is_alias_token($v);
     return $SECRET_KEEP if $k eq 'pass' || $k eq 'enable' || $k eq 'password'
-                           || $k eq 'community';
+                           || $k eq 'community'
+                           || $k eq 'snmp_community' || $k eq 'snmp_write_community'
+                           || $k eq 'snmp_authpass'  || $k eq 'snmp_privpass';
     return $v;
 }
 
@@ -22834,6 +24038,27 @@ sub show_edit_card {
 #   $idx
 #   $r
 ################################################################################
+# The two read-only inventory cells (Vendor, HW Model) for a device row, or ''
+# when the inventory schema is not available. An empty value shows a muted dash.
+sub render_inventory_cells {
+    my ($id) = @_;
+    return '' unless $DEVICE_INVENTORY_AVAILABLE;
+    my $e = $DEVICE_INVENTORY{$id};
+    my $vendor = ($e && defined $e->{vendor}) ? $e->{vendor} : '';
+    my $hw     = ($e && defined $e->{model})  ? $e->{model}  : '';
+    my $cell = sub {
+        my ($cls, $v) = @_;
+        # Full value in a native title tooltip (no extra DOM) -- the HW Model cell
+        # is visually truncated + faded in CSS, so the tooltip is how the operator
+        # reads the whole string.
+        my $t = ($v ne '') ? qq{ title="} . esc($v) . qq{"} : '';
+        return qq{<span class="$cls"$t>}
+             . ($v ne '' ? esc($v) : qq{<span class="dev-inv-none">&mdash;</span>})
+             . qq{</span>};
+    };
+    return $cell->('dev-row-vendor', $vendor) . $cell->('dev-row-hwmodel', $hw);
+}
+
 sub render_device_summary_row {
     my ($idx, $r) = @_;
     my $rk = "r$idx";
@@ -22852,6 +24077,7 @@ sub render_device_summary_row {
          . qq{<button type="button" class="btn btn-small dev-row-edit">Edit</button>}
          . qq{<span class="dev-row-id">} . esc($id) . qq{</span>}
          . qq{<span class="dev-row-model">} . esc($model) . qq{</span>}
+         . render_inventory_cells($id)
          . qq{<span class="dev-row-site">} . esc($site) . qq{</span>}
          . qq{<span class="dev-row-comment">} . esc($comment) . qq{</span>}
          . qq{</div>\n};
@@ -22904,6 +24130,7 @@ sub render_device_expanded_row {
           . qq{<button type="button" class="btn btn-small dev-row-edit">$btn_label</button>}
           . qq{<span class="dev-row-id">} . esc($id) . qq{</span>}
           . qq{<span class="dev-row-model">} . esc($model) . qq{</span>}
+          . render_inventory_cells($id)
           . qq{<span class="dev-row-site">} . esc($site) . qq{</span>}
           . qq{<span class="dev-row-comment">} . esc($comment) . qq{</span>}
           # Preserve open state across the NEXT round-trip only when actually open.
@@ -22946,7 +24173,26 @@ sub render_record_card {
                  . qq{ (unknown)</option>} . $sel;
         }
         $h .= qq{<div class="rec-head">};
-        $h .= qq{<label>Model </label><select name="${rk}_model" class="rec-model">$sel</select>};
+        if ($kind eq 'default') {
+            # The model is the KEY of a default: entry -- changing it would silently
+            # re-point (or orphan) every device that inherits this model's defaults.
+            # So it is LOCKED for an existing entry: to change it, delete this default
+            # and add a new one. (A brand-new, not-yet-saved default is built client-
+            # side with an editable model dropdown -- see add_card_html().) The value
+            # posts via a hidden field that KEEPS the .rec-model class, so the Defaults
+            # model filter and the +add-option logic still read it via .value.
+            my $m_known = grep { $_ eq $model } @models;
+            my $m_tip = 'The model cannot be changed for an existing default:. '
+                      . 'Delete this entry and add a new one to change it -- changing '
+                      . 'the model here would break every device that inherits this '
+                      . 'default.';
+            $h .= qq{<label>Model </label>}
+                . qq{<input type="hidden" name="${rk}_model" class="rec-model" value="} . esc($model) . qq{">}
+                . qq{<span class="rec-model-fixed" title="} . esc($m_tip) . qq{">}
+                . esc($model) . ($m_known ? '' : ' (unknown)') . qq{</span>};
+        } else {
+            $h .= qq{<label>Model </label><select name="${rk}_model" class="rec-model">$sel</select>};
+        }
         if ($kind eq 'device') {
             # The Device-ID of an existing device is read-only here: changing it
             # would rewrite only the table line, leaving the backup tree and the
@@ -22999,7 +24245,8 @@ sub render_record_card {
         }
     }
     $h .= qq{</div>\n};
-    $h .= render_add_option($rk, $is_email ? 'email' : $model, \@present, $is_email);
+    $h .= render_add_option($rk, $is_email ? 'email' : $model, \@present, $is_email,
+                            ($kind eq 'default' ? 1 : 0));
     $h .= qq{</div>\n};
     return $h;
 }
@@ -23227,6 +24474,12 @@ sub edit_table_script {
     };
     my $defrepo_js = $model_map->('repository', 'repository');
     my $deffr_js   = $model_map->('on_fetch_run', 'fetch_run');
+    # pw: alias names by kind (for the credential dropdowns the JS builds on "+ add
+    # option"), and the credential field -> kind map. Names only; never values.
+    my $pw_alias_js = '{"user":[' . join(',', map { qq{"} . $jesc->($_) . qq{"} } pw_alias_names('user')) . '],'
+                    . '"pass":['  . join(',', map { qq{"} . $jesc->($_) . qq{"} } pw_alias_names('pass')) . ']}';
+    my $cred_fields_js = '{' . join(',', map { qq{"} . $jesc->($_) . qq{":"} . $CRED_FIELD_KIND{$_} . qq{"} }
+                                   sort keys %CRED_FIELD_KIND) . '}';
     my $out = qq{<script>window.FCWEB_TPL_ROWS = $rows_js;\n}
             . qq{window.FCWEB_TPL_DEFAULT_DIR = "$def_dir";\n}
             . qq{window.FCWEB_DIR_ALIAS = $alias_js;\n}
@@ -23237,6 +24490,8 @@ sub edit_table_script {
             . qq{window.FCWEB_FETCHRUN_DISABLED = $fr_disabled;\n}
             . qq{window.FCWEB_SITE_OPTIONS = $sites_js;\n}
             . qq{window.FCWEB_SITE_UNRESTRICTED = $site_unrestricted;\n}
+            . qq{window.FCWEB_PW_ALIASES = $pw_alias_js;\n}
+            . qq{window.FCWEB_CRED_FIELDS = $cred_fields_js;\n}
             . qq{window.FCWEB_REPORT_DISABLED = $rep_disabled;</script>\n};
     $out .= <<'JS';
 <script>
@@ -23249,8 +24504,44 @@ sub edit_table_script {
   var REPORT_DISABLED = !!window.FCWEB_REPORT_DISABLED;
   var SITE_OPTIONS = window.FCWEB_SITE_OPTIONS || [];
   var SITE_UNRESTRICTED = !!window.FCWEB_SITE_UNRESTRICTED;
+  var PW_ALIASES = window.FCWEB_PW_ALIASES || {user:[], pass:[]};
+  var CRED_FIELDS = window.FCWEB_CRED_FIELDS || {};
   var DIR_PRESENT = false;
   for (var _k in DIR_ENTRIES) { if (DIR_ENTRIES[_k] && DIR_ENTRIES[_k].length) DIR_PRESENT = true; }
+  // Combined credential control (alias dropdown + verbatim field) for a NEW,
+  // empty credential option added via "+ add option". Mirrors render_option_field.
+  function credFieldHTML(kind, name, rk, key) {
+    var names = PW_ALIASES[kind] || [];
+    var sel = '<select name="' + rk + '_alias_' + key + '" class="cred-alias-sel">' +
+              '<option value="">(enter value)</option>';
+    for (var i = 0; i < names.length; i++) {
+      sel += '<option value="' + names[i] + '">' + names[i] + '</option>';
+    }
+    sel += '</select>';
+    var isSecret = (kind === 'pass');
+    var inp = '<input type="' + (isSecret ? 'password' : 'text') + '" name="' + name +
+              '" value="" class="cred-val" autocomplete="new-password">';
+    var rev = isSecret ? ' <button type="button" class="reveal-btn" tabindex="-1">show</button>' : '';
+    var note = ' <span class="cred-alias-note muted" style="display:none;">' +
+      (isSecret ? 'Alias - resolved from the credential list, not a real secret.'
+                : 'Alias - resolved from the credential list, not a real user name.') + '</span>';
+    return sel + ' ' + inp + rev + note;
+  }
+  // Toggle a credential field between alias mode (dropdown chosen) and verbatim
+  // mode: hide the value input + reveal and show the info note when an alias is
+  // selected, and vice-versa.
+  function toggleCredAlias(sel) {
+    var field = sel.closest ? sel.closest('.opt-field') : null;
+    if (!field) return;
+    var inp  = field.querySelector('.cred-val');
+    var rev  = field.querySelector('.reveal-btn');
+    var note = field.querySelector('.cred-alias-note');
+    var isAlias = (sel.value !== '');
+    if (inp)  inp.style.display  = isAlias ? 'none' : '';
+    if (rev)  rev.style.display  = isAlias ? 'none' : '';
+    if (note) note.style.display = isAlias ? '' : 'none';
+    markRowEdited(sel);
+  }
   // Build an allow-list <select> of $aliases for a directory kind.
   function dirAliasSelectHTML(kind, name, extra) {
     var ent = DIR_ENTRIES[kind] || [];
@@ -23279,6 +24570,13 @@ sub edit_table_script {
   // hidden inputs) count as unsaved too, so the warning survives that round-trip.
   var editorDirty = !!form.querySelector('input[name$="_edited"], input[name$="_deleted"]');
   var formLeaving = false;
+  // Keep the Save button greyed until there is something to write: it writes a
+  // device table only when the editor is dirty.
+  function updateSaveState() {
+    var b = document.getElementById('save-table-btn');
+    if (b) b.disabled = !editorDirty;
+  }
+  updateSaveState();
   form.addEventListener('submit', function () { formLeaving = true; });
   form.addEventListener('click', function (e) {
     // "Reject all changes" is an <a class="btn"> with its own confirm dialog.
@@ -23467,6 +24765,7 @@ sub edit_table_script {
     var el = e.target;
     if (!el || !el.getAttribute) return;
     if (el.classList && el.classList.contains('dir-alias-select')) updateAliasPath(el);
+    if (el.classList && el.classList.contains('cred-alias-sel')) toggleCredAlias(el);
     if (el.getAttribute('data-tpl-role') === 'template_dir') refreshAllModelSelects();
     if (el.classList && (el.classList.contains('fr-dir') || el.classList.contains('fr-cmd'))) {
       var f = el.closest ? el.closest('.opt-field') : null;
@@ -23496,6 +24795,13 @@ sub edit_table_script {
       refreshAllModelSelects();
     }
   }, true);
+  // Catch-all: any named field edit in any tab (Devices, Defaults, Email,
+  // General) marks the editor dirty, so the Save button enables and the
+  // leave-editor warning arms. markRowEdited no-ops for controls outside a
+  // card (e.g. the client-only filter boxes, which carry no name).
+  var markAnyEdit = function (e) { if (e.target && e.target.name) markRowEdited(e.target); };
+  form.addEventListener('input',  markAnyEdit);
+  form.addEventListener('change', markAnyEdit);
   refreshAllModelSelects();
 
   // --- tabs ---
@@ -23524,18 +24830,55 @@ sub edit_table_script {
     }
   });
 
+  // Restore a just-deleted option to a card's "+ add option" menu so it can be
+  // added again. Adding an option removes it from the menu (so it can't be added
+  // twice); deleting that option's field must put it back -- otherwise the option
+  // is gone from the menu for the rest of the editing session (add -> delete ->
+  // cannot re-add). Re-inserts in sorted order with the catalog type, matching
+  // the server-rendered menu. No-op for the auto 'site' field (not deletable),
+  // the repeatable report_hide (never removed from the menu), or an option the
+  // menu already offers. Works for device/default cards and the Email tab alike,
+  // since OPT_TYPES carries every option's type.
+  function readdAddOption(card, key) {
+    if (!card || !key || key === 'site' || key === 'report_hide') return;
+    var sel = card.querySelector('.add-opt-select');
+    if (!sel) return;
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === key) return;   // already offered
+    }
+    var o = document.createElement('option');
+    o.value = key;
+    o.setAttribute('data-type', (OPT_TYPES && OPT_TYPES[key]) || 'text');
+    o.textContent = key;
+    var opts = sel.options, placed = false;
+    for (var j = 1; j < opts.length; j++) {        // index 0 is the "+ add option" placeholder
+      if (opts[j].value && key < opts[j].value) { sel.insertBefore(o, opts[j]); placed = true; break; }
+    }
+    if (!placed) sel.appendChild(o);
+  }
+
   // --- delete an option field ---
   form.addEventListener('click', function (e) {
     if (e.target.classList.contains('opt-del')) {
       var field = e.target.closest('.opt-field');
       if (!field) return;
       markRowEdited(e.target);   // removing an option is an edit
+      var card = e.target.closest('.rec-card');
+      // Recover the option key from the field's control name (rk_opt_<key>, or
+      // rk_opt_<key>__<n> for a repeatable), to put it back in the add menu.
+      var ctl = field.querySelector('input[name], select[name], textarea[name]');
+      var okey = null;
+      if (ctl && ctl.name) {
+        var mm = ctl.name.match(/_opt_(.+?)(?:__\d+)?$/);
+        if (mm) okey = mm[1];
+      }
       // If a template_dir (or model) field is being removed, re-evaluate the
       // model dropdowns afterwards (a device with no template_dir falls back to
       // the default directory).
       var removed = field.querySelector('[data-tpl-role="template_dir"], .tpl-model-select');
       field.parentNode.removeChild(field);
       if (removed) refreshAllModelSelects();
+      if (card && okey) readdAddOption(card, okey);
     }
   });
 
@@ -23585,7 +24928,16 @@ sub edit_table_script {
     // Build the control matching the option's type, so enum options (tls,
     // debug) become drop-downs rather than free-text fields.
     var control;
-    if (type === 'enum_tls') {
+    if (CRED_FIELDS[key]) {
+      // Credential field: combined pw: alias dropdown + verbatim value field.
+      control = credFieldHTML(CRED_FIELDS[key], name, rk, key);
+    } else if (type === 'enum_snmp_level') {
+      control = '<select name="' + name + '">' +
+        '<option value="">(derive from passphrases)</option>' +
+        '<option value="noAuthNoPriv">noAuthNoPriv</option>' +
+        '<option value="authNoPriv">authNoPriv</option>' +
+        '<option value="authPriv">authPriv</option></select>';
+    } else if (type === 'enum_tls') {
       control = '<select name="' + name + '">' +
         '<option value="off">off</option>' +
         '<option value="starttls">starttls</option>' +
@@ -23633,6 +24985,11 @@ sub edit_table_script {
         '<option value="">(unset)</option>' +
         '<option value="on">on</option>' +
         '<option value="off">off</option></select>';
+    } else if (type === 'enum_snmp_inv_level') {
+      // Only 1 or 2 -- no "(unset)". Remove the option to inherit the default:.
+      control = '<select name="' + name + '">' +
+        '<option value="1">1 = chassis+modules+PSUs</option>' +
+        '<option value="2">2 = chassis+modules+PSUs+optics</option></select>';
     } else if (type === 'report_url') {
       control = '<input type="text" name="' + name + '" value="" size="44">' +
         ' <span class="opt-hint muted">http(s)://fqdn/.../fetchconfig-web.cgi?action=report</span>';
@@ -23772,7 +25129,9 @@ sub edit_table_script {
     } else if (kind === 'default') {
       // New model-defaults card goes to the TOP of the defaults list (just
       // after the "+ Add model defaults" action row) so you don't have to
-      // scroll to find it.
+      // scroll to find it. Clear any active model filter first, else the new
+      // card could be hidden by it.
+      if (typeof editDefFilter !== 'undefined' && editDefFilter) editDefFilter.value = '';
       var panel = form.querySelector('.tab-panel[data-panel="defaults"]');
       var actions = panel.querySelector('.panel-actions');
       if (actions && actions.nextSibling) {
@@ -23780,13 +25139,14 @@ sub edit_table_script {
       } else {
         panel.appendChild(card);
       }
+      if (typeof filterDefaults === 'function') filterDefaults();
     } else {
       form.querySelector('.tab-panel[data-panel="' + panelName + '"]').appendChild(card);
     }
     // A newly added record is, by definition, a change.
     card.setAttribute('data-edited', '1');
     card.classList.add('dev-edited');
-    editorDirty = true; formLeaving = false;   // re-arm the leave-editor warning
+    editorDirty = true; formLeaving = false; updateSaveState();   // re-arm the leave-editor warning
     // populate the add-option select for the initially-selected model
     refreshAddOptions(card);
     card.querySelector('.rec-model').addEventListener('change', function(){ refreshAddOptions(card); });
@@ -23946,6 +25306,41 @@ sub edit_table_script {
       if (editDevFilter) editDevFilter.focus();
     });
   }
+
+  // --- Defaults-tab filter (model name). The Defaults tab has no pagination
+  // (one box per model), so this is a plain show/hide by model substring. An
+  // admin card exposes its model via the .rec-model <select>; a read-only
+  // merged box carries it in data-model.
+  var editDefFilter  = document.getElementById('edit-def-filter');
+  var editDefClear   = document.getElementById('edit-def-clear');
+  var editDefNoMatch = document.getElementById('edit-def-no-match');
+  var defPanel       = form.querySelector('.tab-panel[data-panel="defaults"]');
+  function defCardModel(card) {
+    var sel = card.querySelector('.rec-model');
+    if (sel) return (sel.value || '').toLowerCase();
+    var a = card.getAttribute('data-model');
+    return a ? a.toLowerCase() : '';
+  }
+  function filterDefaults() {
+    if (!defPanel) return;
+    var q = editDefFilter ? editDefFilter.value.trim().toLowerCase() : '';
+    var cards = Array.prototype.slice.call(defPanel.querySelectorAll('.rec-card'));
+    var shown = 0;
+    cards.forEach(function (c) {
+      var ok = (q === '' || defCardModel(c).indexOf(q) !== -1);
+      c.style.display = ok ? '' : 'none';
+      if (ok) shown++;
+    });
+    if (editDefNoMatch) editDefNoMatch.style.display = (cards.length > 0 && shown === 0) ? '' : 'none';
+  }
+  if (editDefFilter) editDefFilter.addEventListener('input', filterDefaults);
+  if (editDefClear) {
+    editDefClear.addEventListener('click', function () {
+      if (editDefFilter) editDefFilter.value = '';
+      filterDefaults();
+      if (editDefFilter) editDefFilter.focus();
+    });
+  }
   // Mark a device row as EDITED (red dot after its Device-ID) when a field
   // inside its card actually changes -- not merely on expand/collapse. Both
   // "input" (typing) and "change" (selects, checkboxes) count. The marker is a
@@ -23965,7 +25360,7 @@ sub edit_table_script {
       inp.type = 'hidden'; inp.name = rk + '_edited'; inp.value = '1';
       row.appendChild(inp);
     }
-    editorDirty = true; formLeaving = false;   // re-arm the leave-editor warning
+    editorDirty = true; formLeaving = false; updateSaveState();   // re-arm the leave-editor warning
   }
   // Re-filter live as the user edits a Device-ID or comment field, and flag the
   // row as edited on any field change within a device card.
@@ -24175,9 +25570,11 @@ sub edit_table_script {
   // on newly-added rows and when a row's model changes.
   var MODEL_OPTS = window.__FCWEB_MODEL_OPTS || {};
   var OPT_TYPES  = window.__FCWEB_OPT_TYPES  || {};
+  var DEFAULT_ONLY = window.__FCWEB_DEFAULT_ONLY || {};
   function refreshAddOptions(card) {
     var sel = card.querySelector('.add-opt-select');
     if (!sel) return;
+    var isDefault = card.getAttribute('data-kind') === 'default';
     var modelEl = card.querySelector('.rec-model');
     var model = modelEl ? modelEl.value : '';
     var present = {};
@@ -24192,6 +25589,7 @@ sub edit_table_script {
     // model= template dropdown, enum drop-downs, etc.) instead of a text field.
     keys.forEach(function(k){
       if (present[k]) return;
+      if (!isDefault && DEFAULT_ONLY[k]) return;
       var t = OPT_TYPES[k] || 'text';
       html += '<option value="'+k+'" data-type="'+t+'">'+k+'</option>';
     });
@@ -24392,7 +25790,20 @@ sub find_device_table_line {
 # Parameters: none
 ################################################################################
 sub read_allowed_dirs {
-    return $_allowed_dirs_cache if defined $_allowed_dirs_cache;
+    return $_allowed_dirs_cache if defined $_allowed_dirs_cache;   # per-request memo
+
+    # Cross-request cache (FastCGI): --list-allowed-dirs forks the engine (~340ms),
+    # the single largest cost in the editor render. Reuse the previous worker's
+    # result while the device table is unchanged and the result is younger than
+    # the TTL (shared with the -t cache). Plain CGI is a fresh process per request,
+    # so the persist var is always undef there and behaviour is unchanged.
+    if ($_allowed_dirs_persist
+        && (time - $_allowed_dirs_persist->{checked_at}) < TEMPLATES_T_TTL
+        && $_allowed_dirs_persist->{sig} eq _templates_t_sig()) {
+        $_allowed_dirs_cache = $_allowed_dirs_persist->{result};
+        return $_allowed_dirs_cache;
+    }
+
     my %al = (present => 0, rc => 0, raw => '',
               repository => [], template => [], fetch_run => [], report => [], lock => [],
               fetch_run_configured => 0, fetch_run_disabled => 0,
@@ -24428,6 +25839,15 @@ sub read_allowed_dirs {
         $al{alias2path}{$kind}{$alias} = $path;
     }
     $_allowed_dirs_cache = \%al;
+    # Remember it for the next request in this FastCGI worker. A fork failure is
+    # transient, so (as with -t) it is not persisted.
+    unless ($fork_err) {
+        $_allowed_dirs_persist = {
+            result     => $_allowed_dirs_cache,
+            checked_at => time,
+            sig        => _templates_t_sig(),
+        };
+    }
     return $_allowed_dirs_cache;
 }
 
@@ -24449,6 +25869,71 @@ sub directory_raw_block {
         close($fh);
     }
     return \@raw;
+}
+
+################################################################################
+# pw_raw_block
+#
+# The verbatim "pw:" credential allow-list lines from the device table, for
+# re-emitting the armored block on save (read straight from disk, never from the
+# form) -- the same mechanism as directory_raw_block().
+#
+# Parameters: none
+################################################################################
+sub pw_raw_block {
+    my @raw;
+    if (open(my $fh, '<', $DEVICE_TABLE)) {
+        while (my $line = <$fh>) {
+            chomp $line;
+            push @raw, $line if $line =~ /^\s*pw\s*:/i;
+        }
+        close($fh);
+    }
+    return \@raw;
+}
+
+################################################################################
+# pw_aliases / pw_alias_defined / pw_alias_names / pw_alias_for_value
+#
+# Parse the on-disk pw: block into { '$Name' => { kind => 'user'|'pass', value } }.
+# Memoized per request ($_pw_aliases_cache, cleared by reset_request_state and
+# _invalidate_table_caches). The alias VALUES are read only to compare against a
+# verbatim credential for fold-on-save -- they are never displayed or logged.
+################################################################################
+sub pw_aliases {
+    return $_pw_aliases_cache if defined $_pw_aliases_cache;
+    my %al;
+    for my $line (@{ pw_raw_block() }) {
+        # pw: <kind> $Alias <value...>  -- the value follows the same inline
+        # user=/pass= quoting (double-quote anything with a comma/space).
+        next unless $line =~ /^\s*pw\s*:\s*(user|pass)\s+(\$[A-Za-z_][A-Za-z0-9_]*)\s+(.*)$/i;
+        my ($kind, $name, $rawval) = (lc $1, $2, $3);
+        $rawval =~ s/\s+$//;
+        $al{$name} = { kind => $kind, value => dequote_value(opt_trim($rawval)) }
+            unless exists $al{$name};
+    }
+    $_pw_aliases_cache = \%al;
+    return $_pw_aliases_cache;
+}
+sub pw_alias_defined {
+    my ($name, $kind) = @_;
+    my $a = pw_aliases()->{$name} or return 0;
+    return (!defined $kind || $a->{kind} eq $kind) ? 1 : 0;
+}
+sub pw_alias_names {
+    my ($kind) = @_;
+    my $al = pw_aliases();
+    return sort grep { !defined $kind || $al->{$_}{kind} eq $kind } keys %$al;
+}
+sub pw_alias_for_value {
+    my ($val, $kind) = @_;
+    return undef unless defined $val && $val ne '';
+    my $al = pw_aliases();
+    for my $name (sort keys %$al) {
+        next if defined $kind && $al->{$name}{kind} ne $kind;
+        return $name if defined $al->{$name}{value} && $al->{$name}{value} eq $val;
+    }
+    return undef;
 }
 
 ################################################################################
@@ -25186,13 +26671,36 @@ sub device_suffix_status {
 #   raw  : combined stdout+stderr, for display when rc is 1 or 2.
 ################################################################################
 
+# Cheap change token for the -t cache: device-table mtime:size (no file read,
+# no digest). Combined with the TTL this is enough to know when to re-fork.
+sub _templates_t_sig {
+    my @st = stat($DEVICE_TABLE);
+    return @st ? "$st[9]:$st[7]" : '';
+}
+
 ################################################################################
 # run_templates_t
 #
 # Parameters: none
 ################################################################################
 sub run_templates_t {
-    return $_templates_t_cache if defined $_templates_t_cache;
+    return $_templates_t_cache if defined $_templates_t_cache;   # per-request memo
+
+    # Cross-request cache (FastCGI only): `fetchconfig.pl -t` forks a full engine
+    # process -- a fixed cost on every editor load, regardless of fleet size.
+    # Reuse the previous worker's result when the device table is unchanged AND
+    # the result is younger than TEMPLATES_T_TTL, so a healthy install re-forks
+    # only when something actually changed (or at most once per TTL). Plain CGI
+    # starts a fresh process per request, so $_templates_t_persist is always
+    # undef there and behaviour is exactly as before. Fork failures are not
+    # persisted (they are usually transient).
+    if ($_templates_t_persist
+        && (time - $_templates_t_persist->{checked_at}) < TEMPLATES_T_TTL
+        && $_templates_t_persist->{sig} eq _templates_t_sig()) {
+        $_templates_t_cache = $_templates_t_persist->{result};
+        return $_templates_t_cache;
+    }
+
     my ($out, $err, $status, $fork_err) =
         run_fetchconfig('-devices=' . $DEVICE_TABLE, '-t');
     my $raw = collapse_model_registration(
@@ -25200,7 +26708,7 @@ sub run_templates_t {
               (defined $err ? $err : ''), (defined $out ? $out : '')));
     if ($fork_err) {
         $_templates_t_cache = { rc => undef, rows => [], raw => $raw };
-        return $_templates_t_cache;
+        return $_templates_t_cache;                  # transient: do not persist
     }
     my @rows;
     for my $line (split /\n/, (defined $out ? $out : '')) {
@@ -25213,6 +26721,12 @@ sub run_templates_t {
     }
     my $rc = defined $status ? $status : undef;
     $_templates_t_cache = { rc => $rc, rows => \@rows, raw => $raw };
+    # Remember it for the next request in this FastCGI worker.
+    $_templates_t_persist = {
+        result     => $_templates_t_cache,
+        checked_at => time,
+        sig        => _templates_t_sig(),
+    };
     return $_templates_t_cache;
 }
 
@@ -26434,27 +27948,70 @@ sub sweep_stale_backup_tables {
 # Parameters:
 #   $text
 ################################################################################
+sub mask_pw_pass {
+    my ($text) = @_;
+    return $text unless defined $text;
+    # "pw: pass $alias <secret>" (the credential allow-list) -- the value after
+    # the $alias is a password or SNMP community; mask it wholesale so no part
+    # leaks past a space/comma (the $alias stays visible). "pw: user" lines carry
+    # only a username and are left as-is.
+    $text =~ s/^(\s*pw\s*:\s*pass\s+\S+\s+).*$/${1}?***?/gim;
+    return $text;
+}
+
+# _mask_cred_kv -- mask a bare "key=value" credential token, but leave a pw:
+# alias reference ("pass=$NetPass") visible: an alias is a name, not a secret.
+# A value is kept ONLY when the key is a real alias slot and the value is a bare
+# "$Name"; everything else (literal secret, a non-alias key like password=) masks.
+sub _mask_cred_kv {
+    my ($k, $v) = @_;
+    return "$k=$v" if is_cred_field($k) && cred_is_alias_token($v);
+    return "$k=?***?";
+}
+
 sub mask_secrets {
     my ($text) = @_;
     return $text unless defined $text;
+    # Fast path. Every masking rule below (and mask_pw_pass) only ever matches a
+    # line that contains one of these literal anchor words (case-insensitive):
+    # pass (pass=/password/passwd/db_pass/snmp_*pass/wpa-passphrase/"pw: pass"),
+    # enable (enable=), community (community=/snmp_community/snmp_write_community),
+    # key (radius|tacacs key, virtual-controller-key, auth-server "key <v>"), or
+    # secret (Cisco "secret <type>"). If none is present, no rule can change the
+    # text, so return it unchanged -- this skips ~30 regexes for the common case
+    # (device IDs, models, sites, hostnames, version strings, plain config lines),
+    # which dominate the device-table editor render. Behaviour is identical: when
+    # an anchor IS present the full path below runs exactly as before.
+    return $text unless $text =~ /pass|enable|community|key|secret/i;
+    $text = mask_pw_pass($text);
     # A double-quoted value first (may legitimately contain spaces/commas,
     # e.g. pass="a b, c") -- mask the whole quoted token as a unit so no
-    # part of the secret leaks past the first space/comma.
+    # part of the secret leaks past the first space/comma. A quoted value is
+    # always a literal (an alias is never quoted), so no alias exception here.
     $text =~ s/\b(pass\w*=)"[^"]*"/$1?***?/gi;
     $text =~ s/\b(enable\w*=)"[^"]*"/$1?***?/gi;
     $text =~ s/\b(community=)"[^"]*"/$1?***?/gi;
     # Then unquoted values, read up to the next whitespace, comma, or
     # semicolon (device_table packs several key=value pairs per field
-    # separated by commas, e.g. "user=admin,pass=X,enable=Y").
-    $text =~ s/\b(pass\w*=)[^\s,;]+/$1?***?/gi;
-    $text =~ s/\b(enable\w*=)[^\s,;]+/$1?***?/gi;
+    # separated by commas, e.g. "user=admin,pass=X,enable=Y"). A bare "$Name"
+    # alias reference in a real alias slot is left visible (see _mask_cred_kv).
+    $text =~ s/\b(pass\w*)=([^\s,;]+)/ _mask_cred_kv($1, $2) /gie;
+    $text =~ s/\b(enable\w*)=([^\s,;]+)/ _mask_cred_kv($1, $2) /gie;
     # fetchconfig-web "db:" option password on the device_table "default:" line.
     # The generic pass\w*= rule above does NOT catch db_pass= (the "_" before
     # "pass" is a word char, so there is no \b word boundary there), so match it
     # explicitly -- quoted first (may hold spaces/commas), then bare.
     $text =~ s/\b(db_pass=)"[^"]*"/$1?***?/gi;
     $text =~ s/\b(db_pass=)[^\s,;]+/$1?***?/gi;
-    # SNMP community, device-table option form "community=".
+    # SNMP inventory credential options (engine 9.80+), device-table option form.
+    # Like db_pass=, "snmp_*=" has no \b before the secret word, so match each
+    # explicitly -- quoted value first (may hold spaces/commas), then bare.
+    for my $sk (qw(snmp_community snmp_write_community snmp_authpass snmp_privpass)) {
+        $text =~ s/\b(\Q$sk\E=)"[^"]*"/$1?***?/gi;
+        $text =~ s/\b(\Q$sk\E)=([^\s,;]+)/ _mask_cred_kv($1, $2) /gie;
+    }
+    # SNMP community, device-table option form "community=" (legacy procurve-snmp,
+    # pre-9.79; still masked until migrated to snmp_community=).
     $text =~ s/\b(community=)[^\s,;]+/$1?***?/gi;
     # SNMP community in a switch config (space form). Two grammars differ in
     # WHERE the community sits, so masking handles both without needing to know
@@ -26462,20 +28019,26 @@ sub mask_secrets {
     #   snmp-server community "public" operator              (ProCurve: quoted, first)
     #   snmp-server community private RW                      (Cisco/Comware: bare, first)
     #   set snmp community public                             (other CLIs: bare, first)
+    #   snmp community "public" ro                            (PLANET: bare "snmp", quoted/bare)
+    #   no snmp community public                              (PLANET negation)
     #   snmp-server community ipaddr 0.0.0.0 "secret"         (Hirschmann: quoted, LAST,
     #   snmp-server community ro "secret"                      after ipaddr/ipmask/ro/rw)
-    # Scope to the "snmp-server community ..." / "set snmp community ..." COMMAND,
-    # not the word "community" in a description/name/comment.
+    # Scope to the "...community ..." COMMAND (snmp-server / set snmp / bare snmp,
+    # with an optional leading "no"), not the word "community" in a description.
+    # NB bare "snmp\s+community" cannot match "snmp-server community" (a '-', not
+    # whitespace, follows "snmp") nor Comware "snmp-agent community".
+    my $SNMP_COMM = qr/(?:no\s+)?(?:snmp-server|set\s+snmp|snmp)\s+community/;
     #
     # Rule 1 -- a QUOTED community anywhere on the line. The positional keywords
     # (ipaddr/ipmask/ro/rw/operator/...) are never quoted, so the quoted token is
-    # always the community, whether it is first (ProCurve) or last (Hirschmann).
-    $text =~ s/^(\s*(?:snmp-server|set\s+snmp)\s+community\b.*?)"[^"]*"/$1"***"/gim;
-    # Rule 2 -- a BARE first-token community (Cisco/Comware), but ONLY when the
-    # line has no quoted community (the lookahead: no '"' remains on the line).
+    # always the community, whether it is first (ProCurve/PLANET) or last (Hirschmann).
+    $text =~ s/^(\s*$SNMP_COMM\b.*?)"[^"]*"/$1"***"/gim;
+    # Rule 2 -- a BARE first-token community (Cisco/Comware/PLANET), but ONLY when
+    # the line has no quoted community (the lookahead: no '"' remains on the line).
     # Otherwise the bare tokens are Hirschmann keywords, not the secret, and the
-    # real community -- the quoted one -- was already masked by Rule 1.
-    $text =~ s/^(\s*(?:snmp-server|set\s+snmp)\s+community\s+)(?!")(\S+)(?=[^"\n]*$)/$1?***?/gim;
+    # real community -- the quoted one -- was already masked by Rule 1. The access
+    # level after it (ro/rw) is a separate token and is left visible.
+    $text =~ s/^(\s*$SNMP_COMM\s+)(?!")(\S+)(?=[^"\n]*$)/$1?***?/gim;
     # RADIUS/TACACS shared secret: the "key <value>" token, but ONLY on a
     # radius-/tacacs-server line (so "crypto key generate", "ip ssh host-key"
     # etc. are not touched). A key TYPE may sit between "key" and the value --
@@ -26636,7 +28199,7 @@ sub color_comment_lines {
     my @out;
     for my $line (split /\n/, $text, -1) {
         my $e = esc($line);
-        if ($line =~ /^\s*#\s*directory allow list/i) {
+        if ($line =~ /^\s*#\s*(?:directory|credential) allow list/i) {
             # The security-sensitive armor comment -- shown in red, not green.
             push @out, qq{<span class="cfg-comment-danger">$e</span>};
         } elsif ($line =~ /^\s*#/) {
@@ -26823,7 +28386,8 @@ sub page_head {
         my $dashboard_menu = '';
         if ($ENABLE_DASHBOARD) {
             my @dash_items = ( $su->('Overview', '?action=dashboard_overview'),
-                               $su->('Changes',  '?action=dashboard_changes') );
+                               $su->('Changes',  '?action=dashboard_changes'),
+                               $su->('Inventory', '?action=inventory_dashboard') );
             push @dash_items, $su->('All devices', '?action=dashboard_devices')
                 if $is_admin;
             $dashboard_menu = $group->('Dashboard', @dash_items);
@@ -26954,9 +28518,23 @@ sub page_head {
                 # The editor sentence starts on its own line, so the "modified
                 # outside" fact and the "you're editing the latest" reassurance
                 # read as two distinct points.
-                $external = qq{<div class="ext-change-warning">&#9888; } . esc($ext)
+                # A "Dismiss" button clears the per-user notice server-side (via
+                # fetch, so the page -- e.g. the open editor -- is not reloaded)
+                # and then removes the banner. The notice is one-shot anyway, but
+                # this lets the user clear it explicitly and now.
+                # NB: built with a ~ delimiter, not qq{}, because the JS body
+                # contains unbalanced "{" (e.g. function(){...}) that brace-
+                # delimited qq{} would miscount. Only $acku interpolates.
+                my $acku = esc(script_url());
+                my $ack_js = '<script>'
+                    . qq~(function(){var w=document.getElementById('ext-change-warning');var b=document.getElementById('ext-change-dismiss');if(!w||!b)return;b.addEventListener('click',function(){b.disabled=true;var body='action=external_change_ack&csrf='+encodeURIComponent(b.getAttribute('data-csrf'));fetch('$acku',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){if(r.ok){w.parentNode.removeChild(w);}else{b.disabled=false;}}).catch(function(){b.disabled=false;});});})();~
+                    . '</script>';
+                $external = qq{<div class="ext-change-warning" id="ext-change-warning">&#9888; } . esc($ext)
                     . ($here ne '' ? '<br>' . esc($here) : '')
-                    . $review . qq{</div>};
+                    . $review
+                    . qq{ <button type="button" class="btn btn-small" id="ext-change-dismiss" }
+                    . qq{data-csrf="} . esc(csrf_token()) . qq{">Dismiss</button>}
+                    . qq{</div>} . $ack_js;
             }
         }
 
@@ -27185,26 +28763,21 @@ sub page_foot {
 # about_modal_html
 #
 # Latest applied DB schema version for the About dialog: the highest id in the
-# schema_migrations ledger (ids like '1.50' .. '2.12'), ordered by version.
-# Cached per process; undef when the ledger is absent or the DB is unreachable.
-my $_db_schema_version;
-my $_db_schema_version_set = 0;
-sub db_schema_version_cached {
-    return $_db_schema_version if $_db_schema_version_set;
-    $_db_schema_version_set = 1;
-    $_db_schema_version = eval {
+# schema_migrations ledger (ids like '1.50' .. '2.16'), ordered by version.
+# undef when the ledger is absent or the DB is unreachable. Read FRESH on each
+# call (not cached): the About dialog is infrequent, and a process-lifetime cache
+# showed a stale level under FastCGI after fetchconfig-web-dbsetup.pl --upgrade
+# (the worker kept the value it read before the migration until it recycled).
+sub db_schema_version {
+    return eval {
         my $dbh = db_connect() or return undef;
-        my ($have) = $dbh->selectrow_array(
-            q{SELECT 1 FROM information_schema.tables
-               WHERE table_schema = 'public' AND table_name = 'schema_migrations'});
-        if (!$have) { $dbh->disconnect; return undef; }
+        if (!db_table_exists($dbh, 'schema_migrations')) { $dbh->disconnect; return undef; }
         my $ids = $dbh->selectcol_arrayref('SELECT id FROM schema_migrations');
         $dbh->disconnect;
         return undef unless $ids && @$ids;
         my @s = sort { version_cmp($a, $b) } @$ids;
         return $s[-1];
     };
-    return $_db_schema_version;
 }
 
 # About dialog: reached from the title-bar program icon. Shows the internal
@@ -27222,7 +28795,7 @@ sub about_modal_html {
     $cr = esc($cr);
     my $fc = fetchconfig_version_cached();
     $fc = (defined $fc && $fc ne '') ? esc($fc) : 'unknown';
-    my $schema = db_schema_version_cached();
+    my $schema = db_schema_version();
     $schema = (defined $schema && $schema ne '') ? esc($schema) : 'not installed';
     my $run_mode = esc($RUN_MODE);
     my $name = esc($APP_TITLE);
