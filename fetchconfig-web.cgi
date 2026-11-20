@@ -29503,7 +29503,7 @@ sub valid_id {
 # valid_username
 #
 # Validate a fetchconfig-web account name. Like valid_id but also permits '@', so
-# a user can be an Active Directory UPN (e.g. tammer@net.schuler.de) -- required
+# a user can be an Active Directory UPN (e.g. john@acme.com) -- required
 # for LDAP's verbatim bind. The first character may not be a dash (defence in
 # depth). Usernames are never passed to fetchconfig.pl, so the extra '@' is safe.
 #
