@@ -30,6 +30,7 @@ repository.
   - [Step 8 -- First login](#step-8----first-login)
 - [Part 3 -- Upgrading](#part-3----upgrading)
   - [Upgrading the script](#upgrading-the-script)
+  - [Upgrading to 2.19](#upgrading-to-2.19)
   - [Upgrading to 2.18](#upgrading-to-2.18)
   - [Upgrading to 2.17.16](#upgrading-to-2.17.16)
   - [Upgrading to 2.17.15](#upgrading-to-2.17.15)
@@ -76,8 +77,8 @@ repository.
 
 ### What is in the package
 
-The release archive `fetchconfig-web-2.18.tar` unpacks to a directory
-`fetchconfig-web-2.18/` containing:
+The release archive `fetchconfig-web-2.19.tar` unpacks to a directory
+`fetchconfig-web-2.19/` containing:
 
 | File | Purpose |
 |------|---------|
@@ -97,6 +98,7 @@ The release archive `fetchconfig-web-2.18.tar` unpacks to a directory
 | `fetchconfig-web-dbupdate-2.15.sql` | Idempotent SQL that adds the 2.15 Device-Inventory schema (`device_inventory`, `device_inventory_component`, `device_inventory_history`; PostgreSQL 8.2+) for the engine's SNMP inventory collector. Schema only -- grants are done by `fetchconfig-web-dbsetup.pl --upgrade`. |
 | `fetchconfig-web-dbupdate-2.16.sql` | Idempotent SQL that adds the 2.16 column `device_inventory_component.fw_version` (firmware/ROMMON version; nullable; PostgreSQL 8.2+). Additive, schema only -- **no grant change** (the column inherits the table's existing whole-table privileges). |
 | `fetchconfig-web-dbupdate-2.17.sql` | Idempotent SQL that adds the 2.17 columns `device_inventory.sysname` / `syslocation` / `syscontact` (SNMPv2-MIB system-group values; nullable; PostgreSQL 8.2+). Additive, schema only -- **no grant change** (the columns inherit the table's existing whole-table privileges). |
+| `fetchconfig-web-dbupdate-2.19.sql` | Idempotent SQL that adds the 2.19 LDAP authentication schema: the `ldap_servers` table and the `users.ldap_auth` / `users.ldap_server` columns (PostgreSQL 8.2+). `fetchconfig-web-dbsetup.pl --upgrade` also grants the writer role DML on `ldap_servers` and its sequence. |
 | `fetchconfig-web-clean-resets.pl` | Standalone script to prune spent password-reset tokens and stale login-throttle rows (`-h` for help, `-s` to print the role SQL). |
 | `fetchconfig-web-install-template.pl` | Root-side helper, run via `sudo`: installs, creates, reverts, deletes or renames a template file; reads/deletes a device debug log; and lists `CRON_USER`'s crontab for the schedule viewer (v1.7). |
 | `imageconvert.pl`, `README.imageconvert.md` (+ `.html`/`README.imageconvert`) | Optional helper for embedding a small image as a base64 Perl constant; its manual (Markdown master, with generated HTML and plain-text). |
@@ -208,7 +210,9 @@ if you nevertheless need a newer build.
 | `Filesys::Df` | any | **Optional** -- only for the *Tools -> Disk space* page (free-space figures). Loaded lazily; without it the app runs normally and that one tool shows an install hint. | `libfilesys-df-perl` (main) | `perl-Filesys-Df` (**EPEL 9 only**) | `perl-Filesys-Df` (**PackageHub**) | `cpan Filesys::Df` |
 | `FCGI` | 0.67 (tested 0.82) | **Optional** -- only to run under FastCGI / mod_fcgid (see *Running under mod_fcgid*). Loaded lazily; without it the script runs as plain CGI. `CGI::Fast` is **not** used and must not be installed in its place. | `libfcgi-perl` (main) | `perl-FCGI` (AppStream) | **not packaged** -- use `cpan FCGI` | `cpan FCGI` |
 | `Crypt::Bcrypt` | any | **Required by default** (`REQUIRE_BCRYPT=1`) -- bcrypt (`$2b$`) password hashing; new/changed passwords are stored as bcrypt and legacy `$apr1$` hashes upgrade on the owner's next login. **If it is missing, login is disabled** with a notice; set `REQUIRE_BCRYPT=0` to allow the legacy `$apr1$` fallback on a stack without it. | `libcrypt-bcrypt-perl` (**universe**) | **not packaged** -- use CPAN | **not packaged** -- use CPAN | `cpan Crypt::Bcrypt` |
-| `IO::Socket::SSL` | any | **Optional** -- gives `Net::SMTP` (core) STARTTLS/SSL for the password-reset email (`EMAIL = 1`). Without `EMAIL = 1` nothing here is loaded, and the "Forgot password?" page just tells users to contact the admin. **`Net::SMTP::SSL` is not used** -- do not install it in place of this. | `libio-socket-ssl-perl` (main) | `perl-IO-Socket-SSL` (AppStream) | `perl-IO-Socket-SSL` (SLE base) | `cpan IO::Socket::SSL` |
+| `IO::Socket::SSL` | any | **Optional** -- gives `Net::SMTP` (core) STARTTLS/SSL for the password-reset email (`EMAIL = 1`) **and** the TLS layer for LDAPS/STARTTLS logins (`ENABLE_LDAP > 0`). Without either feature nothing here is loaded. **`Net::SMTP::SSL` is not used** -- do not install it in place of this. | `libio-socket-ssl-perl` (main) | `perl-IO-Socket-SSL` (AppStream) | `perl-IO-Socket-SSL` (SLE base) | `cpan IO::Socket::SSL` |
+| `Net::LDAP` (`perl-ldap`) | any | **Optional** -- required only when `ENABLE_LDAP > 0` (LDAP authentication): provides `Net::LDAP`/`Net::LDAPS` for the directory bind and the *User -> LDAP* test tool. Loaded lazily; with LDAP off it is never touched. | `libnet-ldap-perl` (main) | `perl-LDAP` (AppStream) | `perl-ldap` (SLE base) | `cpan Net::LDAP` |
+| `Crypt::OpenSSL::X509` | any | **Optional** -- only decodes an uploaded LDAP root CA for display (subject/issuer/validity/SHA-256) under *User -> LDAP*. Without it the CA is still stored and used for TLS; only the readable details are hidden. | `libcrypt-openssl-x509-perl` (**universe**) | `perl-Crypt-OpenSSL-X509` (**EPEL**) | **not packaged** -- use CPAN | `cpan Crypt::OpenSSL::X509` |
 
 > [!IMPORTANT]
 > **SLES 15:** `perl-CGI` lives in the *Desktop Applications Module* and
@@ -526,6 +530,12 @@ REQUIRE_BCRYPT          = 1
 # engine's db: option. Default 0.
 ENABLE_DASHBOARD        = 0
 
+# --- LDAP(S) authentication (optional; see the LDAP section in README) ---
+# 0 off (default) | 1 encrypted directories only (LDAPS/STARTTLS, CA-verified) |
+# 2 also permit plain unencrypted LDAP (lab only). With >0, configure servers
+# under User -> LDAP and mark accounts LDAP on their edit page. Needs Net::LDAP.
+ENABLE_LDAP             = 0
+
 # --- credential aliases (device_table pw:) ---
 # On save, fold a verbatim credential value that matches a defined pw: alias's
 # value back into the "$Alias". off (default) | secrets (pass-kind fields only) |
@@ -547,7 +557,7 @@ JS_BASE_URL             = /js
 HELP_BASE_URL           = /help
 # Overrides the version shown in the footer and About dialog. Omit it to show
 # the version the script ships as; the About dialog always shows that one too.
-#APP_VERSION            = 2.18.1
+#APP_VERSION            = 2.19
 COPYRIGHT               = 2026 (c) Your Organisation
 ```
 
@@ -1204,6 +1214,18 @@ usual reason a fix "does not appear".
 long-lived `mod_fcgid` workers keep running the old code until recycled, and
 `touch` does not trigger a reload. Run `apachectl graceful` after the copy
 (see *Step 7 -- Web server configuration*). Plain CGI needs no such step.
+
+### Upgrading to 2.19
+
+> **Schema change (LDAP authentication).** Copy the new `fetchconfig-web.cgi` **and**
+> `fetchconfig-web.css` into `WEB_DIR` as in [Upgrading the script](#upgrading-the-script) (under
+> FastCGI, `graceful` the server; hard-reload / Ctrl-F5 so the new CSS loads). Then run
+> `fetchconfig-web-dbsetup.pl --upgrade`, which applies `fetchconfig-web-dbupdate-2.19.sql`: it
+> creates the `ldap_servers` table and adds `users.ldap_auth` / `users.ldap_server`, and `--upgrade`
+> also grants the writer role DML on `ldap_servers` and its sequence. Additive, idempotent and
+> PostgreSQL 8.2-safe. LDAP stays **off** until you set `ENABLE_LDAP` (`1` encrypted directories
+> only, `2` also plain LDAP) and add a directory under *User -> LDAP*; with it unset nothing changes.
+> One web build runs against a 2.17/2.18 and a 2.19 database.
 
 ### Upgrading to 2.18
 

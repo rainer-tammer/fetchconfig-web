@@ -49,9 +49,9 @@ my ($cfg) = make_config(); load_cgi($cfg); main::read_config();
     like($body, qr/\{read_debug\}/, '... or the explicit flag');
 
     # The column must reach every place that reads or writes a user row.
-    like($src, qr/download_full_config, read_debug, email FROM users WHERE username/,
+    like($src, qr/read_debug, email, ldap_auth, ldap_server FROM users WHERE username/,
          'db_get_user selects read_debug');
-    like($src, qr/download_full_config, read_debug, email FROM users ORDER BY/,
+    like($src, qr/read_debug, email, ldap_auth FROM users ORDER BY/,
          'db_all_users selects read_debug');
     like($src, qr/qw\(edit_device_table admin_function download_full_report download_full_config\s+read_debug\)/,
          'db_set_user_flag allows read_debug');

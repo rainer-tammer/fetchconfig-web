@@ -30,18 +30,19 @@ title bar's nav row:
 1. Login against the PostgreSQL user database (see "Configuration" and the
    `fetchconfig-web-dbsetup.pl` setup script below).
 2. List all Device-IDs (parsed from the fetchconfig device table) with their
-   Model, Site, Hostname and Comment, plus a model dropdown and Device-ID /
-   Hostname / Comment filter boxes (all remembered in a cookie across
-   navigation), sortable columns, and a statistics panel (total device
-   count, a live "devices filtered" count, and a per-model breakdown) in the
-   upper-right corner. The Hostname column sorts IPv4 addresses in numeric IP
-   order first (so `10.1.1.1` follows `2.5.7.8`, not lexically before it),
-   then hostnames/FQDNs alphabetically (IPv6 literals sort with the names).
-   When the 2.15 inventory schema is present and readable, two extra read-only
-   columns -- **Vendor** and **HW Model**, from the engine's SNMP
-   `device_inventory` data -- appear (sortable) between Model and Site; a device
-   with no inventory row shows a dash. The same two columns also appear in the
-   device-table editor's Devices tab.
+   Model, Hostname and Site, plus a model dropdown, a site dropdown and
+   Device-ID / Hostname filter boxes (all remembered in a cookie across
+   navigation), sortable columns, and a **Statistics** panel (total device
+   count, a live "devices filtered" count, and a per-model breakdown) that folds
+   into a slim tab on the right browser edge -- folded by default, click to open,
+   the choice remembered per browser. The Hostname column sorts IPv4 addresses in
+   numeric IP order first (so `10.1.1.1` follows `2.5.7.8`, not lexically before
+   it), then hostnames/FQDNs alphabetically (IPv6 literals sort with the names).
+   When the 2.15 inventory schema is present and readable, read-only columns from
+   the engine's SNMP `device_inventory` data appear (sortable): **Vendor** and
+   **HW Model** between Hostname and Site, and **sysLocation** after Site; a device
+   with no inventory row shows a dash. The Vendor and HW Model columns also appear
+   in the device-table editor's Devices tab.
 3. A **Status** page (menu, between Devices and Setup) tabulating every
    device's last-run status from its `.status` file: Device-ID (clickable),
    start/end date and time, duration, state (success/failed/skipped, colour
@@ -293,7 +294,9 @@ deploying:
 | `CGI` (`CGI.pm`)  | **4.31**        | `fetchconfig-web.cgi`            | CGI request/response handling. Core until Perl 5.22, then removed -- treat as non-core on modern Perl | `libcgi-pm-perl` | `perl-CGI` | `perl-CGI` | `cpan CGI` |
 | `Filesys::Df`     | any (optional)  | `fetchconfig-web.cgi`            | **Optional** -- only the *Tools -> Disk space* page (free-space figures). Loaded lazily; without it the app runs and that tool shows an install hint | `libfilesys-df-perl` | `perl-Filesys-Df` (EPEL) | `perl-Filesys-Df` (PackageHub) | `cpan Filesys::Df` |
 | `Crypt::Bcrypt`   | any             | `fetchconfig-web.cgi`            | **Required by default** (`REQUIRE_BCRYPT=1`): bcrypt (`$2b$`) password hashing at cost 12. If it is missing, login is disabled with a notice. Set `REQUIRE_BCRYPT=0` to allow the legacy `$apr1$` fallback on a stack without it | `libcrypt-bcrypt-perl` | (CPAN) | (CPAN) | `cpan Crypt::Bcrypt` |
-| `IO::Socket::SSL` | any (optional)  | `fetchconfig-web.cgi`            | **Optional** -- STARTTLS/SSL for the password-reset mail (`EMAIL = 1`); `Net::SMTP` itself is core. `Net::SMTP::SSL` is **not** used | `libio-socket-ssl-perl` | `perl-IO-Socket-SSL` | `perl-IO-Socket-SSL` | `cpan IO::Socket::SSL` |
+| `IO::Socket::SSL` | any (optional)  | `fetchconfig-web.cgi`            | **Optional** -- STARTTLS/SSL for the password-reset mail (`EMAIL = 1`) **and** the TLS layer for LDAPS/STARTTLS logins (`ENABLE_LDAP > 0`); `Net::SMTP` itself is core. `Net::SMTP::SSL` is **not** used | `libio-socket-ssl-perl` | `perl-IO-Socket-SSL` | `perl-IO-Socket-SSL` | `cpan IO::Socket::SSL` |
+| `Net::LDAP` (`perl-ldap`) | any (optional) | `fetchconfig-web.cgi` | **Optional** -- required only when `ENABLE_LDAP > 0` (LDAP authentication): provides `Net::LDAP`/`Net::LDAPS` for the directory bind and the *Test connection* tool. Loaded lazily; with LDAP off it is never touched | `libnet-ldap-perl` | `perl-LDAP` | `perl-ldap` | `cpan Net::LDAP` |
+| `Crypt::OpenSSL::X509` | any (optional) | `fetchconfig-web.cgi` | **Optional** -- only decodes an uploaded LDAP root CA for display (subject/issuer/validity/SHA-256) under *User -> LDAP*. Without it the CA is still stored and used for TLS; only the human-readable details are unavailable | `libcrypt-openssl-x509-perl` | `perl-Crypt-OpenSSL-X509` | (CPAN) | `cpan Crypt::OpenSSL::X509` |
 | `FCGI`            | 0.67 (optional) | `fetchconfig-web.cgi`            | **Optional** -- the persistent FastCGI accept loop (mod_fcgid). Without it the script runs as plain CGI. `CGI::Fast` is **not** used | `libfcgi-perl` | `perl-FCGI` | (CPAN -- not packaged) | `cpan FCGI` |
 
 `perl Makefile.PL` checks `DBI`, `DBD::Pg`, `Algorithm::Diff` and `CGI` and
@@ -395,11 +398,12 @@ TRUST_FORWARDED_PROTO   = 0
 REQUIRE_BCRYPT          = 1
 SHOW_RENDER_TIME        = 0
 ENABLE_DASHBOARD        = 0
+ENABLE_LDAP             = 0
 ALIAS_REPLACE_ON_SAVE   = off
 GENERIC_SYNTAX          = auto
 TEMPLATE_HELPER         = /usr/local/fetchconfig/fetchconfig-web-install-template.pl
 #CRON_USER              = fetchconfig
-APP_VERSION             = 2.18.1
+APP_VERSION             = 2.19
 COPYRIGHT               = 2026 (c) Rainer Tammer
 ```
 
@@ -471,6 +475,16 @@ Format and loading:
   the web DB user lacking `SELECT`, the dashboard shows guidance instead of data
   (including, while the tables are empty, the exact `db:` string to paste into the
   engine). Off by default, so nothing changes for installs that don't use it.
+- **`ENABLE_LDAP`** (`0`|`1`|`2`, default `0`): enable LDAP(S) authentication
+  against an external directory (for example Active Directory). `0` off; `1`
+  allow only encrypted connections (LDAPS or STARTTLS, always CA-verified); `2`
+  additionally permit plain, unencrypted LDAP (test/lab only -- credentials
+  travel in clear). Admins define the directory servers under **User -> LDAP**
+  and mark individual accounts as LDAP-authenticated on the user edit page; those
+  users then log in with their directory password. The Perl `Net::LDAP` stack is
+  loaded only when this is `> 0` and a connection is tested or a login binds. Off
+  by default, so nothing changes for installs that don't use it. The full feature
+  is described under [LDAP(S) authentication](#ldaps-authentication).
 - **`ALIAS_REPLACE_ON_SAVE`** (`off`|`secrets`|`users`|`all`, default `off`):
   when saving the device table, fold a *verbatim* credential value that matches a
   defined `pw:` alias's value back into the `$Alias` reference. `off` leaves what
@@ -517,7 +531,14 @@ Format and loading:
   reset forms.
 - **Email / password reset.** `EMAIL` (`0`|`1`, default `0`) enables the
   self-service *Forgot password?* flow; with `0` the page only tells users to
-  contact an administrator. When `EMAIL = 1`, `SMTP_HOST`, `EMAIL_FROM` and
+  contact an administrator. The form has **two fields -- username and email
+  address** -- and the requester supplies whichever they know (both is also
+  accepted, in which case they must name the same account); the field type is
+  explicit, so a UPN login name that contains `@` is never mistaken for an email
+  address. An **LDAP-authenticated account never receives a reset link** (its
+  password lives in the directory): it is emailed a short notice to contact the
+  user help desk instead. Email addresses are unique across accounts, so the
+  address resolves to one user. When `EMAIL = 1`, `SMTP_HOST`, `EMAIL_FROM` and
   **`SITE_URL`** are required: `SITE_URL` (scheme + host\[:port], no path) is the
   public base URL used to build the reset link. The link is **never** derived
   from the request's `Host` header -- that is attacker-controlled -- so without
@@ -717,26 +738,20 @@ it to display something else. `COPYRIGHT` is read from the config file.
 
 ### The user database
 
-The bundled `fetchconfig-web-dbsetup.pl` script creates the PostgreSQL role, database and `users` table.
+The bundled `fetchconfig-web-dbsetup.pl` handles both cases: an **interactive
+first-time setup** (creates the PostgreSQL role, database and `users` table), and
+`--upgrade`, which brings an **existing** database up to the current schema. Both
+are idempotent and safe to re-run.
 
-To enable per-site access on an **existing** installation, run the bundled
-`fetchconfig-web-dbupdate-1.50.sql` once against the fetchconfig-web database:
+#### First-time setup
 
-```
-psql -U <DBuser> -d <DBinst> -f fetchconfig-web-dbupdate-1.50.sql
-```
-
-It is idempotent, PostgreSQL 8.2-compatible, and starts every existing user unrestricted (site 0). It also grants the web user the privileges it needs on the new tables (important if you run it as `postgres` rather than the web DB user).
-
-A standalone helper that creates the database and table and (optionally)
-imports existing accounts. Every step is a Y/N prompt, so it's safe to
-re-run. Run it once before first use:
+Run it once before first use:
 
 ```sh
 perl fetchconfig-web-dbsetup.pl
 ```
 
-It will, in order:
+Every step is a Y/N prompt. It will, in order:
 
 1. Ask for the application **database name** (default `fetchconfig`) and
    **host**.
@@ -746,7 +761,7 @@ It will, in order:
    application role if missing, and `CREATE DATABASE ... OWNER <app-user>`.
    Skip this if the database already exists.
 3. Reconnect as the **application login** and create the `users` table
-   (PostgreSQL 9.2-compatible DDL).
+   (PostgreSQL 8.2-compatible DDL).
 4. Offer to **import** accounts from `/www/passwd/fetchconfig` if that old
    htpasswd file is present -- hashes are copied verbatim, so everyone's
    current password keeps working, all with `edit_device_table = false` and
@@ -764,8 +779,37 @@ It will, in order:
 Migrating from an earlier (htpasswd) version means everyone re-logs in once,
 since sessions are new.
 
-**Upgrading an existing database** (adding `admin_function` to a `users`
-table created by an earlier version) is a one-time manual step:
+#### Upgrading an existing database
+
+To bring an existing database up to the current release, run:
+
+```sh
+perl fetchconfig-web-dbsetup.pl --upgrade
+```
+
+It reads the connection details from `/etc/fetchconfig-web.cfg` (so you do not
+retype them) and prompts only for a **DB superuser** (to run DDL / `CREATE ROLE` /
+`GRANT`). It then applies every pending schema update in order, oldest first --
+per-site access (1.50), the audit log (1.51), the login-attempt throttle (1.60),
+device notes (1.62), the LDAP server table and per-user LDAP columns (2.19), and
+every later per-release change through the current version -- recording each in a
+`schema_migrations` ledger. It is idempotent and
+PostgreSQL 8.2-compatible, applies the updates through DBI (no external `psql`
+needed), and a change you applied by hand earlier is simply recorded rather than
+re-run. The same pass also provisions the Backup Dashboard history schema together
+with its dedicated writer role and grants, so one `--upgrade` covers both the user
+database and the dashboard; you are asked for the writer role name only the first
+time, after which it is remembered.
+
+The individual `fetchconfig-web-dbupdate-*.sql` files ship alongside the script if
+you prefer to review and apply a single step by hand, for example:
+
+```
+psql -U <DBuser> -d <DBinst> -f fetchconfig-web-dbupdate-1.50.sql
+```
+
+One pre-ledger change is not part of the `--upgrade` chain: a `users` table created
+before the `admin_function` column existed needs it added once:
 
 ```sql
 ALTER TABLE users ADD COLUMN admin_function BOOLEAN NOT NULL DEFAULT FALSE;
@@ -774,6 +818,76 @@ UPDATE users SET admin_function = TRUE WHERE username = 'admin';
 
 Set it `TRUE` for any other accounts that should have full admin rights (or
 do that from the User page afterward).
+
+### LDAP(S) authentication
+
+fetchconfig-web can authenticate selected accounts against an external LDAP
+directory (typically Active Directory) instead of a local password, while other
+accounts keep using local passwords. It is **off by default** and controlled by
+the `ENABLE_LDAP` config key (`0` off, `1` encrypted connections only, `2` also
+permit plain LDAP). The Perl `Net::LDAP` / `Net::LDAPS` / `IO::Socket::SSL`
+modules are required only when the feature is on (see Requirements).
+
+**Design in one line:** a *verbatim bind*. The username stored on the account is
+sent to the directory exactly as-is as the bind identity, so it must be the
+value the directory accepts -- normally a UPN such as `jdoe@example.com`. There
+is no bind DN, service account or directory search; the user's own credentials
+are what bind, and nothing else is read from the directory.
+
+**Transport is always verified.** For LDAPS and STARTTLS the TLS peer is checked
+against the root CA stored with the server (`verify => require`, TLS 1.2
+minimum); there is no "ignore certificate" path. A blank or whitespace-only
+password is refused *before* any bind, because Active Directory treats a bind
+with a name and an empty password as an anonymous "unauthenticated bind" that
+returns success -- which must never be read as a valid login. Plain, unencrypted
+LDAP is permitted only when `ENABLE_LDAP = 2` (intended for a lab).
+
+**Managing directory servers (`User -> LDAP`, admins only).** Each server record
+has a name, an **Enable** flag, a primary host\[:port] and an optional secondary,
+an encryption mode (`ldaps` implicit-TLS 636 / `starttls` 389 / `ldap` plain),
+a bind timeout, and -- for the encrypted modes -- an uploaded **root CA
+certificate** (PEM). The CA is stored in the database and decoded for display
+(subject, issuer, validity, SHA-256) via `Crypt::OpenSSL::X509` when available.
+A **Test connection** button binds a username/password you type and reports each
+step (TLS version, cipher, peer CN/SAN, issuer, and the bind result in green/red)
+without saving anything -- use it to confirm a server before wiring users to it.
+A server that any account is still linked to cannot be deleted.
+
+**Marking an account as LDAP (`User -> <user>` edit page).** The Authentication
+section offers *local password* or *LDAP*, with the server to bind against.
+LDAP can be enabled only for a username that is a full UPN (contains `@`), since
+the bind is verbatim; a short name must be renamed first (see *User rename*
+below). The built-in `admin` account is **always local** and can never be
+switched to LDAP, so a directory outage can never lock out the one guaranteed
+administrator. When a new user is created as LDAP, or an existing one is switched
+to it, the local password column is set to a random throwaway value that no one
+holds -- the row is never usable for a local login, and the real secret stays in
+the directory. An LDAP user cannot use *Change your password* (the form shows a
+notice pointing at the directory), and the admin *Reset password* button is
+greyed out for them.
+
+**Logging in.** At the login page an LDAP user enters their directory username
+(the UPN) and directory password; `do_login` binds them against the account's
+server (primary, then the secondary only if the primary cannot be reached).
+A rejected bind is reported exactly like a wrong local password
+("Invalid username or password"). If **no configured server can be reached or
+verified** (down, TLS/CA failure, misconfiguration, modules missing), the login
+cannot be decided: the user is told **"Login is currently not possible: the
+authentication directory cannot be reached."** and -- because an outage is not
+the user's fault -- the attempt is **not** counted against the login throttle.
+Local accounts and the `admin` account are unaffected and keep working whether or
+not the directory is up.
+
+**User rename (short name -> UPN).** Because LDAP needs a UPN, `User -> Users`
+offers a **Rename** action that moves an account to a new username inside one
+transaction, repointing every child row (site assignments, password-reset
+tokens, the audit log, and the login-throttle key) so history follows the new
+name. The built-in `admin` cannot be renamed, and a name already in use is
+refused.
+
+**Reset for LDAP users.** The *Forgot password?* flow detects an LDAP account and
+emails a help-desk notice instead of a reset link (see the password-reset
+configuration above); it never exposes the directory password or a reset token.
 
 ### Deploying
 
@@ -2624,17 +2738,29 @@ against the database, no shell access required.
   with no special permissions and you are taken straight to its edit page to
   set permissions and site access.
 - **User list** -- a slim table: username (a link), email, an Admin yes/no
-  indicator, a **Reset password** button and a **Delete** button. All of a
-  user's settings and permissions are edited on a dedicated page reached by
-  clicking the username, rather than through a row of inline toggles.
+  indicator, an **Auth** column (`local` or `LDAP`), a **Password** column with
+  a **Reset password** button, and a **Tools** column with **Edit**, **Rename**
+  and **Delete**. All of a user's settings and permissions are edited on a
+  dedicated page reached by clicking the username or **Edit**, rather than
+  through a row of inline toggles. Reset password is greyed out for the built-in
+  `admin` and for LDAP accounts (whose password lives in the directory); a
+  server still linked to a user cannot be deleted.
 - **Edit user page** (`?action=user_edit`) -- one grouped form with
-  **Return** / **Cancel** / **Save changes**: Identity (email), Permissions
-  (Administrator, which supersedes and greys out the individual rights --
-  Edit device table, Download full report, Download/copy unmasked config,
-  View device debug logs),
+  **Return** / **Cancel** / **Save changes**: Identity (email), an
+  **Authentication** choice of *local password* or *LDAP* with the server to
+  bind against (shown only when `ENABLE_LDAP > 0`; LDAP needs a UPN username and
+  is never offered for `admin`), Permissions (Administrator, which supersedes and
+  greys out the individual rights -- Edit device table, Download full report,
+  Download/copy unmasked config, View device debug logs),
   a read-only **Site access** summary (wrapped to a bounded width) with a
-  button to the separate sites editor, and a Reset-password button. Cancel
-  and Return warn if there are unsaved changes.
+  button to the separate sites editor, and a Reset-password button (greyed for an
+  LDAP account). Cancel and Return warn if there are unsaved changes.
+- **Rename user** -- moves an account to a new username in one transaction,
+  repointing its site assignments, reset tokens, audit history and throttle key.
+  Used mainly to turn a short local name into the full UPN an LDAP bind needs.
+  `admin` cannot be renamed, and an existing name is refused. Email addresses are
+  unique across accounts, so saving an address already held by another user is
+  rejected.
 - **Saving** -- one `user_save` writes email and all permission fields in a
   single `UPDATE`, and records **one audit line per changed field** (reusing
   the `set_email` / `set_admin_right` / `set_edit_right` /
@@ -2841,6 +2967,19 @@ below are grouped by concern.
   fallback. Legacy `$apr1$` hashes are re-hashed to bcrypt on the owner's next
   successful login. Also accepted on read: `$1$`, `$5$`/`$6$` and traditional DES `crypt`.
   The unsalted `{SHA}` format is rejected.
+- **LDAP accounts** (when `ENABLE_LDAP > 0` and the account is marked LDAP) are
+  authenticated by a *verbatim bind* to the account's configured directory server
+  instead of the local hash: the stored username is the bind identity (a UPN) and
+  the entered password is bound against the server (primary, then secondary on a
+  connection failure only). TLS is always CA-verified (`verify => require`, TLS
+  1.2+); a blank password is refused before binding (the AD unauthenticated-bind
+  trap); plain LDAP is allowed only with `ENABLE_LDAP = 2`. A rejected bind looks
+  exactly like a wrong password; a directory that cannot be reached yields a
+  distinct "login currently not possible" notice and is **not** counted against
+  the throttle. The local `pass_hash` of an LDAP account is a random throwaway and
+  is never consulted, never upgraded, and never exposed; the protected `admin`
+  account is always local so it cannot be locked out by a directory outage. See
+  [LDAP(S) authentication](#ldaps-authentication).
 - Sessions are opaque 192-bit tokens from `/dev/urandom`, stored server-side
   in `$SESSION_DIR` (files mode 0600 in a 0700 directory). The session id is
   validated against `^[0-9a-f]{48}$` before use as a filename, so a crafted

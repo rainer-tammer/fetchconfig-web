@@ -11,7 +11,7 @@ no warnings 'once', 'redefine';
     local *main::user_is_admin   = sub { 1 };
     local *main::db_connect      = sub { bless {}, 'MUE' };
     local *main::db_get_user     = sub { { username=>'op', email=>'ops@x.de', admin_function=>0,
-        edit_device_table=>1, download_full_report=>0, download_full_config=>1, read_debug=>0 } };
+        edit_device_table=>1, download_full_report=>0, download_full_config=>1, read_debug=>0, ldap_auth=>0, ldap_server=>undef } };
     local *main::db_user_site_ids = sub { [3,5,7] };
     local *main::db_all_sites    = sub { [ map { {id=>$_, code=>"S$_"} } (3,5,7) ] };
     local *main::page_head       = sub { '' };
@@ -41,7 +41,7 @@ no warnings 'once', 'redefine';
     local *main::user_is_admin   = sub { 1 };
     local *main::db_connect      = sub { bless {}, 'MUE' };
     local *main::db_get_user     = sub { { username=>'admin', email=>'', admin_function=>1,
-        edit_device_table=>1, download_full_report=>1, download_full_config=>1, read_debug=>0 } };
+        edit_device_table=>1, download_full_report=>1, download_full_config=>1, read_debug=>0, ldap_auth=>0, ldap_server=>undef } };
     local *main::db_user_site_ids = sub { [0] };
     local *main::db_all_sites    = sub { [] };
     local *main::page_head = sub { '' }; local *main::page_foot = sub { '' };
@@ -55,7 +55,7 @@ no warnings 'once', 'redefine';
 {
     local *main::user_is_admin = sub { 1 };
     local *main::db_get_user   = sub { { username=>'op', email=>'old@x.de', admin_function=>0,
-        edit_device_table=>0, download_full_report=>0, download_full_config=>0, read_debug=>0 } };
+        edit_device_table=>0, download_full_report=>0, download_full_config=>0, read_debug=>0, ldap_auth=>0, ldap_server=>undef } };
     local *main::normalize_email = sub { $_[0] };
     local *main::db_connect    = sub { bless {}, 'MUE' };
     my @A;
@@ -72,7 +72,7 @@ no warnings 'once', 'redefine';
 {
     local *main::user_is_admin = sub { 1 };
     local *main::db_get_user   = sub { { username=>'op', email=>'same@x.de', admin_function=>0,
-        edit_device_table=>1, download_full_report=>0, download_full_config=>0, read_debug=>0 } };
+        edit_device_table=>1, download_full_report=>0, download_full_config=>0, read_debug=>0, ldap_auth=>0, ldap_server=>undef } };
     local *main::normalize_email = sub { $_[0] };
     local *main::db_connect    = sub { bless {}, 'MUE' };
     my @A; local *main::audit = sub { push @A, 1; };
@@ -191,7 +191,7 @@ no warnings 'once', 'redefine';
     unlike($add_sub // '', qr/Allow this user to view and edit/, 'add form: no edit checkbox');
     like($src, qr/redirect_to_user_page\(action=>"user_edit", username=>\$new_user/,
          'add user redirects to the edit page');
-    like($src, qr/db_add_user\(\$dbh, \$new_user, password_hash\(\$password\), 0, 0\)/,
+    like($src, qr/db_add_user\(\$dbh, \$new_user, \$hash, 0, 0\)/,
          'new user created with no special rights');
 }
 

@@ -3,7 +3,7 @@
 **Audience:** engineers extending or maintaining fetchconfig-web.
 **Scope:** architecture, request lifecycle, data structures, the PostgreSQL
 schema, the security model, and step-by-step recipes for adding functionality.
-**Version:** this document tracks fetchconfig-web 2.18.1 (requires fetchconfig
+**Version:** this document tracks fetchconfig-web 2.19 (requires fetchconfig
 9.80+ -- the release minimum, `MIN_FETCHCONFIG_VERSION`, bumped for the SNMP
 inventory collection; the optional Backup Dashboard needs the engine's DB writer, fetchconfig
 9.75+, per-version line counts need 9.77+, the Setup devices -> Rename
@@ -356,6 +356,25 @@ Security is layered; the important mechanisms:
 * A **constant-time** path guards login against user-enumeration timing: a
   nonexistent user is still compared against a cached dummy hash
   (`dummy_password_hash`, memoised in a closure).
+* **LDAP accounts** (`users.ldap_auth`, with `ENABLE_LDAP > 0`) authenticate by
+  binding to a directory instead of the local hash. In `do_login()` an
+  `ldap_auth` user (other than the protected `admin`, which is pinned local) is
+  verified by `ldap_bind_ok($server, $username, $password)` -- a **verbatim
+  bind**: the stored username is sent as the bind identity (a UPN), so there is
+  no bind DN or directory search. `ldap_bind_ok()` returns a tri-state:
+  `ok` (bound), `reject` (directory refused -- treated exactly like a wrong
+  local password), or `unavailable` (no server reachable/verifiable). On
+  `unavailable`, `do_login()` shows a distinct *"login currently not possible"*
+  notice and **does not** record a throttle failure (an outage is not the user's
+  fault). TLS is always CA-verified (`verify => 'require'`, TLS 1.2 minimum);
+  plain LDAP is allowed only with `ENABLE_LDAP = 2`; a blank password is refused
+  before binding (the AD unauthenticated-bind trap). The server's primary host
+  is tried first, the secondary only on a *connection* failure (never on a
+  rejected bind). An LDAP account's local `pass_hash` is a random throwaway,
+  never consulted and never upgraded (the bcrypt-upgrade and default-password
+  branches are both skipped for `ldap_auth`). `ldap_bind_ok()` is the login-path
+  sibling of `run_ldap_test()` (the admin *Test connection* report); both share
+  the same TLS/bind construction. See §7.6.
 
 ### 7.2 Sessions
 
@@ -493,6 +512,66 @@ Security is layered; the important mechanisms:
   PostgreSQL. Treat a clean scan of the deployed versions -- not the source -- as
   the release gate.
 
+### 7.11 LDAP directory integration
+
+LDAP(S) authentication (schema 2.19) lets chosen accounts bind to an external
+directory while others stay local. The master switch is `ENABLE_LDAP`
+(`0`/`1`/`2`); the `Net::LDAP` stack is loaded lazily (`ldaps_available()`,
+`x509_available()`), so an install with LDAP off never touches it.
+
+* **Server records** live in `ldap_servers` (name, enable flag, primary +
+  optional secondary host/port, `encryption` = `ldaps`/`starttls`/`ldap`,
+  timeout, and a PEM `ca_cert_pem`). Admin CRUD is `show_ldap_page` /
+  `show_ldap_edit` / `do_ldap_save` / `do_ldap_delete` under `?action=ldap*`
+  (all POST + CSRF). The CA is decoded for display by `ldap_ca_info()` via
+  `Crypt::OpenSSL::X509`, and materialised to a cache file
+  (`ldap_ca_cache_file`/`ldap_materialize_ca`) under the session dir for the TLS
+  layer. `do_ldap_delete` refuses a server any user still references.
+* **The bind** is shared in spirit by two callers: `run_ldap_test()` (the admin
+  *Test connection* report, `do_ldap_test`) and `ldap_bind_ok()` (the login
+  path, §7.1). Both build the connection identically -- `Net::LDAPS` for
+  `ldaps`, `Net::LDAP` + `start_tls` for `starttls`, always
+  `verify => 'require'` + `sslversion => 'tlsv1_2'`, CA from the stored cert --
+  and bind the username **verbatim** (no bind DN, no search). `ldap_bind_ok()`
+  returns `ok`/`reject`/`unavailable` and fails over primary->secondary only on
+  a connection error.
+* **Provisioning.** `do_user_save` / `do_add_user` set `ldap_auth` +
+  `ldap_server`. Guards: the `PROTECTED_USER` admin is forced local; LDAP
+  requires a UPN username (`$target =~ /@/`); the chosen server must exist and be
+  enabled. A new or switched LDAP account gets a random 16-char local password
+  (`password_hash(substr(unpack('H*', secure_random_bytes(16)),0,16))`) so its
+  `pass_hash` is a valid but unusable value. `do_change_password` and the
+  self-service password form refuse `ldap_auth` accounts; the admin *Reset
+  password* control is greyed for them in both the user list and the edit page.
+* **User rename** (`do_user_rename`, `?action=user_rename`) exists mainly to turn
+  a short local name into the UPN a verbatim bind needs. It runs one transaction:
+  INSERT the row under the new name, repoint `user_sites`, `password_resets`,
+  `audit_log` and the `login_attempts` throttle key, then DELETE the old row
+  (there is no `ON UPDATE CASCADE`). `PROTECTED_USER` cannot be renamed and an
+  existing name is refused.
+* **Email uniqueness.** `db_email_conflict()` backs a uniqueness check in all
+  four email-write paths (`do_set_email`, `do_user_save`, `do_add_user`,
+  `do_change_email`): an address already held by another account is rejected
+  (admin paths name the other account; the self-service path stays
+  non-disclosing). This keeps the reset-by-email lookup unambiguous.
+* **Reset path.** `do_forgot_password` takes **two explicit fields** (`who` =
+  username, `email`), so a UPN login name is never mistaken for an address. It
+  resolves the account by name and/or by stored address (both must agree), and
+  for an `ldap_auth` account sends a help-desk notice (`reset_email_ldap_bodies`)
+  with no reset link or token.
+
+### 7.12 LDAP security invariants (quick reference)
+
+* TLS always CA-verified (`verify => 'require'`, TLS 1.2+); **no** `verify =>
+  'none'` path anywhere. Plain `ldap` only with `ENABLE_LDAP = 2`.
+* Blank/whitespace password refused **before** binding (AD treats bind + empty
+  password as an anonymous "unauthenticated bind" that returns success).
+* The protected `admin` is always local -- a directory outage cannot lock it out.
+* A directory outage is reported distinctly and is **not** counted against the
+  login throttle; a rejected bind is indistinguishable from a wrong local
+  password.
+* Passwords are never logged: the audit records the bind user, never the secret.
+
 ---
 
 ## 8. Database (PostgreSQL)
@@ -537,17 +616,32 @@ erDiagram
     USERS            ||--o{ USER_SITES      : "has (FK, ON DELETE CASCADE)"
     SITES            ||--o{ USER_SITES      : "has (FK, ON DELETE RESTRICT)"
     USERS            ||..o{ PASSWORD_RESETS : "username (logical, no FK)"
+    LDAP_SERVERS     ||..o{ USERS           : "binds via (logical, no FK, nullable)"
     DEVICE_TABLE     ||..o{ DEVICE_NOTES    : "device_id (config, no FK)"
 
     USERS {
         text username PK
-        text pass_hash
+        text pass_hash "random throwaway for LDAP accounts"
         boolean edit_device_table
         boolean admin_function
         boolean download_full_report
         boolean download_full_config
         boolean read_debug
-        text email "nullable"
+        text email "nullable, unique across accounts"
+        boolean ldap_auth "2.19 - login via LDAP"
+        integer ldap_server "2.19 - logical ref to ldap_servers.id, nullable"
+    }
+    LDAP_SERVERS {
+        integer id PK "sequence"
+        text name UK
+        boolean enabled
+        text host1 "primary"
+        integer port1
+        text host2 "secondary, nullable"
+        integer port2 "nullable"
+        text encryption "ldaps_starttls_ldap"
+        integer timeout_sec
+        text ca_cert_pem "PEM root CA, nullable"
     }
     SITES {
         integer id PK "default_0_any_site"

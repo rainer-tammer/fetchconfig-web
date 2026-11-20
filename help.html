@@ -128,6 +128,7 @@
       <ul>
         <li><a href="#help-tools">Tools overview</a></li>
         <li><a href="#help-users">Users</a></li>
+        <li><a href="#help-ldap">LDAP authentication</a></li>
         <li><a href="#help-sites">Sites</a></li>
         <li><a href="#help-audit">Audit log</a></li>
         <li><a href="#help-loginfail">Login failures</a></li>
@@ -199,9 +200,21 @@
         throttled to slow down guessing; a successful login clears the counter.</li>
     <li><strong>Forgot your password?</strong> If password-reset e-mail is
         enabled on this installation, the login page shows a
-        <strong>Forgot password?</strong> link that e-mails you a time-limited
-        reset link. If it is not enabled, ask an administrator to reset it for
-        you (see <a href="#help-users">Users</a>).</li>
+        <strong>Forgot password?</strong> link. The form asks for your
+        <em>username</em> and/or your <em>e-mail address</em> &mdash; enter
+        whichever you know &mdash; and, if it matches an account, e-mails a
+        time-limited reset link to the address on file. If it is not enabled, ask
+        an administrator to reset it for you (see <a href="#help-users">Users</a>).</li>
+    <li><strong>LDAP (directory) accounts.</strong> If your administrator has set
+        your account to authenticate against a company directory (for example
+        Active Directory), log in with your <strong>directory username</strong>
+        (usually your full <code>name@domain</code>) and your
+        <strong>directory password</strong>. If the directory cannot be reached,
+        you'll see <em>&ldquo;Login is currently not possible&rdquo;</em> &mdash;
+        this is a temporary server condition, not a wrong password; try again
+        later or contact the help desk. LDAP users change or reset their password
+        on the directory, not in this application (see
+        <a href="#help-ldap">LDAP authentication</a>).</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
@@ -221,6 +234,12 @@
     <li><strong>Default-password banner.</strong> If your account still uses the
         initial default password, a banner appears after login until you change
         it. Please pick a new password promptly.</li>
+    <li><strong>LDAP (directory) accounts.</strong> If your account
+        authenticates against a company directory, your password is managed
+        there, not here: <strong>Change your password</strong> is disabled and
+        shows a note, and a reset request e-mails you to contact the user help
+        desk rather than a reset link. Change your password through your normal
+        directory/Windows process instead.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>
@@ -254,29 +273,34 @@
         configuration entries in that table, such as the notification
         <code>email:</code> line, are not devices and are not listed.</li>
     <li>Each row shows the device's <strong>Model</strong>,
-        <strong>Site</strong>, <strong>Device-ID</strong>,
-        <strong>Hostname</strong>, <strong>Comment</strong> and a
-        <strong>Note</strong> icon. When the engine's SNMP inventory is in use, two
-        read-only columns &mdash; <strong>Vendor</strong> and <strong>HW Model</strong>
-        &mdash; also appear between Model and Site (a dash for a device with no
-        inventory yet). Narrow the list with the <strong>model</strong>
-        and <strong>site</strong> drop-downs and the <strong>Device-ID</strong>,
-        <strong>Hostname</strong> and <strong>Comment</strong> filter boxes (each
-        matches anywhere in that column). The site drop-down also offers
-        <strong>(no site)</strong>, which picks out the devices that carry no
-        <code>site=</code> tag. The filters combine;
+        <strong>Device-ID</strong>, <strong>Hostname</strong>,
+        <strong>Site</strong> and a <strong>Note</strong> icon. When the engine's
+        SNMP inventory is in use, read-only columns from the collected data also
+        appear: <strong>Vendor</strong> and <strong>HW Model</strong> between
+        Hostname and Site, and <strong>sysLocation</strong> (the device's own
+        SNMP location string) after Site (a dash for a device with no inventory
+        yet). Narrow the list with the <strong>model</strong>
+        and <strong>site</strong> drop-downs and the <strong>Device-ID</strong>
+        and <strong>Hostname</strong> filter boxes (each matches anywhere in that
+        column). The site drop-down also offers <strong>(no site)</strong>, which
+        picks out the devices that carry no <code>site=</code> tag. The filters
+        combine;
         <strong>Clear filter</strong> resets them, and your choices are
         remembered between visits.</li>
-    <li>Click the <strong>Model</strong>, <strong>Site</strong>,
-        <strong>Device-ID</strong> or <strong>Hostname</strong> header to sort by
-        that column (the <strong>Vendor</strong> and <strong>HW Model</strong>
-        columns, when shown, sort too; Comment and Note are not sortable).
+    <li>Click the <strong>Model</strong>, <strong>Device-ID</strong>,
+        <strong>Hostname</strong> or <strong>Site</strong> header to sort by
+        that column (the <strong>Vendor</strong>, <strong>HW Model</strong> and
+        <strong>sysLocation</strong> columns, when shown, sort too; the
+        <strong>Note</strong> column is not sortable).
         The <strong>Hostname</strong> column
         is smart about IP addresses: numeric addresses sort in real address order
         (so <code>10.1.1.1</code> comes after <code>2.5.7.8</code>, not before)
         and are listed before named hosts, which sort alphabetically.</li>
     <li>A <strong>Statistics</strong> panel (upper-right) shows the total device
-        count, how many match your filter, and a per-model breakdown.</li>
+        count, how many match your filter, and a per-model breakdown. Use the
+        round <strong>&#10095;</strong> button in its header to fold it into a slim
+        tab on the right edge (giving the table more room); click the tab to open
+        it again. The choice is remembered per device.</li>
     <li>For long lists, choose how many rows to show <strong>Per page</strong>
         and page through with <strong>First</strong> / <strong>Prev</strong> /
         <strong>Next</strong> / <strong>Last</strong>.</li>
@@ -792,23 +816,75 @@
   <h2>Users <span class="badge">admins only</span></h2>
   <ul>
     <li><strong>User &rarr; Users</strong> lists username, e-mail, an Admin
-        indicator and <strong>Reset password</strong> / <strong>Delete</strong>
-        buttons. Click a username to open its edit page.</li>
+        indicator, an <strong>Auth</strong> column (<code>local</code> or
+        <code>LDAP</code>), a <strong>Reset password</strong> button and a
+        <strong>Tools</strong> column with <strong>Edit</strong>,
+        <strong>Rename</strong> and <strong>Delete</strong>. Click a username (or
+        Edit) to open its edit page.</li>
     <li><strong>Add user</strong> &mdash; create an account with a username,
         password and optional e-mail. It starts with no special permissions; you
-        are taken to its edit page to set them.</li>
-    <li><strong>Edit user</strong> &mdash; one page sets the e-mail and
-        permissions (<em>Administrator</em>, which overrides the individual
-        rights; <em>edit device table</em>; <em>download full report</em>;
-        <em>download/copy unmasked config</em>), shows the assigned sites with a
-        button to the <a href="#help-sites">sites editor</a>, and resets the
-        password. Save writes everything at once; Cancel/Return warn about
-        unsaved changes.</li>
+        are taken to its edit page to set them. (When LDAP is enabled you can
+        create the account as an LDAP account; see
+        <a href="#help-ldap">LDAP authentication</a>.)</li>
+    <li><strong>Edit user</strong> &mdash; one page sets the e-mail, the
+        <em>authentication method</em> (local password or LDAP, when LDAP is
+        enabled) and permissions (<em>Administrator</em>, which overrides the
+        individual rights; <em>edit device table</em>; <em>download full
+        report</em>; <em>download/copy unmasked config</em>), shows the assigned
+        sites with a button to the <a href="#help-sites">sites editor</a>, and
+        resets the password. Save writes everything at once; Cancel/Return warn
+        about unsaved changes.</li>
+    <li><strong>Rename</strong> &mdash; changes an account's username, carrying
+        its site access, audit history and other records across. This is mainly
+        used to turn a short login name into the full <code>name@domain</code> an
+        LDAP sign-in needs. The <code>admin</code> account cannot be renamed.</li>
     <li><strong>Reset password</strong> sets a new password for a user without
-        their old one &mdash; except for <code>admin</code>, whose password is
-        only changed the normal way (with the current password).</li>
+        their old one &mdash; greyed out for <code>admin</code> (whose password is
+        only changed the normal way) and for LDAP accounts (managed on the
+        directory).</li>
     <li><strong>Delete</strong> removes an account; the <code>admin</code>
         account can never be deleted.</li>
+    <li>Each account's <strong>e-mail address must be unique</strong>; saving an
+        address already used by another account is refused.</li>
+  </ul>
+  <a class="backtop" href="#help-top">&#8593; Back to top</a>
+</section>
+
+<section class="card" id="help-ldap">
+  <h2>LDAP authentication <span class="badge">admins only</span></h2>
+  <p>fetchconfig-web can authenticate selected accounts against an external LDAP
+  directory (typically Active Directory) while others keep local passwords. The
+  feature is off unless your administrator has enabled it, and it is managed in
+  two places.</p>
+  <ul>
+    <li><strong>User &rarr; LDAP</strong> &mdash; the directory servers. Each
+        entry has a name, an <strong>Enable</strong> switch, a primary host (and
+        optional secondary), an encryption mode (<strong>LDAPS</strong> implicit
+        TLS on 636, <strong>STARTTLS</strong> on 389, or plain <strong>LDAP</strong>
+        only if your site explicitly allows it), a timeout, and &mdash; for the
+        encrypted modes &mdash; an uploaded <strong>root CA certificate</strong>.
+        The certificate is shown in an About-style dialog (subject, issuer,
+        validity, fingerprint). A <strong>Test connection</strong> button binds a
+        username and password you type and reports each step (TLS, cipher, peer
+        certificate, and the bind result in green or red) without saving anything.
+        A server that is still assigned to a user cannot be deleted.</li>
+    <li><strong>Per-user</strong> &mdash; on a user's <a href="#help-users">edit
+        page</a>, set <em>Authentication</em> to <strong>LDAP</strong> and pick the
+        server. The username must be the full directory name
+        (<code>name@domain</code>), because it is sent to the directory exactly as
+        stored; rename a short account first with <strong>Rename</strong>. The
+        built-in <code>admin</code> is always local and can never be switched to
+        LDAP, so you are never locked out if the directory is down.</li>
+    <li><strong>Security.</strong> Encrypted connections always verify the
+        directory's certificate against the stored CA; there is no
+        &ldquo;ignore certificate&rdquo; option. A blank password is rejected
+        before any attempt. An LDAP user's local password is replaced with an
+        unusable random value, so the account can only be used via the directory.</li>
+    <li><strong>For the user</strong> &mdash; an LDAP user logs in with their
+        directory credentials, cannot change their password in the app, and on a
+        reset request is told to contact the help desk. If the directory is
+        unreachable they see &ldquo;Login is currently not possible&rdquo; rather
+        than a wrong-password error.</li>
   </ul>
   <a class="backtop" href="#help-top">&#8593; Back to top</a>
 </section>

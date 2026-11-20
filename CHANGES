@@ -3,6 +3,90 @@ fetchconfig-web -- Change Log
 
 Release history for fetchconfig-web, newest version first.
 
+2.19
+====
+
+LDAP(S) authentication, plus Devices-page and user-management refinements.
+Database change: fetchconfig-web-dbsetup.pl --upgrade applies fetchconfig-web-
+dbupdate-2.19.sql (adds the ldap_servers table and the users.ldap_auth /
+users.ldap_server columns). New config key ENABLE_LDAP (default 0, off).
+Upgrading: copy the new .cgi and .css, run --upgrade; LDAP stays off until a
+directory is configured.
+
+LDAP(S) authentication
+----------------------
+
+- Selected accounts authenticate against an external directory (typically Active
+  Directory) by a verbatim bind -- the stored username (a UPN) is the bind
+  identity; no bind DN and no directory search. Other accounts keep local
+  passwords. ENABLE_LDAP = 0 off, 1 encrypted connections only, 2 also plain
+  LDAP; the Net::LDAP stack is loaded only when it is on.
+- Directory servers are managed under User -> LDAP (admins): name, enable flag,
+  primary and optional secondary host, encryption (LDAPS / STARTTLS / plain),
+  timeout, and an uploaded root CA (stored, decoded for display, used for TLS).
+  A Test connection button binds a trial credential and reports each step. A
+  server still assigned to a user cannot be deleted.
+- Login binds the entered credentials against the account's server (primary,
+  then secondary only on a connection failure). TLS is always CA-verified
+  (verify => require, TLS 1.2+); a blank password is refused before binding; a
+  rejected bind looks like a wrong local password; an unreachable directory
+  shows a distinct "login currently not possible" notice and is not counted
+  against the login throttle. The protected admin is always local.
+- Switching an account to LDAP scrubs its local password (random value), so a
+  previously known password cannot resurface; switching back to local then needs
+  a Reset password. LDAP users cannot change or reset a password in the app -- a
+  reset request e-mails a help-desk notice, never a reset link.
+
+User management
+---------------
+
+- Rename a user (short name to full UPN) in one transaction, repointing site
+  access, reset tokens, audit history and the login-throttle key.
+- E-mail addresses are unique across accounts; a duplicate is rejected.
+- The user list gains an Auth column (local / LDAP) and Edit / Rename tools;
+  Reset password is greyed for admin and LDAP accounts.
+- The Forgot password? form now takes username and/or e-mail in two explicit
+  fields, so a UPN login name is never mistaken for an address.
+
+Device list
+-----------
+
+- New sortable sysLocation column (SNMP sysLocation) after Site.
+- The Comment column and its filter were removed (the device-table editor keeps
+  comment editing).
+- The Statistics panel folds into a slim vertical tab pinned to the right
+  browser edge -- folded by default, click to open, remembered per browser;
+  open, it sits one stripe from the edge so the table uses the full width.
+
+Other
+-----
+
+- Top / Bottom navigation added to the Inventory dashboard, Debug logs and
+  Templates pages.
+- Audit-log User filter widened to fit a full UPN.
+- Template highlighter colours prompt_settle_ms and show_cmd as directives.
+- render-doc.py gains --version=V.R.M, to render standalone Markdown without
+  reading fetchconfig-web.cgi.
+
+2.18.2
+======
+
+Per-device UI text size. No database change, no configuration change.
+
+- A small A / A / A control in the titlebar, just left of the user name,
+  switches the whole UI between three fixed sizes -- small 12px / normal 14px /
+  large 16px -- for comfortable use on laptops as well as large displays. The
+  choice is remembered per device in a cookie (fcweb_fontsize, ~1 year,
+  SameSite=Lax, Secure on HTTPS); 16px (large) is the default, so existing
+  installs and large displays look unchanged and laptop users drop to 14 or 12.
+- The size is applied by page_head() on the first server paint (html{font-
+  size}), so there is no flash, and switched live by the control with no page
+  reload. The whole layout rescales from that one anchor because the UI is em-
+  relative; the dashboard donut now scales with it too (sized in em). The e-mail
+  template keeps its fixed size.
+- The cookie value is whitelisted to the three levels; an unknown or tampered
+  value falls back to normal and never reaches the stylesheet.
+
 2.18.1
 ======
 

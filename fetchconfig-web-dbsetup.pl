@@ -34,8 +34,8 @@
 #      "admin" with the password "fetchconfig" (fetchconfig-web then nags
 #      to change it on login until it's changed).
 #
-# Requires the DBI and DBD::Pg Perl modules. Written for PostgreSQL 9.2+
-# (no features newer than 9.2 are used).
+# Requires the DBI and DBD::Pg Perl modules. Written for PostgreSQL 8.2+
+# (no features newer than 8.2 are used; production target is 8.2.23).
 #
 # The connection settings are asked for interactively rather than being
 # hard-coded, since this script needs two different logins (the maintenance
@@ -273,6 +273,12 @@ my @UPDATES = (
     # privileges).
     [ '2.17', 'fetchconfig-web-dbupdate-2.17.sql',
       sub { col_exists($_[0], 'device_inventory', 'sysname') } ],
+    # 2.19 adds LDAP(S) authentication config: the ldap_servers table plus two
+    # nullable users columns (ldap_auth, ldap_server). Signature: the ldap_servers
+    # table, so a hand-migrated DB is just recorded, not re-applied. The web role
+    # needs DML on the new table and its sequence -- granted in do_grants (which
+    # knows the web user name), so the .sql itself issues no grants.
+    [ '2.19', 'fetchconfig-web-dbupdate-2.19.sql', sub { tbl_exists($_[0], 'ldap_servers') } ],
 );
 
 sub tbl_exists {
@@ -436,6 +442,16 @@ sub do_grants {
     # version. Without this the table is invisible to the web role and About shows
     # "not installed" even on a fully-upgraded database.
     $dbh->do("GRANT SELECT ON schema_migrations TO $qu") if tbl_exists($dbh, 'schema_migrations');
+    # ldap_servers (2.19): web-owned auth config. The table is created by this
+    # superuser --upgrade, so it is not owned by the web role; grant the web role
+    # full DML and sequence access here (where the web user name is known). No
+    # secret is stored -- there is no bind/service account and the CA is public.
+    if (tbl_exists($dbh, 'ldap_servers')) {
+        $dbh->do("GRANT SELECT, INSERT, UPDATE, DELETE ON ldap_servers TO $qu");
+        $dbh->do("GRANT USAGE, SELECT, UPDATE ON SEQUENCE ldap_servers_id_seq TO $qu")
+            if seq_exists($dbh, 'ldap_servers_id_seq');
+        print "Grants: ldap_servers (+sequence) DML -> web user \"$webuser\".\n";
+    }
     # Writer: SELECT + INSERT on all three (SELECT is required by the pre-9.5
     # DML), UPDATE on backup_current, UPDATE(expired, expired_at) on backup_versions.
     $dbh->do("GRANT SELECT, INSERT ON backup_current, backup_runs, backup_versions TO $qw");
@@ -700,6 +716,8 @@ if ($table_exists) {
             download_full_report BOOLEAN  NOT NULL DEFAULT FALSE,
             download_full_config BOOLEAN  NOT NULL DEFAULT FALSE,
             read_debug           BOOLEAN  NOT NULL DEFAULT FALSE,
+            ldap_auth            BOOLEAN  NOT NULL DEFAULT FALSE,
+            ldap_server          INTEGER,
             email                TEXT
         )
     }) or die_clean("CREATE TABLE failed: " . $dbh->errstr);
@@ -1094,6 +1112,12 @@ COPYRIGHT               = 2026 (c) Rainer Tammer
 # Requires the history schema -- run "fetchconfig-web-dbsetup.pl --upgrade" -- and
 # the engine's "db:" option set on the device_table "default:" line.
 ENABLE_DASHBOARD        = 0
+
+# Enable LDAP(S) authentication: 0 = off (default), 1 = encrypted only
+# (LDAPS / STARTTLS), 2 = also allow plain unencrypted LDAP. Configure the
+# directories under User -> LDAP (admin). The Perl Net::LDAP stack is loaded
+# only when this is > 0 and a connection is tested or used.
+ENABLE_LDAP             = 0
 
 # --- Credential aliases (device_table pw:) ---
 # On save, fold a verbatim credential value that matches a defined pw: alias's

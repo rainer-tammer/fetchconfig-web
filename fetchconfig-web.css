@@ -96,7 +96,21 @@
     color: #8a9199; font-style: italic; cursor: default; white-space: nowrap; }
   /* Scanned document links sit indented under their section header. */
   .menu-dropdown a.menu-doc { padding-left: 1.7em; }
-  .user-info { margin-left: auto; color: var(--color-muted); font-size: 0.9em; white-space: nowrap; }
+  /* Titlebar text-size control (A/A/A), sits just left of the user name. The
+     control itself is em-sized, so it scales with the level it sets. */
+  .fontsize-control { margin-left: auto; display: inline-flex; align-items: baseline;
+                      gap: 0.1em; margin-right: 0.9em; }
+  .fontsize-control .fs-btn { background: none; border: none; cursor: pointer;
+                      padding: 0 0.15em; line-height: 1; color: var(--color-muted);
+                      font-family: var(--font-ui); }
+  .fontsize-control .fs-btn[data-fs="small"]  { font-size: 0.8em; }
+  .fontsize-control .fs-btn[data-fs="normal"] { font-size: 1em; }
+  .fontsize-control .fs-btn[data-fs="large"]  { font-size: 1.25em; }
+  .fontsize-control .fs-btn:hover  { color: var(--color-accent); }
+  .fontsize-control .fs-btn.active { color: var(--color-accent); font-weight: 600; }
+  /* user-info no longer needs margin-left:auto -- the control carries it and the
+     two form one right-aligned cluster. */
+  .user-info { margin-left: 0; color: var(--color-muted); font-size: 0.9em; white-space: nowrap; }
   .user-info a { color: var(--color-accent); text-decoration: none; }
   .user-info a:hover { text-decoration: underline; }
   .logout-form { display: inline; margin: 0; }
@@ -130,6 +144,11 @@
      padding gives the "5% free" margins on the left and right for all of the
      page content (heading, filters, table, stats). */
   main.full { max-width: none; margin: 2em 0; padding: 0 5%; }
+  /* The Devices page trims that 5% side padding to a thin stripe (same width as
+     the gap between the table and the statistics box) so both sit close to the
+     window borders: the folded pill is pinned to the edge, and the open stats
+     box should nearly reach it too. */
+  main.full.dev-wide { padding: 0 1em; }
   /* Help page: 80% of the screen width (centred), with a sensible cap so the
      text measure stays readable on very wide monitors. */
   main.help80 { max-width: 80%; width: 80%; margin: 2em auto; padding: 0 1em; }
@@ -351,6 +370,21 @@
                      font-size: 0.95em; border: 1px solid var(--color-border); border-radius: 4px;
                      background: #fff; font-family: var(--font-ui); }
   .cmp-field .hint { font-size: 0.78em; color: var(--color-faint); margin: 0.25em 0 0; min-height: 1em; }
+  /* LDAP server form: readable, fixed field widths rather than full-bleed. The
+     text fields show ~64 characters, the encryption select ~32; both cap at the
+     viewport on a narrow screen. */
+  .ldap-field { margin: 0.7em 0; }
+  .ldap-field > label { display: inline-block; font-size: 0.82em; color: var(--color-muted);
+                        margin: 0 0.8em 0.25em 0; }
+  .ldap-field input[type="text"], .ldap-field input[type="password"],
+  .ldap-field select, .ldap-field input[type="number"] {
+                        box-sizing: border-box; padding: 0.5em 0.7em; font-size: 0.95em;
+                        border: 1px solid var(--color-border); border-radius: 4px;
+                        background: #fff; font-family: var(--font-ui); }
+  .ldap-field input[type="text"]     { width: 64ch; max-width: 100%; }
+  .ldap-field input[type="password"] { width: 32ch; max-width: 100%; }
+  .ldap-field select                 { width: 32ch; max-width: 100%; }
+  .ldap-field input[type="number"]   { width: 6em; }
   .cmp-swap { display: flex; align-items: center; justify-content: center; }
   .cmp-swap button { width: 2.4em; height: 2.4em; border-radius: 50%; border: 1px solid var(--color-accent-border);
                      background: var(--color-accent-bg); color: var(--color-accent); font-size: 1.1em; cursor: pointer; }
@@ -822,8 +856,32 @@
   .dev-stats { flex: 0 0 auto; width: max-content; max-width: 100%;
                background: #e8faf1; border: 1px solid #cdeede; border-radius: 6px;
                padding: 0.6em 1.1em 1em; }
-  .dev-stats h2 { font-size: 1.1em; margin-top: 0.4em; }
+  .dev-stats h2 { font-size: 1.1em; margin-top: 0.4em; display: flex; align-items: center; gap: 0.5em; }
   .dev-stats-table { width: auto; min-width: 12em; }
+  /* Foldable statistics: a round fold button in the panel header collapses the
+     panel to a slim vertical tab (the pill) on the right edge; clicking the pill
+     expands it again. State is remembered per device in the fcweb_statsfold
+     cookie. */
+  .stats-fold { margin-left: auto; cursor: pointer; border: 1px solid #a7d8bf;
+      background: #fff; color: #15402c; width: 1.7em; height: 1.7em; line-height: 1;
+      border-radius: 50%; font-size: 0.8em; padding: 0; }
+  .stats-fold:hover { background: #d7f3e4; }
+  .dev-stats-pill { display: none; }
+  .dev-layout.stats-folded .dev-stats { display: none; }
+  /* The pill is pinned to the right edge of the BROWSER viewport (not the content
+     box), as a vertical tab, so it stays put while the page scrolls. Right corners
+     are flattened so it sits flush against the border. */
+  .dev-layout.stats-folded .dev-stats-pill {
+      display: inline-flex; align-items: center; gap: 0.6em; cursor: pointer;
+      position: fixed; right: 0; top: 50%; transform: translateY(-50%); z-index: 50;
+      writing-mode: vertical-rl; border: none; border-radius: 999px 0 0 999px;
+      padding: 1em 0.55em; font-size: 0.9em; font-weight: 600; letter-spacing: 0.3px;
+      color: #fff; background: linear-gradient(180deg, #1a7f37, #15823a);
+      box-shadow: -1px 1px 5px rgba(22,70,45,0.3); }
+  .dev-stats-pill:hover { background: linear-gradient(180deg, #16702f, #126b30); }
+  .dev-stats-pill .sp-n { background: rgba(255,255,255,0.22); border-radius: 999px;
+      padding: 0.5em 0.15em; font-size: 0.85em; }
+  .dev-stats-pill .sp-chev { font-size: 0.8em; opacity: 0.9; }
   /* Site filter is short (site codes), so half the width of the other selects. */
   #site-filter { max-width: 9em; }
   /* Same small size/colour as the page footer (footer.app-footer). */
@@ -1017,6 +1075,10 @@
   .dash-arc-failed { stroke: var(--dash-failed); }
   .dash-arc-never  { stroke: var(--dash-never); }
   .dash-arc-track  { stroke: #eceef1; }
+  /* The donut is sized in em (7.5em == 120px at the 16px base) so it scales with
+     the titlebar text-size control; the viewBox keeps the arcs and the centred
+     text in proportion at every level. */
+  .dash-donut      { width: 7.5em; height: 7.5em; }
   .dash-donut-pct  { fill: var(--color-ink); }
   .dash-donut-cap  { fill: var(--color-faint); }
   .dash-ok  { color: var(--color-success); }

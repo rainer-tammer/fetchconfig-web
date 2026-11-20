@@ -92,12 +92,12 @@ use Algorithm::Diff qw(sdiff);
 ################################################################################
 # SECTION 2: CONSTANTS
 ################################################################################
-use constant APP_VERSION => '2.18.1';
+use constant APP_VERSION => '2.19';
 
 # APP_VERSION_INTERNAL is the TRUE shipped version, never overridden by config.
 # The About dialog shows it alongside the (possibly overridden) APP_VERSION so
 # the real build is always identifiable even when a site sets its own version.
-use constant APP_VERSION_INTERNAL => '2.18.1';
+use constant APP_VERSION_INTERNAL => '2.19';
 
 # Default copyright used in the About dialog when the config file sets no
 # COPYRIGHT key.
@@ -239,6 +239,7 @@ my ($DEVICE_TABLE,
     $CAPTURE_MAX_BYTES,
     $SHOW_RENDER_TIME,
     $ENABLE_DASHBOARD,
+    $ENABLE_LDAP,
     $EMAIL,
     $SMTP_HOST,
     $SMTP_PORT,
@@ -329,6 +330,7 @@ my @CFG_KEYS = (
     [ 'TRUST_FORWARDED_PROTO',  'bool',      '0',                                      '0 | 1 (trust X-Forwarded-Proto from a reverse proxy)' ],
     [ 'SHOW_RENDER_TIME',       'bool',      '0',                                      '0 | 1' ],
     [ 'ENABLE_DASHBOARD',       'bool',      '0',                                      '0 | 1 (show the Backup Dashboard; needs the history schema + engine db:)' ],
+    [ 'ENABLE_LDAP',            'int',       '0',                                      '0 | 1 | 2 (0 off, 1 encrypted LDAPS/STARTTLS only, 2 also allow plain LDAP)', 0, 2 ],
     [ 'ALIAS_REPLACE_ON_SAVE',  'enum',      'off',                                    'off | secrets | users | all' ],
     [ 'WEB_DIR',                'path_opt',  '/www/virtual/fetchconfig/htdocs',        'absolute filesystem path' ],
     [ 'BASE_URL',               'url',       '/',                                      'absolute URL path' ],
@@ -603,6 +605,11 @@ sub read_config {
     # option; with it 1 but the schema/data absent, the dashboard shows guidance.
     $ENABLE_DASHBOARD = (defined $kv->{ENABLE_DASHBOARD} && $kv->{ENABLE_DASHBOARD} =~ /^[01]$/)
                      ? $kv->{ENABLE_DASHBOARD} : 0;
+    # LDAP(S) authentication master switch: 0 off, 1 encrypted-only (LDAPS /
+    # STARTTLS), 2 also permit plain unencrypted LDAP. The Net::LDAP stack is
+    # lazy-loaded only when this is > 0 and a connection is actually tested/used.
+    $ENABLE_LDAP = (defined $kv->{ENABLE_LDAP} && $kv->{ENABLE_LDAP} =~ /^[012]$/)
+                     ? $kv->{ENABLE_LDAP} : 0;
     # On save, fold a verbatim credential value that matches a defined pw: alias's
     # value back into the "$Alias" reference. off (default) = never; secrets =
     # pass-kind fields only; users = user-kind fields only; all = both. Reading an
@@ -1454,9 +1461,13 @@ my %STATE_CHANGING = map { $_ => 1 } qw(
   add_site
   edit_site
   delete_site
+  ldap_save
+  ldap_delete
+  ldap_test
   set_user_sites
   set_email
   user_save
+  user_rename
   note_save
   note_delete
   notes_orphan_delete
@@ -1585,6 +1596,10 @@ sub main {
             show_user_edit($user);
         } elsif ($action eq 'user_save') {
             do_user_save($user);
+        } elsif ($action eq 'user_rename_form') {
+            show_user_rename_form($user);
+        } elsif ($action eq 'user_rename') {
+            do_user_rename($user);
         } elsif ($action eq 'change_password_form') {
             show_change_password_form($user);
         } elsif ($action eq 'change_password') {
@@ -1611,6 +1626,16 @@ sub main {
             do_edit_site($user);
         } elsif ($action eq 'delete_site') {
             do_delete_site($user);
+        } elsif ($action eq 'ldap') {
+            show_ldap_page($user);
+        } elsif ($action eq 'ldap_edit') {
+            show_ldap_edit($user);
+        } elsif ($action eq 'ldap_save') {
+            do_ldap_save($user);
+        } elsif ($action eq 'ldap_delete') {
+            do_ldap_delete($user);
+        } elsif ($action eq 'ldap_test') {
+            do_ldap_test($user);
         } elsif ($action eq 'user_sites_form') {
             show_user_sites_form($user);
         } elsif ($action eq 'set_user_sites') {
@@ -2277,8 +2302,8 @@ sub do_external_change_ack {
 sub db_get_user {
     my ($dbh, $username) = @_;
     my $row = $dbh->selectrow_hashref(
-        'SELECT username, pass_hash, edit_device_table, admin_function, '
-      . 'download_full_report, download_full_config, read_debug, email FROM users WHERE username = ?',
+        'SELECT username, pass_hash, edit_device_table, admin_function, download_full_report, '
+      . 'download_full_config, read_debug, email, ldap_auth, ldap_server FROM users WHERE username = ?',
         undef, $username);
     return $row;
 }
@@ -2574,6 +2599,21 @@ sub db_user_by_email {
 }
 
 ################################################################################
+# db_email_conflict
+#
+# Returns the OTHER account already using $email (case-insensitive), or undef.
+# $self (optional) is the account being saved -- it is not a conflict with
+# itself. Used to keep email addresses unique across users (the password-reset
+# "by email" lookup assumes one owner per address).
+################################################################################
+sub db_email_conflict {
+    my ($dbh, $email, $self) = @_;
+    return undef unless defined $email && $email ne '';
+    my $owner = db_user_by_email($dbh, $email);
+    return (defined $owner && (!defined $self || $owner ne $self)) ? $owner : undef;
+}
+
+################################################################################
 # send_mail
 #
 # --- D: email sending ------------------------------------------------------
@@ -2785,7 +2825,7 @@ sub db_all_users {
     my ($dbh) = @_;
     my $rows = $dbh->selectall_arrayref(
         'SELECT username, pass_hash, edit_device_table, admin_function, '
-      . 'download_full_report, download_full_config, read_debug, email FROM users ORDER BY username',
+      . 'download_full_report, download_full_config, read_debug, email, ldap_auth FROM users ORDER BY username',
         { Slice => {} });
     return $rows || [];
 }
@@ -2948,7 +2988,7 @@ our %MODEL_DEFAULTS;
 # Populated once per editor render by device_inventory_summary_init(). The
 # columns are shown only when the inventory schema is present and readable
 # ($DEVICE_INVENTORY_AVAILABLE); otherwise the editor looks exactly as before.
-our %DEVICE_INVENTORY;              # dev_id => { vendor => <str>, model => <str> }
+our %DEVICE_INVENTORY;              # dev_id => { vendor => <str>, model => <str>, syslocation => <str> }
 our $DEVICE_INVENTORY_AVAILABLE = 0;
 
 ################################################################################
@@ -2991,18 +3031,25 @@ sub device_inventory_summary_init {
     my $dbh = db_connect() or return;
     # Fast pg_catalog probe (the SQL-standard catalog views are ~340ms on PG 8.2).
     unless (db_table_exists($dbh, 'device_inventory')) { $dbh->disconnect; return; }
+    # syslocation is a 2.17 column; select it only when present so the query
+    # still works against a 2.15/2.16 inventory schema (a 42703 would otherwise
+    # fail the whole device list). The column-probe hits pg_attribute only.
+    my $has_sysloc = db_column_exists($dbh, 'device_inventory', 'syslocation');
     my $rows = $dbh->selectall_arrayref(
-        q{SELECT dev_id, vendor, vendor_raw, model FROM device_inventory});
+        q{SELECT dev_id, vendor, vendor_raw, model}
+      . ($has_sysloc ? q{, syslocation} : q{, NULL})
+      . q{ FROM device_inventory});
     if (!$rows && $dbh->err) { $dbh->disconnect; return; }   # missing SELECT grant
     $DEVICE_INVENTORY_AVAILABLE = 1;
     for my $row (@{ $rows || [] }) {
-        my ($did, $vendor, $vraw, $model) = @$row;
+        my ($did, $vendor, $vraw, $model, $sysloc) = @$row;
         next unless defined $did;
         my $v = (defined $vendor && $vendor ne '') ? $vendor
               : (defined $vraw   && $vraw   ne '') ? $vraw : '';
         $DEVICE_INVENTORY{$did} = {
-            vendor => $v,
-            model  => (defined $model ? $model : ''),
+            vendor      => $v,
+            model       => (defined $model  ? $model  : ''),
+            syslocation => (defined $sysloc ? $sysloc : ''),
         };
     }
     $dbh->disconnect;
@@ -4804,7 +4851,7 @@ sub dash_donut {
         $off += $len;
     }
     my $pct = sprintf('%d%%', int(100 * $fresh / $total + 0.5));
-    return qq{<svg width="120" height="120" viewBox="0 0 128 128" role="img" aria-label="status breakdown">}
+    return qq{<svg class="dash-donut" viewBox="0 0 128 128" role="img" aria-label="status breakdown">}
          . qq{<circle class="dash-arc-track" cx="64" cy="64" r="52" fill="none" stroke-width="20"></circle>}
          . qq{<g transform="rotate(-90 64 64)">$circles</g>}
          . qq{<text class="dash-donut-pct" x="64" y="60" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="21">$pct</text>}
@@ -6038,11 +6085,38 @@ sub do_login {
     # V3: always pay exactly one password-verify cost, so a nonexistent user
     # is not distinguishable from a wrong password by response time.
     my $ok;
-    if ($u) {
+    my $ldap_unavailable = 0;
+    if ($u && $u->{ldap_auth} && $username ne $PROTECTED_USER) {
+        # LDAP account: authenticate by binding to its directory. The stored
+        # pass_hash is a random throwaway and is never consulted. A blank
+        # password is refused inside ldap_bind_ok (anonymous-bind trap). The
+        # protected admin is pinned local above, so a directory outage (or a
+        # misconfigured server link) can never lock the admin out.
+        my $srv = defined $u->{ldap_server} ? ldap_server_by_id($dbh, $u->{ldap_server}) : undef;
+        my $st  = ldap_bind_ok($srv, $username, $password);
+        if    ($st eq 'ok')     { $ok = 1; }
+        elsif ($st eq 'reject') { $ok = 0; }           # wrong credentials
+        else                    { $ok = 0; $ldap_unavailable = 1; }   # directory unreachable
+    } elsif ($u) {
         $ok = verify_password($password, $u->{pass_hash});
     } else {
         verify_password($password, dummy_password_hash());
         $ok = 0;
+    }
+
+    # Directory outage: none of the account's configured LDAP servers could be
+    # reached or verified, so the login cannot be decided. Tell the user it is
+    # temporarily impossible (distinct from a wrong password) and do NOT count a
+    # failure -- an outage is not the user's fault and must not throttle them out.
+    if ($ldap_unavailable) {
+        $dbh->disconnect;
+        audit(action => 'login_failed', username => $username,
+              detail => 'login not possible: no configured LDAP server could be reached');
+        login_jitter();
+        show_login_form('Login is currently not possible: the authentication '
+            . 'directory cannot be reached. Please try again later, or contact '
+            . 'the user help desk if the problem persists.');
+        return;
     }
 
     # Account-soft throttle: if this username is in cooldown, add delay even
@@ -6055,7 +6129,7 @@ sub do_login {
     # plaintext and store it, so legacy $apr1$ hashes migrate to bcrypt on
     # next login. Best-effort -- a failure here never blocks the login. Done
     # while we still hold $dbh, before disconnecting.
-    if ($ok && bcrypt_available() && !hash_is_preferred($u->{pass_hash})) {
+    if ($ok && !$u->{ldap_auth} && bcrypt_available() && !hash_is_preferred($u->{pass_hash})) {
         eval {
             my $new = password_hash($password);
             db_set_password($dbh, $username, $new) if $new ne '';
@@ -6078,13 +6152,16 @@ sub do_login {
         # so a "change it" banner shows until they do. The message differs
         # for admin vs. everyone else (see the banner in page_head()).
         my $pw_warn = '';
-        if ($password eq $DEFAULT_PASSWORD) {
+        if (!$u->{ldap_auth} && $password eq $DEFAULT_PASSWORD) {
+            # LDAP accounts carry no local password, so the default-password
+            # banner never applies to them (their secret lives in the directory).
             $pw_warn = ($username eq $PROTECTED_USER) ? 'admin' : 'other';
         }
         # Reap stale session files left by abandoned cookies. Throttled to at
         # most once per SESSION_TTL inside sweep_sessions(), so logins stay fast.
         sweep_sessions();
-        audit(action => 'login', username => $username, detail => 'login succeeded');
+        audit(action => 'login', username => $username,
+              detail => 'login succeeded' . ($u->{ldap_auth} ? ' (LDAP bind)' : ''));
         audit_check_device_table_change($username);   # tripwire: out-of-app edit
         my $sid = create_session($username, $pw_warn);
         my $cookie = session_cookie($sid);
@@ -6267,14 +6344,24 @@ sub show_forgot_password {
         print qq{</div>\n}; print page_foot();
         return;
     }
-    print qq{<p class="muted">Enter your username or email address. If an account }
-        . qq{matches, a reset link will be emailed to the address on file.</p><br>\n};
+    print qq{<p class="muted">Enter <em>either</em> your username <em>or</em> the email }
+        . qq{address on file (whichever you know). If it matches an account, a reset link }
+        . qq{(or, for an AD/LDAP account, a help-desk notice) will be emailed to the }
+        . qq{address on file. If you fill in both, they must name the same account.</p><br>\n};
+    # Echo back whatever was submitted so a mistyped pair is not lost, with the
+    # values HTML-encoded via esc() (the same hand-built pattern every other
+    # input in this app uses). esc() neutralises quotes/angle brackets, so a
+    # value like a UPN or a plus-addressed email renders verbatim and cannot
+    # break out of the value attribute.
+    my $pre_who   = $cgi->param('who');   $pre_who   = defined $pre_who   ? $pre_who   : '';
+    my $pre_email = $cgi->param('email'); $pre_email = defined $pre_email ? $pre_email : '';
     print $cgi->start_form(-method => 'POST', -action => script_url());
     print qq{<input type="hidden" name="action" value="forgot_password">\n};
     print csrf_field();
-    print qq{<label>Username or email<br>};
-    print $cgi->textfield(-name => 'who', -autocomplete => 'off');
-    print qq{</label><br>\n};
+    print qq{<label>Username<br><input type="text" name="who" autocomplete="off" value="}
+        . esc($pre_who) . qq{"></label><br>\n};
+    print qq{<label>Email address<br><input type="text" name="email" autocomplete="off" value="}
+        . esc($pre_email) . qq{"></label><br>\n};
     print qq{<button type="submit" class="btn">Send reset link</button>\n};
     print $cgi->end_form;
     print qq{</div>\n};                             # .login-box
@@ -6301,6 +6388,11 @@ sub do_forgot_password {
     }
     my $who = $cgi->param('who') // '';
     $who =~ s/^\s+|\s+$//g;
+    # The email address on file, supplied as a second factor. Normalised the same
+    # way it was stored, so the comparison below is case-insensitive and tolerant
+    # of surrounding whitespace. An undef here means "syntactically invalid" --
+    # treated the same as a non-match (the uniform response hides which it was).
+    my $who_email = normalize_email(scalar $cgi->param('email'));
 
     # V2: every request takes at least RESET_FLOOR_SECS from here to the
     # response, whether or not the account exists or mail was sent, so timing
@@ -6309,7 +6401,12 @@ sub do_forgot_password {
     my $t0 = [Time::HiRes::gettimeofday()];
 
     my $dbh = db_connect();
-    if ($dbh && $who ne '') {
+    # Proceed when EITHER identifier field carries something: the user may give a
+    # username, an email address, or both. (The old single-field form put both in
+    # $who, so this used to gate on $who alone -- which silently skipped an
+    # email-only request.)
+    my $has_input = ($who ne '' || (defined $who_email && $who_email ne '')) ? 1 : 0;
+    if ($dbh && $has_input) {
         my $ip = $ENV{REMOTE_ADDR} // '';
         # V2: count EVERY request against the IP -- existing account or not --
         # so the throttle can't be used as an oracle for which names exist.
@@ -6324,20 +6421,59 @@ sub do_forgot_password {
                   detail => "reset NOT sent: requests from $ip are throttled "
                           . "(too many recent login/reset attempts)");
         } else {
+            # Fail-safe account selection. The two fields are type-explicit, so
+            # there is no guessing whether an entry is a name or an address:
+            #   * username field -> look the account up by name;
+            #   * email field    -> look the account up by stored address;
+            #   * both filled    -> they must resolve to the SAME account.
+            # The requester may supply whichever they know; a mismatch, or a value
+            # that resolves to nothing, yields the same uniform "if an account
+            # matches..." response and reveals nothing.
+            my $by_name  = (valid_username($who) && db_user_exists($dbh, $who)) ? $who : undef;
+            my $by_email = (defined $who_email && $who_email ne '')
+                         ? db_user_by_email($dbh, $who_email) : undef;
+
             my $username;
-            if ($who =~ /@/) {
-                my $em = normalize_email($who);
-                $username = defined $em && $em ne '' ? db_user_by_email($dbh, $em) : undef;
-            } elsif (valid_id($who) && db_user_exists($dbh, $who)) {
-                $username = $who;
+            if (defined $by_name) {
+                # The username selects the account. If an email was ALSO supplied
+                # it must be the address on file for THIS account -- compared as
+                # the stored address vs the entered address (both normalised), not
+                # as two username strings (which could differ in case/provenance).
+                if (defined $who_email && $who_email ne '') {
+                    my $cand    = db_get_user($dbh, $by_name);
+                    my $on_file = $cand ? normalize_email($cand->{email}) : undef;
+                    $username = (defined $on_file && $on_file eq $who_email) ? $by_name : undef;
+                } else {
+                    $username = $by_name;
+                }
+            } elsif (defined $by_email) {
+                $username = $by_email;   # email only
             }
+
             if (!defined $username) {
                 audit(dbh => $dbh, action => 'reset_requested',
                       detail => "reset NOT sent: no account matches the request");
             } else {
                 my $u = db_get_user($dbh, $username);
                 my $addr = $u ? ($u->{email} // '') : '';
-                if ($addr eq '') {
+                if ($u && $u->{ldap_auth}) {
+                    # LDAP account: never send a reset link (the password lives in
+                    # AD). Email a help-desk notice instead, so the uniform browser
+                    # response still reveals nothing about the account.
+                    if ($addr eq '') {
+                        audit(dbh => $dbh, action => 'reset_requested', username => $username,
+                              detail => 'reset NOT sent: LDAP account, no email address on file');
+                    } else {
+                        my ($lt, $lh) = reset_email_ldap_bodies($username);
+                        my ($sent, $err) = send_mail(
+                            to => $addr,
+                            subject => 'fetchconfig-web password reset',
+                            body => $lt, html => $lh);
+                        audit(dbh => $dbh, action => 'reset_requested', username => $username,
+                              detail => ($sent ? 'LDAP account: help-desk notice emailed (no reset link)'
+                                               : 'LDAP help-desk notice NOT emailed: ' . ($err // 'error')));
+                    }
+                } elsif ($addr eq '') {
                     audit(dbh => $dbh, action => 'reset_requested', username => $username,
                           detail => 'reset NOT sent: no email address on file for this account');
                 } else {
@@ -6520,7 +6656,7 @@ sub show_device_list {
     my $inv_cols = $DEVICE_INVENTORY_AVAILABLE;
 
     print std_header(-type => 'text/html', -charset => 'UTF-8');
-    print page_head('Devices', $user, 'full');
+    print page_head('Devices', $user, 'full dev-wide');
 
     if ($err) {
         print qq{<p class="error">} . esc($err) . qq{</p>\n};
@@ -6544,7 +6680,9 @@ sub show_device_list {
         my $site_desc = $sdbh ? site_name_map($sdbh) : {};
         $sdbh->disconnect if $sdbh;
 
-        print qq{<div class="dev-layout">\n};
+        # Default state is FOLDED (class applied server-side to avoid a flash of
+        # the open panel); the fold script expands it only when the cookie says so.
+        print qq{<div class="dev-layout stats-folded">\n};
         print qq{<div class="dev-main">\n};
         print qq{<div class="tool-section-blue" id="devices-section">\n};
         print qq{<h2 class="tool-section-title">Devices</h2>\n};
@@ -6569,8 +6707,6 @@ sub show_device_list {
         }
         print qq{<option value="\0none">(no site)</option>\n};
         print qq{</select>\n};
-        print qq{<input type="text" id="comment-filter" class="filter-box" }
-            . qq{placeholder="Filter comment&hellip;" autocomplete="off">\n};
         print qq{<button type="button" id="clear-filter" class="btn">Clear filter</button>\n};
         print qq{<label class="page-size-label">Per page }
             . qq{<select id="dev-page-size" class="filter-select">}
@@ -6607,7 +6743,9 @@ sub show_device_list {
                 . qq{<th class="sortable" data-key="hwmodel">HW Model<span class="sort-ind"></span></th>}
                 : '')
             . qq{<th class="sortable" data-key="site">Site<span class="sort-ind"></span></th>}
-            . qq{<th>Comment</th>}
+            . ($inv_cols
+                ? qq{<th class="sortable" data-key="syslocation">sysLocation<span class="sort-ind"></span></th>}
+                : '')
             . qq{<th>Note</th>}
             . qq{</tr>\n};
         my $_ndbh = db_connect();
@@ -6619,15 +6757,21 @@ sub show_device_list {
             # Vendor + HW model from the inventory map (blank when no inventory
             # row for this device); shown and sortable only when $inv_cols.
             my $iv      = $inv_cols ? ($DEVICE_INVENTORY{$d->{id}} || {}) : {};
-            my $ivendor = defined $iv->{vendor} ? $iv->{vendor} : '';
-            my $ihw     = defined $iv->{model}  ? $iv->{model}  : '';
+            my $ivendor = defined $iv->{vendor}      ? $iv->{vendor}      : '';
+            my $ihw     = defined $iv->{model}       ? $iv->{model}       : '';
+            my $isysloc = defined $iv->{syslocation} ? $iv->{syslocation} : '';
             my $inv_data = $inv_cols
                 ? qq{data-vendor="} . esc(lc $ivendor) . qq{" }
                 . qq{data-hwmodel="} . esc(lc $ihw) . qq{" }
+                . qq{data-syslocation="} . esc(lc $isysloc) . qq{" }
                 : '';
             my $inv_td = $inv_cols
                 ? qq{<td>} . ($ivendor ne '' ? esc($ivendor) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
                 . qq{<td>} . ($ihw ne '' ? esc($ihw) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
+                : '';
+            # sysLocation cell -- placed between Site and Comment (only with inventory).
+            my $sysloc_td = $inv_cols
+                ? qq{<td>} . ($isysloc ne '' ? esc($isysloc) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
                 : '';
             # data-host = lowercased host for the substring filter;
             # data-host-key = a sort key that orders IPv4 numerically first,
@@ -6644,7 +6788,7 @@ sub show_device_list {
                 . qq{<td>} . esc($d->{host}) . qq{</td>}
                 . $inv_td
                 . qq{<td>} . ($site ne '' ? esc($site) : qq{<span class="muted">&mdash;</span>}) . qq{</td>}
-                . qq{<td>} . esc($d->{comment}) . qq{</td>}
+                . $sysloc_td
                 . qq{<td class="note-cell">} . note_icon_button($d->{id}, $notes_present->{$d->{id}}) . qq{</td>}
                 . qq{</tr>\n};
         }
@@ -6662,9 +6806,11 @@ sub show_device_list {
         print qq{</div>\n};   # .tool-section-blue
         print qq{</div>\n};   # .dev-main
 
-        # Statistics panel (upper-right).
+        # Statistics panel (upper-right). Foldable: the round button in the header
+        # collapses it to a slim vertical tab (#stats-pill) on the right edge.
         print qq{<div class="dev-stats">\n};
-        print qq{<h2>Statistics</h2>\n};
+        print qq{<h2>Statistics <button type="button" id="stats-fold" class="stats-fold" }
+            . qq{title="Collapse to a tab" aria-label="Collapse statistics">&#10095;</button></h2>\n};
         print qq{<p><strong>} . esc($total) . qq{</strong> device}
             . ($total == 1 ? '' : 's') . qq{ total.</p>\n};
         print qq{<p><strong id="dev-filtered-count">} . esc($total) . qq{</strong> }
@@ -6687,8 +6833,19 @@ sub show_device_list {
             if $SHOW_RENDER_TIME;
         print qq{</div>\n};   # .dev-stats
 
+        # Collapsed state: a slim vertical tab on the right edge, shown only when
+        # .dev-layout carries the "stats-folded" class (set from the cookie). It
+        # keeps the total device count visible at a glance.
+        print qq{<button type="button" id="stats-pill" class="dev-stats-pill" }
+            . qq{title="Show statistics" aria-label="Show statistics">}
+            . qq{<span class="sp-txt">Statistics</span>}
+            . qq{<span class="sp-n">} . esc($total) . qq{</span>}
+            . qq{<span class="sp-chev">&#10094;</span>}
+            . qq{</button>\n};
+
         print qq{</div>\n};   # .dev-layout
 
+        print stats_fold_script();
         print device_filter_script();
         print top_bottom_nav();
     }
@@ -6696,14 +6853,45 @@ sub show_device_list {
 }
 
 ################################################################################
-# device_filter_script
+# stats_fold_script
 #
-# Client-side substring filter for the device list. Runs entirely in the
-# browser against the already-rendered rows -- no round trip to the server
-# or to fetchconfig.pl, since the full device list is already on the page.
-# Matching is case-insensitive and matches anywhere in the Device-ID text.
+# Fold/expand the Devices "Statistics" panel. Collapsed, .dev-layout gets the
+# "stats-folded" class (CSS hides the panel and shows the vertical pill tab); the
+# choice is remembered per device in the fcweb_statsfold cookie. Pure client-side.
 #
 # Parameters: none
+################################################################################
+sub stats_fold_script {
+    return <<'JS';
+<script>
+(function () {
+    var layout  = document.querySelector('.dev-layout');
+    if (!layout) return;
+    var foldBtn = document.getElementById('stats-fold');
+    var pill    = document.getElementById('stats-pill');
+    var CK = 'fcweb_statsfold';
+    function setCookie(v) {
+        try { document.cookie = CK + '=' + v + ';path=/;max-age=31536000;SameSite=Lax'; } catch (e) {}
+    }
+    function getCookie() {
+        var m = document.cookie.match(/(?:^|;\s*)fcweb_statsfold=([^;]*)/);
+        return m ? m[1] : '';
+    }
+    function setFolded(f) { layout.classList.toggle('stats-folded', f); setCookie(f ? '1' : '0'); }
+    // Default is folded (the class is already on the layout server-side); only an
+    // explicit "0" cookie -- the user chose to expand -- opens it. No cookie write.
+    if (getCookie() === '0') layout.classList.remove('stats-folded');
+    if (foldBtn) foldBtn.addEventListener('click', function () { setFolded(true); });
+    if (pill)    pill.addEventListener('click',    function () { setFolded(false); });
+})();
+</script>
+JS
+}
+
+################################################################################
+# device_filter_script
+#
+# Client-side substring filter for the device list (see the long comment below).
 ################################################################################
 sub device_filter_script {
     return <<'JS';
@@ -6713,7 +6901,6 @@ sub device_filter_script {
     var siteInput    = document.getElementById('site-filter');     // <select>
     var devInput     = document.getElementById('dev-filter');
     var hostInput    = document.getElementById('host-filter');
-    var commentInput = document.getElementById('comment-filter');
     var clearBtn     = document.getElementById('clear-filter');
     var pageSizeSel  = document.getElementById('dev-page-size');
     var table        = document.getElementById('dev-table');
@@ -6739,7 +6926,7 @@ sub device_filter_script {
         var mv = modelInput ? modelInput.value : '';
         var dv = devInput ? devInput.value : '';
         var hv = hostInput ? hostInput.value : '';
-        var cv = commentInput ? commentInput.value : '';
+        var cv = '';                         // comment filter removed; slot kept for cookie compat
         var ps = pageSizeSel ? pageSizeSel.value : '100';
         var sv = siteInput ? siteInput.value : '';
         setCookie([mv, dv, hv, cv, ps, sv].map(encodeURIComponent).join('|'));
@@ -6760,7 +6947,6 @@ sub device_filter_script {
         }
         if (devInput) devInput.value = dv;
         if (hostInput) hostInput.value = hv;
-        if (commentInput) commentInput.value = cv;
         if (pageSizeSel && ps !== '') {
             for (var j = 0; j < pageSizeSel.options.length; j++) {
                 if (pageSizeSel.options[j].value === ps) { pageSizeSel.value = ps; break; }
@@ -6775,23 +6961,20 @@ sub device_filter_script {
     }
 
     // A row matches the current filter? Model = exact (empty = all);
-    // device, host & comment = case-insensitive substring. Combined with AND.
+    // device & host = case-insensitive substring. Combined with AND.
     function matches(row) {
         var mq = modelInput ? modelInput.value : '';
         var sq = siteInput ? siteInput.value : '';
         var dq = devInput ? devInput.value.trim().toLowerCase() : '';
         var hq = hostInput ? hostInput.value.trim().toLowerCase() : '';
-        var cq = commentInput ? commentInput.value.trim().toLowerCase() : '';
         var model   = row.getAttribute('data-model') || '';
         var site    = row.getAttribute('data-site') || '';
         var dev     = row.getAttribute('data-dev') || '';
         var host    = row.getAttribute('data-host') || '';
-        var comment = row.getAttribute('data-comment') || '';
         return (mq === '' || model === mq) &&
                (sq === '' || site === sq) &&
                (dq === '' || dev.indexOf(dq) !== -1) &&
-               (hq === '' || host.indexOf(hq) !== -1) &&
-               (cq === '' || comment.indexOf(cq) !== -1);
+               (hq === '' || host.indexOf(hq) !== -1);
     }
 
     // Single source of truth: filter, then show only the current page of the
@@ -6850,7 +7033,6 @@ sub device_filter_script {
     if (siteInput)    siteInput.addEventListener('change', onFilterChange);
     if (devInput)     devInput.addEventListener('input', onFilterChange);
     if (hostInput)    hostInput.addEventListener('input', onFilterChange);
-    if (commentInput) commentInput.addEventListener('input', onFilterChange);
     if (pageSizeSel)  pageSizeSel.addEventListener('change', onFilterChange);
     if (clearBtn) {
         clearBtn.addEventListener('click', function () {
@@ -6858,7 +7040,6 @@ sub device_filter_script {
             if (siteInput)    siteInput.value = '';
             if (devInput)     devInput.value = '';
             if (hostInput)    hostInput.value = '';
-            if (commentInput) commentInput.value = '';
             syncSiteTitle();
             page = 0;
             render();
@@ -7770,6 +7951,7 @@ sub show_tool_debug {
         . qq{<p><button type="submit" class="btn btn-danger">Delete all debug logs</button></p>}
         . qq{</form>\n};
     print qq{</div>\n};
+    print top_bottom_nav();
     print page_foot();
 }
 
@@ -8899,6 +9081,7 @@ sub show_inventory_dashboard {
 </script>
 JS
 
+    print top_bottom_nav();
     print page_foot();
 }
 
@@ -10190,8 +10373,8 @@ sub highlight_template {
     my %CLASS = (
         # directives (teal) -- only when first word on the line (see below)
         (map { $_ => 'tdir' } qw(transport banner_timeout fetch_timeout
-            fetch_delay max_visits strip_ansi prompt_head
-            prompt_tail ssh_extra_opts capture_from skip_first interrupt ignore)),
+            fetch_delay max_visits prompt_settle_ms strip_ansi prompt_head
+            prompt_tail ssh_extra_opts capture_from show_cmd skip_first interrupt ignore)),
         # state keywords (blue)
         state => 'kw',
         state_login_ssh => 'kw', state_password_ssh => 'kw',
@@ -14077,7 +14260,7 @@ sub show_tool_diskspace {
 sub audit_filter_sql {
     my @w; my @b;
     my $p = sub { my $v = $cgi->param($_[0]); return (defined $v && $v ne '') ? $v : undef; };
-    if (defined(my $u = $p->('f_user')))   { push @w, 'username = ?';    push @b, $u; }
+    if (defined(my $u = $p->('f_user')))   { push @w, 'username ILIKE ?'; push @b, '%' . $u . '%'; }   # substring, case-insensitive
     if (defined(my $a = $p->('f_action'))) { push @w, 'action = ?';      push @b, $a; }
     if (defined(my $o = $p->('f_object'))) { push @w, 'object_id = ?';   push @b, $o; }
     if (defined(my $t = $p->('f_text'))) {
@@ -14920,7 +15103,7 @@ sub show_tool_audit {
     my $su = script_url();
     print <<"HTML";
 <div class="audit-filters">
-  <label>User <input type="text" id="af-user" size="10"></label>
+  <label>User <input type="text" id="af-user" size="32"></label>
   <label>Action <select id="af-action"><option value="">(any)</option>$action_opts</select></label>
   <label>Object <input type="text" id="af-object" size="12"></label>
   <label>Search <input type="text" id="af-text" size="14"></label>
@@ -15432,7 +15615,7 @@ sub show_reports {
             $d->disconnect if $d; $m;
         };
         print qq{<table class="list">\n}
-            . qq{<tr><th>Report</th><th>Date / time</th><th>Size</th><th></th></tr>\n};
+            . qq{<tr><th>Report</th><th>Date / time</th><th>Size</th><th>Tools</th></tr>\n};
         for my $r (@$reports) {
             my $n    = $r->{name};
             my $when = $r->{stamp} ne ''
@@ -16195,7 +16378,7 @@ sub show_view_templates {
         print template_t_raw_html($t);
     } else {
         print qq{<table class="list tpl-table">\n<tr><th>Template</th><th>Full Template Name</th>}
-            . qq{<th>Size</th><th>Modified</th><th>Used</th><th>Orig</th><th></th></tr>\n};
+            . qq{<th>Size</th><th>Modified</th><th>Used</th><th>Orig</th><th>Tools</th></tr>\n};
         for my $f (@$files) {
             my $view = esc(script_url() . '?action=view_template&path='
                          . CGI::escape($f->{path}));
@@ -16303,6 +16486,7 @@ sub show_view_templates {
         . qq{</p>\n}
         if $SHOW_RENDER_TIME;
     print qq{</div>\n};   # .tool-section
+    print top_bottom_nav();
     print page_foot();
 }
 
@@ -19057,6 +19241,630 @@ sub do_delete_site {
 }
 
 ################################################################################
+# ===========================================================================
+# LDAP(S) authentication -- server management (admin, step 1). Configure the
+# connections only; wiring a user to a connection is a later step. Gated on
+# admin_function; every write is POST+CSRF-guarded and audited. No bind/service
+# account is stored (authentication is a verbatim user bind), and the uploaded
+# root CA is a public certificate. The Net::LDAP stack and Crypt::OpenSSL::X509
+# are lazy-loaded only when a connection is tested or a CA is decoded.
+# ===========================================================================
+################################################################################
+
+# Lazy module probes (mirror bcrypt_available), cached. The base app needs none
+# of the LDAP stack unless an admin tests a connection or views a CA.
+{
+    my $p;
+    sub ldaps_available {
+        return $p if defined $p;
+        $p = eval { require Net::LDAP; require Net::LDAPS; require IO::Socket::SSL; 1 } ? 1 : 0;
+        return $p;
+    }
+}
+{
+    my $p;
+    sub x509_available {
+        return $p if defined $p;
+        $p = eval { require Crypt::OpenSSL::X509; 1 } ? 1 : 0;
+        return $p;
+    }
+}
+
+sub ldap_enc_ok      { my $e = shift; return (defined $e && ($e eq 'ldap' || $e eq 'ldaps' || $e eq 'starttls')); }
+sub ldap_default_port { my $e = shift // ''; return $e eq 'ldaps' ? 636 : 389; }
+
+sub ldap_servers_all {
+    my ($dbh) = @_;
+    return $dbh->selectall_arrayref(
+        'SELECT id, name, enabled, host1, port1, host2, port2, encryption, timeout_sec, '
+      . 'ca_cert_pem, created_at, created_by, updated_at, updated_by '
+      . 'FROM ldap_servers ORDER BY name', { Slice => {} }) || [];
+}
+sub ldap_server_by_id {
+    my ($dbh, $id) = @_;
+    return undef unless defined $id && $id =~ /^\d+$/;
+    return $dbh->selectrow_hashref(
+        'SELECT id, name, enabled, host1, port1, host2, port2, encryption, timeout_sec, '
+      . 'ca_cert_pem, created_at, created_by, updated_at, updated_by '
+      . 'FROM ldap_servers WHERE id = ?', undef, $id);
+}
+
+# Decode a PEM root CA for display. Returns a hashref of strings, or {error=>...}.
+sub ldap_ca_info {
+    my ($pem) = @_;
+    return { error => 'no certificate stored' } unless defined $pem && $pem =~ /\S/;
+    return { error => 'Crypt::OpenSSL::X509 is not installed' } unless x509_available();
+    my $info = eval {
+        my $x = Crypt::OpenSSL::X509->new_from_string($pem);
+        { subject     => scalar($x->subject),
+          issuer      => scalar($x->issuer),
+          not_before  => scalar($x->notBefore),
+          not_after   => scalar($x->notAfter),
+          fingerprint => (eval { $x->fingerprint_sha256 } || eval { $x->fingerprint_sha1 } || ''),
+        };
+    };
+    return $info ? $info : { error => 'could not parse certificate: ' . ($@ || 'unknown') };
+}
+
+# Materialized CA path (session dir, like the other cache files). IO::Socket::SSL
+# needs a cafile path; the DB row stays the source of truth.
+sub ldap_ca_cache_file { my ($id) = @_; return "$SESSION_DIR/ldap-ca-$id.pem"; }
+sub ldap_materialize_ca {
+    my ($id, $pem) = @_;
+    my $path = ldap_ca_cache_file($id);
+    open(my $fh, '>', $path) or return (undef, "cannot write CA cache $path: $!");
+    print $fh $pem; close($fh);
+    chmod(0644, $path);   # a public certificate
+    return ($path, undef);
+}
+
+# The "view" link that opens the CA-details modal (About-style), carrying the
+# decoded fields in data-* attributes. Returns an error note if the CA can't be
+# decoded. Pair it with ldap_ca_modal_html() once on the same page.
+sub ldap_ca_trigger {
+    my ($ca) = @_;
+    return qq{<span class="muted">} . esc($ca->{error}) . qq{</span>} if $ca->{error};
+    return qq{<a href="#" class="fc-ldapca-open" }
+         . qq{data-subject="} . esc($ca->{subject})     . qq{" }
+         . qq{data-issuer="}  . esc($ca->{issuer})      . qq{" }
+         . qq{data-from="}    . esc($ca->{not_before})  . qq{" }
+         . qq{data-to="}      . esc($ca->{not_after})   . qq{" }
+         . qq{data-sha="}     . esc($ca->{fingerprint}) . qq{">view</a>};
+}
+
+# The CA-details modal, styled like the About dialog. Rendered once per LDAP page;
+# any .fc-ldapca-open trigger opens it, filled from that trigger's data-* fields.
+sub ldap_ca_modal_html {
+    return <<'HTML';
+<div id="fc-ldapca" class="fc-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="fc-ldapca-title">
+  <div class="fc-modal-box fc-about-box">
+    <button type="button" id="fc-ldapca-x" class="fc-about-close" aria-label="Close">&times;</button>
+    <h2 id="fc-ldapca-title" class="fc-about-title">Root CA certificate</h2>
+    <table class="fc-about-table">
+      <tr><th>Subject</th><td id="fc-ldapca-subject"></td></tr>
+      <tr><th>Issuer</th><td id="fc-ldapca-issuer"></td></tr>
+      <tr><th>Valid from</th><td id="fc-ldapca-from"></td></tr>
+      <tr><th>Valid to</th><td id="fc-ldapca-to"></td></tr>
+      <tr><th>SHA-256</th><td id="fc-ldapca-sha" style="word-break:break-all;font-family:var(--font-mono)"></td></tr>
+    </table>
+    <div class="fc-modal-actions"><button type="button" id="fc-ldapca-ok" class="btn">OK</button></div>
+  </div>
+</div>
+<script>
+(function(){
+  var ov=document.getElementById('fc-ldapca'); if(!ov) return;
+  var ok=document.getElementById('fc-ldapca-ok'), x=document.getElementById('fc-ldapca-x'), last=null;
+  function set(id,v){ var n=document.getElementById(id); if(n) n.textContent=(v||''); }
+  function close(){ ov.style.display='none'; document.removeEventListener('keydown',onKey,true); if(last&&last.focus){try{last.focus();}catch(e){}} }
+  function onKey(e){ if(ov.style.display==='none') return; if(e.key==='Escape'||e.key==='Enter'){e.preventDefault();close();} }
+  function open(t){
+    last=document.activeElement;
+    set('fc-ldapca-subject', t.getAttribute('data-subject'));
+    set('fc-ldapca-issuer',  t.getAttribute('data-issuer'));
+    set('fc-ldapca-from',    t.getAttribute('data-from'));
+    set('fc-ldapca-to',      t.getAttribute('data-to'));
+    set('fc-ldapca-sha',     t.getAttribute('data-sha'));
+    ov.style.display='flex'; document.addEventListener('keydown',onKey,true);
+    if(ok&&ok.focus){try{ok.focus();}catch(e){}}
+  }
+  if(ok) ok.addEventListener('click',close);
+  if(x)  x.addEventListener('click',close);
+  ov.addEventListener('click',function(e){ if(e.target===ov) close(); });
+  var tr=document.querySelectorAll('.fc-ldapca-open');
+  for(var i=0;i<tr.length;i++){ tr[i].addEventListener('click',function(e){ e.preventDefault(); open(this); }); }
+})();
+</script>
+HTML
+}
+
+sub _ldap_redirect {
+    my (%o) = @_;
+    my $u = script_url() . '?action=ldap';
+    $u .= '&msg=' . CGI::escape($o{msg}) if $o{msg};
+    $u .= '&err=' . CGI::escape($o{err}) if $o{err};
+    print std_header(-location => $u, -status => '302 Found');
+}
+
+################################################################################
+# show_ldap_page -- the LDAP servers list (admin).
+################################################################################
+sub show_ldap_page {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
+    unless ($is_admin) {
+        $dbh->disconnect if $dbh;
+        print page_head('Error', $user);
+        print qq{<p class="error">Only an admin can manage LDAP servers.</p>\n};
+        print page_foot(); return;
+    }
+    print page_head('LDAP servers', $user, 'full');
+    my $msg = $cgi->param('msg'); my $err = $cgi->param('err');
+    print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
+    print qq{<p class="error">}   . esc($err) . qq{</p>\n} if defined $err && $err ne '';
+
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">LDAP(S) authentication servers</h2>\n};
+    if (!$ENABLE_LDAP) {
+        print qq{<p class="opt-hint muted">LDAP is currently disabled (<code>ENABLE_LDAP = 0</code>). }
+            . qq{You can configure servers here now; set <code>ENABLE_LDAP</code> to 1 (encrypted only) }
+            . qq{or 2 (also allow plain LDAP) to use them for login.</p>\n};
+    }
+    print qq{<p><a class="btn btn-green" href="} . esc(script_url().'?action=ldap_edit') . qq{">Add LDAP server</a></p>\n};
+
+    my $rows = ldap_servers_all($dbh);
+    if (!@$rows) {
+        print qq{<p class="muted">No LDAP servers configured yet.</p>\n};
+    } else {
+        print qq{<table class="list"><tr><th>Name</th><th>Primary</th><th>Secondary</th>}
+            . qq{<th>Encryption</th><th>Status</th><th>Root CA</th><th></th></tr>\n};
+        for my $r (@$rows) {
+            my $ca = ldap_ca_info($r->{ca_cert_pem});
+            my $ca_cell = $ca->{error}
+                ? qq{<span class="muted">} . esc($ca->{error}) . qq{</span>}
+                : esc($ca->{subject}) . qq{<br><span class="muted">expires } . esc($ca->{not_after}) . qq{</span> }
+                  . ldap_ca_trigger($ca);
+            my $sec = (defined $r->{host2} && $r->{host2} ne '')
+                ? esc($r->{host2}).':'.esc($r->{port2}//'') : '<span class="muted">&mdash;</span>';
+            # A server that one or more users authenticate against cannot be deleted.
+            my $in_use = $dbh->selectrow_array('SELECT COUNT(*) FROM users WHERE ldap_server = ?', undef, $r->{id}) || 0;
+            my $del = $in_use
+                ? qq{<span class="muted" title="} . esc("$in_use user(s) authenticate here") . qq{">(in use)</span>}
+                : $cgi->start_form(-method=>'POST', -action=>script_url(), -class=>'inline-form',
+                      -data_confirm=>'Delete LDAP server '.$r->{name}.'?', -data_confirm_danger=>'y')
+                  . qq{<input type="hidden" name="action" value="ldap_delete">}
+                  . qq{<input type="hidden" name="id" value="$r->{id}">}
+                  . csrf_field()
+                  . qq{<button type="submit" class="btn btn-danger">Delete</button>}
+                  . $cgi->end_form;
+            print qq{<tr><td>} . esc($r->{name}) . qq{</td>}
+                . qq{<td>} . esc($r->{host1}).':'.esc($r->{port1}) . qq{</td>}
+                . qq{<td>$sec</td>}
+                . qq{<td>} . esc(uc $r->{encryption}) . qq{</td>}
+                . qq{<td>} . ($r->{enabled} ? 'enabled' : '<span class="muted">disabled</span>') . qq{</td>}
+                . qq{<td>$ca_cell</td>}
+                . qq{<td><div class="row-actions">}
+                . qq{<a class="btn" href="} . esc(script_url().'?action=ldap_edit&id='.$r->{id}) . qq{">Edit</a>}
+                . $del
+                . qq{</div></td></tr>\n};
+        }
+        print qq{</table>\n};
+    }
+    print qq{</div>\n};
+    print ldap_ca_modal_html();
+    $dbh->disconnect if $dbh;
+    print page_foot();
+}
+
+################################################################################
+# show_ldap_edit -- add / edit one LDAP server, plus the Test connection form.
+################################################################################
+sub show_ldap_edit {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
+    unless ($is_admin) {
+        $dbh->disconnect if $dbh;
+        print page_head('Error', $user);
+        print qq{<p class="error">Only an admin can manage LDAP servers.</p>\n};
+        print page_foot(); return;
+    }
+    my $id = $cgi->param('id');
+    my $r  = (defined $id && $id =~ /^\d+$/) ? ldap_server_by_id($dbh, $id) : undef;
+    my $editing = $r ? 1 : 0;
+    $r ||= { enabled => 1, port1 => 636, port2 => 636, encryption => 'ldaps', timeout_sec => 8 };
+
+    print page_head($editing ? 'Edit LDAP server' : 'Add LDAP server', $user, 'full');
+    my $err = $cgi->param('err'); my $msg = $cgi->param('msg');
+    print qq{<p class="error">}   . esc($err) . qq{</p>\n} if defined $err && $err ne '';
+    print qq{<p class="success">} . esc($msg) . qq{</p>\n} if defined $msg && $msg ne '';
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url().'?action=ldap') . qq{">&larr; LDAP servers</a></p>\n};
+
+    print qq{<div class="tool-section">\n};
+    print qq{<h2 class="tool-section-title">} . ($editing ? 'Edit' : 'Add') . qq{ LDAP server</h2>\n};
+    print $cgi->start_form(-method=>'POST', -action=>script_url(), -enctype=>'multipart/form-data');
+    print qq{<input type="hidden" name="action" value="ldap_save">};
+    print qq{<input type="hidden" name="id" value="} . esc($editing ? $r->{id} : '') . qq{">};
+    print csrf_field();
+    my $enc = $r->{encryption};
+    my $sel = sub { return (defined $enc && $enc eq $_[0]) ? ' selected' : ''; };
+    print qq{<div class="ldap-field"><label class="checkbox-label"><input type="checkbox" name="enabled" value="1"} . ($r->{enabled} ? ' checked' : '') . qq{> Enable LDAP server</label></div>\n};
+    print qq{<div class="ldap-field"><label>Name<br><input type="text" name="name" value="} . esc($r->{name}//'') . qq{" required></label></div>\n};
+    print qq{<div class="ldap-field"><label>Primary host (required)<br><input type="text" name="host1" value="} . esc($r->{host1}//'') . qq{" required></label> }
+        . qq{<label>Port <input type="number" name="port1" min="1" max="65535" value="} . esc($r->{port1}//636) . qq{"></label></div>\n};
+    print qq{<div class="ldap-field"><label>Secondary host (optional)<br><input type="text" name="host2" value="} . esc($r->{host2}//'') . qq{"></label> }
+        . qq{<label>Port <input type="number" name="port2" min="1" max="65535" value="} . esc($r->{port2}//'') . qq{"></label></div>\n};
+    print qq{<div class="ldap-field"><label>Encryption<br><select name="encryption">}
+        . qq{<option value="ldaps"}    . $sel->('ldaps')    . qq{>LDAPS (implicit TLS, 636)</option>}
+        . qq{<option value="starttls"} . $sel->('starttls') . qq{>STARTTLS (upgrade on 389)</option>}
+        . qq{<option value="ldap"}     . $sel->('ldap')     . qq{>LDAP (plain, no TLS)</option>}
+        . qq{</select></label></div>\n};
+    print qq{<div class="ldap-field"><label>Connect timeout (s) <input type="number" name="timeout_sec" min="1" max="120" value="} . esc($r->{timeout_sec}//8) . qq{"></label></div>\n};
+    my $ca = $editing ? ldap_ca_info($r->{ca_cert_pem}) : undef;
+    print qq{<div class="ldap-field"><label>Root CA certificate (PEM)<br><input type="file" name="ca_cert" accept=".pem,.crt,.cer"></label>};
+    if ($editing && $ca && !$ca->{error}) {
+        print qq{ <span class="muted">current: } . esc($ca->{subject}) . qq{ (expires } . esc($ca->{not_after}) . qq{) }
+            . ldap_ca_trigger($ca)
+            . qq{ &mdash; leave empty to keep</span>};
+    }
+    print qq{<p class="opt-hint muted">Required for LDAPS and STARTTLS (TLS is always CA-verified, <code>verify =&gt; require</code>). }
+        . qq{The certificate is public; it is stored in the database and cached in the session dir for the TLS layer.</p>\n};
+    print qq{</div>\n};
+    print qq{<p><button type="submit" class="btn btn-green">} . ($editing ? 'Save' : 'Add') . qq{ server</button></p>\n};
+    print $cgi->end_form;
+    print qq{</div>\n};
+
+    if ($editing) {
+        print qq{<div class="tool-section">\n<h2 class="tool-section-title">Test connection</h2>\n};
+        if (!ldaps_available()) {
+            print qq{<p class="muted">The Perl LDAP modules (Net::LDAP / Net::LDAPS / IO::Socket::SSL) are not installed, so a live test is unavailable.</p>\n};
+        } else {
+            print qq{<p class="muted">Binds as the user you enter (verbatim, e.g. <code>user\@domain</code>) to prove TLS and credentials. Nothing entered here is stored.</p>\n};
+            print $cgi->start_form(-method=>'POST', -action=>script_url());
+            print qq{<input type="hidden" name="action" value="ldap_test"><input type="hidden" name="id" value="$r->{id}">};
+            print csrf_field();
+            # autocomplete off / new-password + no value attribute: the fields
+            # always start empty and the browser does not pre-fill the last user.
+            print qq{<div class="ldap-field"><label>Username (verbatim bind id)<br>}
+                . qq{<input type="text" name="test_user" autocomplete="off" autocapitalize="off" spellcheck="false"></label></div>\n};
+            print qq{<div class="ldap-field"><label>Password<br>}
+                . qq{<input type="password" name="test_pass" autocomplete="new-password"></label></div>\n};
+            print qq{<p><button type="submit" class="btn">Test</button></p>\n};
+            print $cgi->end_form;
+        }
+        print qq{</div>\n};
+    }
+    # On ADD only: when the encryption changes, fill the default port (ldaps 636,
+    # ldap/starttls 389). On EDIT we deliberately leave the admin's configured
+    # ports untouched so toggling encryption never clobbers a custom port.
+    unless ($editing) {
+        print <<'JS';
+<script>
+(function(){
+  var e=document.querySelector('select[name="encryption"]');
+  var p1=document.querySelector('input[name="port1"]');
+  var p2=document.querySelector('input[name="port2"]');
+  if(!e) return;
+  function def(){ return e.value==='ldaps' ? 636 : 389; }
+  e.addEventListener('change', function(){
+    var d=def();
+    if(p1) p1.value=d;
+    if(p2) p2.value=d;   // keep both ports on the scheme default
+  });
+})();
+</script>
+JS
+    }
+    print ldap_ca_modal_html();
+    $dbh->disconnect if $dbh;
+    print page_foot();
+}
+
+################################################################################
+# do_ldap_save -- insert or update one LDAP server (admin, POST+CSRF).
+################################################################################
+sub do_ldap_save {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) { $dbh->disconnect if $dbh; _ldap_redirect(err=>'Not allowed.'); return; }
+    my $id = $cgi->param('id'); $id = (defined $id && $id =~ /^\d+$/) ? $id : undef;
+    my $name  = $cgi->param('name')  // ''; $name  =~ s/^\s+|\s+$//g;
+    my $host1 = $cgi->param('host1') // ''; $host1 =~ s/^\s+|\s+$//g;
+    my $host2 = $cgi->param('host2') // ''; $host2 =~ s/^\s+|\s+$//g;
+    my $port1 = $cgi->param('port1') // 636;
+    my $port2 = $cgi->param('port2') // '';
+    my $enc   = $cgi->param('encryption') // 'ldaps';
+    my $tmo   = $cgi->param('timeout_sec') // 8;
+    my $enabled = $cgi->param('enabled') ? 1 : 0;
+    my $back = $id ? ('?action=ldap_edit&id='.$id) : '?action=ldap_edit';
+    my $fail = sub {
+        print std_header(-location => script_url().$back.'&err='.CGI::escape($_[0]), -status=>'302 Found');
+        $dbh->disconnect if $dbh;
+    };
+    if ($name  eq '') { return $fail->('Name is required.'); }
+    if ($host1 eq '') { return $fail->('Primary host is required.'); }
+    if (!ldap_enc_ok($enc)) { return $fail->('Invalid encryption.'); }
+    if ($enc eq 'ldap' && $ENABLE_LDAP != 2) {
+        return $fail->('Plain LDAP is not permitted (ENABLE_LDAP is not 2). Use LDAPS or STARTTLS.');
+    }
+    $port1 = ($port1 =~ /^\d+$/ && $port1 >= 1 && $port1 <= 65535) ? $port1 : ldap_default_port($enc);
+    if ($host2 ne '') { $port2 = ($port2 =~ /^\d+$/ && $port2 >= 1 && $port2 <= 65535) ? $port2 : ldap_default_port($enc); }
+    else              { $port2 = undef; }
+    $tmo = ($tmo =~ /^\d+$/ && $tmo >= 1 && $tmo <= 120) ? $tmo : 8;
+
+    my $dup = $id
+        ? $dbh->selectrow_array('SELECT 1 FROM ldap_servers WHERE name = ? AND id <> ?', undef, $name, $id)
+        : $dbh->selectrow_array('SELECT 1 FROM ldap_servers WHERE name = ?', undef, $name);
+    if ($dup) { return $fail->("An LDAP server named '$name' already exists."); }
+
+    # Optional CA upload (multipart). Validate it is a PEM cert; parse-check with
+    # X509 when available. On edit, an empty field keeps the stored CA.
+    my $pem;
+    my $up = $cgi->upload('ca_cert');
+    if (defined $up) {
+        my $data = do { local $/; my $fh = $up; <$fh> };
+        $data = '' unless defined $data;
+        if (length($data) > 1_000_000) { return $fail->('Certificate file is too large.'); }
+        if ($data =~ /\S/) {
+            if ($data !~ /-----BEGIN CERTIFICATE-----/) { return $fail->('That does not look like a PEM certificate.'); }
+            if (x509_available()) {
+                my $info = ldap_ca_info($data);
+                return $fail->('Certificate did not parse: ' . $info->{error}) if $info->{error};
+            }
+            $pem = $data;
+        }
+    }
+    my $existing = $id ? ldap_server_by_id($dbh, $id) : undef;
+    my $ca_final = defined $pem ? $pem : ($existing ? $existing->{ca_cert_pem} : undef);
+    if (($enc eq 'ldaps' || $enc eq 'starttls') && !(defined $ca_final && $ca_final =~ /\S/)) {
+        return $fail->('A root CA certificate is required for LDAPS and STARTTLS.');
+    }
+
+    my $now = time();
+    if ($id) {
+        my $rv = $dbh->do('UPDATE ldap_servers SET name=?, enabled=?, host1=?, port1=?, host2=?, port2=?, '
+                        . 'encryption=?, timeout_sec=?, ca_cert_pem=?, updated_at=?, updated_by=? WHERE id=?',
+                        undef, $name, $enabled, $host1, $port1, ($host2 ne '' ? $host2 : undef), $port2,
+                        $enc, $tmo, $ca_final, $now, $user, $id);
+        unless (defined $rv) { my $e = $dbh->errstr; return $fail->('Database error: ' . ($e // 'unknown')); }
+        unlink(ldap_ca_cache_file($id));
+        ldap_materialize_ca($id, $ca_final) if defined $ca_final && $ca_final =~ /\S/;
+        $dbh->disconnect;
+        audit(action=>'ldap_edit', object_type=>'ldap_server', object_id=>$name, detail=>'updated LDAP server');
+        _ldap_redirect(msg=>"Updated LDAP server '$name'."); return;
+    } else {
+        my $rv = $dbh->do('INSERT INTO ldap_servers (name, enabled, host1, port1, host2, port2, encryption, '
+                        . 'timeout_sec, ca_cert_pem, created_at, created_by, updated_at, updated_by) '
+                        . 'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        undef, $name, $enabled, $host1, $port1, ($host2 ne '' ? $host2 : undef), $port2,
+                        $enc, $tmo, $ca_final, $now, $user, $now, $user);
+        unless (defined $rv) { my $e = $dbh->errstr; return $fail->('Database error: ' . ($e // 'unknown')); }
+        my $newid = eval { $dbh->last_insert_id(undef, undef, 'ldap_servers', 'id') };
+        $newid = $dbh->selectrow_array('SELECT id FROM ldap_servers WHERE name = ?', undef, $name) unless $newid;
+        ldap_materialize_ca($newid, $ca_final) if $newid && defined $ca_final && $ca_final =~ /\S/;
+        $dbh->disconnect;
+        audit(action=>'ldap_add', object_type=>'ldap_server', object_id=>$name, detail=>'added LDAP server');
+        _ldap_redirect(msg=>"Added LDAP server '$name'."); return;
+    }
+}
+
+################################################################################
+# do_ldap_delete -- delete one LDAP server (refused while a user references it).
+################################################################################
+sub do_ldap_delete {
+    my ($user) = @_;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) { $dbh->disconnect if $dbh; _ldap_redirect(err=>'Not allowed.'); return; }
+    my $id = $cgi->param('id');
+    unless (defined $id && $id =~ /^\d+$/) { $dbh->disconnect; _ldap_redirect(err=>'Invalid server.'); return; }
+    my $r = ldap_server_by_id($dbh, $id);
+    unless ($r) { $dbh->disconnect; _ldap_redirect(err=>'Server not found.'); return; }
+    # Refuse if any user binds against it (the users.ldap_server link, step 2).
+    my $used = eval { $dbh->selectrow_array('SELECT 1 FROM users WHERE ldap_server = ?', undef, $id) };
+    if ($used) { $dbh->disconnect; _ldap_redirect(err=>"LDAP server '$r->{name}' is assigned to one or more users and cannot be deleted."); return; }
+    my $rv = $dbh->do('DELETE FROM ldap_servers WHERE id = ?', undef, $id);
+    unless (defined $rv) { my $e = $dbh->errstr; $dbh->disconnect; _ldap_redirect(err=>'Database error: ' . ($e // 'unknown')); return; }
+    unlink(ldap_ca_cache_file($id));
+    $dbh->disconnect;
+    audit(action=>'ldap_delete', object_type=>'ldap_server', object_id=>$r->{name}, detail=>'deleted LDAP server');
+    _ldap_redirect(msg=>"Deleted LDAP server '$r->{name}'.");
+}
+
+################################################################################
+# run_ldap_test -- the actual connect/TLS/bind probe (returns report lines).
+# $pass is guaranteed non-blank by the caller; it is never logged or echoed.
+################################################################################
+sub run_ldap_test {
+    my ($r, $tuser, $tpass) = @_;
+    my @out;
+    my $enc  = $r->{encryption};
+    my $host = $r->{host1};
+    my $port = $r->{port1} || ldap_default_port($enc);
+    my $tmo  = $r->{timeout_sec} || 8;
+    push @out, sprintf('%-12s: %s', 'Host', "$host:$port ($enc)");
+
+    my $capath;
+    if ($enc ne 'ldap') {
+        return (@out, 'CA          : ERROR no root CA stored') unless defined $r->{ca_cert_pem} && $r->{ca_cert_pem} =~ /\S/;
+        my $caerr;
+        ($capath, $caerr) = ldap_materialize_ca($r->{id}, $r->{ca_cert_pem});
+        return (@out, "CA          : ERROR $caerr") unless $capath;
+    }
+
+    my $ldap;
+    if ($enc eq 'ldaps') {
+        require Net::LDAPS;
+        $ldap = Net::LDAPS->new($host, port => $port, verify => 'require',
+                                cafile => $capath, sslversion => 'tlsv1_2', timeout => $tmo);
+    } else {
+        require Net::LDAP;
+        $ldap = Net::LDAP->new($host, port => $port, timeout => $tmo);
+    }
+    return (@out, "Connect     : FAILED (" . ($@ || 'no connection') . ")") unless $ldap;
+
+    if ($enc eq 'starttls') {
+        my $m = $ldap->start_tls(verify => 'require', cafile => $capath, sslversion => 'tlsv1_2');
+        return (@out, 'STARTTLS    : FAILED (' . $m->error . ')') if $m->code;
+    }
+
+    my $sock = $ldap->socket;
+    if ($enc ne 'ldap' && $sock && $sock->can('get_cipher')) {
+        push @out, sprintf('%-12s: %s', 'TLS',     ($sock->get_sslversion // '?'));
+        push @out, sprintf('%-12s: %s', 'Cipher',  ($sock->get_cipher // '?'));
+        push @out, sprintf('%-12s: %s', 'Peer CN', ($sock->peer_certificate('cn') // '(none)'));
+        push @out, sprintf('%-12s: %s', 'Issuer',  ($sock->peer_certificate('issuer') // '?'));
+        my @san = eval { $sock->peer_certificate('subjectAltNames') };
+        if (@san) {
+            my @n = map { $san[$_*2+1] } 0 .. int($#san/2);
+            push @out, sprintf('%-12s: %s', 'Peer SAN', join(', ', grep { defined } @n));
+        }
+    }
+
+    my $m = $ldap->bind($tuser, password => $tpass);
+    if ($m->code) { push @out, sprintf('%-12s: FAILED code=%d %s', 'Bind', $m->code, $m->error); }
+    else          { push @out, sprintf('%-12s: OK (authenticated as %s)', 'Bind', $tuser); }
+    eval { $ldap->unbind };
+    return @out;
+}
+
+################################################################################
+# ldap_bind_ok -- authenticate ONE credential against a configured server.
+#
+# Returns 1 only when the directory accepts a bind as $user with $pass; every
+# other outcome returns 0 -- never a partial success. This is the login-path
+# counterpart of run_ldap_test (which returns a human report); it is a clean
+# boolean and leaks nothing. $pass is never logged.
+#
+#   * VERBATIM bind: $user is sent exactly as stored (a UPN like user@dom.tld).
+#   * TLS is always CA-verified (verify => require, TLS >= 1.2); plain LDAP is
+#     refused unless ENABLE_LDAP == 2.
+#   * A blank/whitespace password is refused BEFORE binding -- AD treats a bind
+#     with a DN/UPN and an empty password as an anonymous "unauthenticated
+#     bind" that returns success, which must never be read as a valid login.
+#   * Primary (host1) then, ONLY on a connection/TLS failure, secondary (host2).
+#     A bind that is actually rejected (bad credentials) never fails over.
+################################################################################
+sub ldap_bind_ok {
+    my ($r, $user, $pass) = @_;
+    # Tri-state result so the caller can tell a bad credential from an outage:
+    #   'ok'          -- the directory accepted the bind.
+    #   'reject'      -- the directory answered and refused (bad credentials):
+    #                    treat exactly like a wrong local password.
+    #   'unavailable' -- no configured server could be reached or verified
+    #                    (down, TLS/CA failure, misconfig, modules missing):
+    #                    the login cannot be decided, so the user is told it is
+    #                    temporarily impossible and NO failure is counted.
+    # Credential-shaped problems map to 'reject'; everything else to
+    # 'unavailable'. A blank password is a 'reject' (never an anonymous bind).
+    return 'reject'      unless defined $user && $user ne '';
+    return 'reject'      unless defined $pass && $pass =~ /\S/;   # anonymous-bind trap
+    return 'unavailable' unless $r && $r->{enabled};
+    return 'unavailable' unless ldaps_available();
+    my $enc = $r->{encryption} // '';
+    return 'unavailable' unless ldap_enc_ok($enc);
+    return 'unavailable' if $enc eq 'ldap' && $ENABLE_LDAP != 2;  # plain LDAP only when allowed
+
+    my $tmo = $r->{timeout_sec} || 8;
+    my $capath;
+    if ($enc ne 'ldap') {
+        return 'unavailable' unless defined $r->{ca_cert_pem} && $r->{ca_cert_pem} =~ /\S/;
+        my $caerr;
+        ($capath, $caerr) = ldap_materialize_ca($r->{id}, $r->{ca_cert_pem});
+        return 'unavailable' unless $capath;
+    }
+
+    # Try one endpoint. Returns 1 = bind accepted, 0 = bind rejected (do NOT
+    # fail over -- the credentials are simply wrong), -1 = could not connect /
+    # TLS failed (DO fail over to the secondary, if any).
+    my $try = sub {
+        my ($host, $port) = @_;
+        return -1 unless defined $host && $host ne '';
+        $port ||= ldap_default_port($enc);
+        my $ldap;
+        if ($enc eq 'ldaps') {
+            require Net::LDAPS;
+            $ldap = Net::LDAPS->new($host, port => $port, verify => 'require',
+                                    cafile => $capath, sslversion => 'tlsv1_2', timeout => $tmo);
+        } else {
+            require Net::LDAP;
+            $ldap = Net::LDAP->new($host, port => $port, timeout => $tmo);
+        }
+        return -1 unless $ldap;
+        if ($enc eq 'starttls') {
+            my $m = $ldap->start_tls(verify => 'require', cafile => $capath, sslversion => 'tlsv1_2');
+            if ($m->code) { eval { $ldap->unbind }; return -1; }
+        }
+        my $m  = $ldap->bind($user, password => $pass);
+        my $rc = $m->code ? 0 : 1;
+        eval { $ldap->unbind };
+        return $rc;
+    };
+
+    my $res = $try->($r->{host1}, $r->{port1});
+    $res = $try->($r->{host2}, $r->{port2}) if $res < 0;   # failover on connect error only
+    return $res == 1 ? 'ok' : $res == 0 ? 'reject' : 'unavailable';
+}
+
+################################################################################
+# do_ldap_test -- run a live bind against a saved server (admin, POST+CSRF).
+# Refuses a blank password BEFORE binding: AD treats a bind with a DN/UPN and an
+# empty password as an unauthenticated bind that returns success.
+################################################################################
+sub do_ldap_test {
+    my ($user) = @_;
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    my $is_admin = $dbh ? user_is_admin($dbh, $user) : 0;
+    unless ($is_admin) {
+        $dbh->disconnect if $dbh;
+        print page_head('Error', $user);
+        print qq{<p class="error">Only an admin can test LDAP servers.</p>\n};
+        print page_foot(); return;
+    }
+    my $id = $cgi->param('id');
+    my $r  = (defined $id && $id =~ /^\d+$/) ? ldap_server_by_id($dbh, $id) : undef;
+    unless ($r) {
+        $dbh->disconnect if $dbh;
+        print page_head('Error', $user);
+        print qq{<p class="error">LDAP server not found.</p>\n};
+        print page_foot(); return;
+    }
+    my $tuser = $cgi->param('test_user') // ''; $tuser =~ s/^\s+|\s+$//g;
+    my $tpass = $cgi->param('test_pass'); $tpass = '' unless defined $tpass;
+
+    print page_head('LDAP test', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url().'?action=ldap_edit&id='.$r->{id}) . qq{">&larr; Back to the server</a></p>\n};
+    print qq{<div class="tool-section"><h2 class="tool-section-title">Test: } . esc($r->{name}) . qq{</h2>\n};
+
+    my $stop = sub { print qq{<p class="error">} . esc($_[0]) . qq{</p>\n</div>\n}; $dbh->disconnect if $dbh; print page_foot(); };
+    if ($tuser eq '')   { return $stop->('Enter a username to test.'); }
+    if ($tpass !~ /\S/) { return $stop->('A non-blank password is required (an empty password would be an unauthenticated bind).'); }
+    unless (ldaps_available()) { return $stop->('The Perl LDAP modules are not installed.'); }
+    if ($r->{encryption} eq 'ldap' && $ENABLE_LDAP != 2) { return $stop->('Unencrypted LDAP is not permitted (ENABLE_LDAP is not 2).'); }
+
+    my @report = run_ldap_test($r, $tuser, $tpass);
+    # Colour the Bind result line green (OK) or red (failed) inside the box.
+    my $body = '';
+    for my $ln (@report) {
+        my $e = esc($ln);
+        if ($ln =~ /^Bind\s*:/) {
+            my $green = ($ln =~ /:\s*OK\b/);
+            $e = qq{<span style="color:} . ($green ? '#3fb950' : '#ff7b72')
+               . qq{;font-weight:600">} . $e . qq{</span>};
+        }
+        $body .= $e . "\n";
+    }
+    print qq{<pre class="config">} . $body . qq{</pre>\n};
+    print qq{</div>\n};
+    audit(action=>'ldap_test', object_type=>'ldap_server', object_id=>$r->{name},
+          detail=>'tested LDAP bind for user ' . $tuser);   # never the password
+    $dbh->disconnect if $dbh;
+    print page_foot();
+}
+
+################################################################################
 # show_user_sites_form
 #
 # Per-user site assignment (admin only): a checkbox list of all site codes.
@@ -19221,7 +20029,7 @@ sub do_set_email {
     unless ($dbh && user_is_admin($dbh, $admin)) { $dbh->disconnect if $dbh;
         print std_header(-type=>'text/plain',-status=>'403 Forbidden'); print "Not allowed.\n"; return; }
     my $target = $cgi->param('username') // '';
-    unless (valid_id($target) && db_user_exists($dbh, $target)) {
+    unless (valid_username($target) && db_user_exists($dbh, $target)) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"user_list", err => 'Unknown user.');
         return;
@@ -19230,6 +20038,12 @@ sub do_set_email {
     if (!defined $email) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"user_list", err => 'Invalid email address.');
+        return;
+    }
+    if (my $clash = db_email_conflict($dbh, $email, $target)) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_list",
+            err => "That email address is already used by '$clash'.");
         return;
     }
     db_set_email($dbh, $target, $email);
@@ -19290,6 +20104,19 @@ sub show_user_page {
     }
 
     if ($only eq 'password') {
+    # LDAP-authenticated users cannot change a local password here.
+    my $me = $admin_dbh ? db_get_user($admin_dbh, $user) : undef;
+    if ($me && $me->{ldap_auth}) {
+        print qq{<div class="tool-section">\n};
+        print qq{<h2 class="tool-section-title">Change your password</h2>\n};
+        print qq{<p class="muted">This account signs in with Active Directory (LDAP). Your password is managed }
+            . qq{centrally &mdash; change it on the AD/LDAP server, or contact the user help desk. It cannot be }
+            . qq{changed here.</p>\n};
+        print qq{</div>\n};
+        $admin_dbh->disconnect if $admin_dbh;
+        print page_foot();
+        return;
+    }
     print qq{<div class="tool-section">\n};
     print qq{<h2 class="tool-section-title">Change your password</h2>\n};
     print qq{<div class="form-narrow">\n};
@@ -19368,7 +20195,7 @@ sub show_user_page {
                 print qq{<p class="muted">Click a username to edit its settings and permissions.</p>\n};
                 print qq{<table class="list">\n}
                     . qq{<tr><th>Username</th><th>Email</th><th>Admin</th>}
-                    . qq{<th>Password</th><th></th></tr>\n};
+                    . qq{<th>Auth</th><th>Password</th><th>Tools</th></tr>\n};
                 for my $row (@$users) {
                     my $u = $row->{username};
                     my $edit_link = script_url() . '?action=user_edit&username=' . CGI::escape($u);
@@ -19378,23 +20205,32 @@ sub show_user_page {
                     # Admin: read-only indicator (editable on the edit page).
                     my $is_a = ($u eq $PROTECTED_USER || $row->{admin_function});
                     print qq{<td>} . ($is_a ? 'yes' : '&mdash;') . qq{</td>};
-                    # Reset-password: quick action kept in the list.
+                    # Auth: local password vs LDAP (the protected admin is always local).
+                    print qq{<td>} . ($row->{ldap_auth} ? 'LDAP' : 'local') . qq{</td>};
+                    # Reset-password: quick action. Disabled (greyed) for the
+                    # protected admin and for LDAP users (whose password is in AD).
                     print qq{<td>};
-                    if ($u eq $PROTECTED_USER) {
-                        print qq{<a class="btn btn-small" href="}
-                            . esc(script_url() . '?action=reset_password_form&username=' . CGI::escape($u))
-                            . qq{">Reset password</a>};
+                    if ($u eq $PROTECTED_USER || $row->{ldap_auth}) {
+                        my $why = $row->{ldap_auth}
+                            ? 'Password is managed in AD/LDAP'
+                            : 'The built-in admin changes its own password from "Change your password"';
+                        print qq{<span class="btn btn-small" aria-disabled="true" }
+                            . qq{style="opacity:0.45;pointer-events:none;cursor:default" title="} . esc($why) . qq{">Reset password</span>};
                     } else {
                         print qq{<a class="btn btn-small" href="}
                             . esc(script_url() . '?action=reset_password_form&username=' . CGI::escape($u))
                             . qq{">Reset password</a>};
                     }
                     print qq{</td>};
-                    # Delete: quick action, protected account excepted.
-                    print qq{<td>};
+                    # Tools: Edit (all), then Rename + Delete (protected account excepted).
+                    print qq{<td><div class="row-actions">};
+                    print qq{<a class="btn btn-small" href="} . esc($edit_link) . qq{">Edit</a>};
                     if ($u eq $PROTECTED_USER) {
                         print qq{<span class="muted">protected</span>};
                     } else {
+                        print qq{<a class="btn btn-small" href="}
+                            . esc(script_url() . '?action=user_rename_form&username=' . CGI::escape($u))
+                            . qq{">Rename</a>};
                         print $cgi->start_form(-method => 'POST', -action => script_url(),
                             -data_confirm => 'Delete user ' . $u . '?',
                             -data_confirm_danger => 'y', -style => 'margin:0;');
@@ -19404,7 +20240,7 @@ sub show_user_page {
                         print qq{<button type="submit" class="btn btn-small btn-danger">Delete</button>};
                         print $cgi->end_form;
                     }
-                    print qq{</td></tr>\n};
+                    print qq{</div></td></tr>\n};
                 }
                 print qq{</table>\n};
             }
@@ -19431,6 +20267,19 @@ sub show_user_page {
         print qq{<label>Email <span class="muted">(optional; used for password reset)</span><br>};
         print $cgi->textfield(-name => 'email', -autocomplete => 'off');
         print qq{</label>\n};
+        if ($ENABLE_LDAP) {
+            my @lsrv = grep { $_->{enabled} } @{ ldap_servers_all($admin_dbh) };
+            if (@lsrv) {
+                print qq{<label>Authentication<br><select name="auth_method">}
+                    . qq{<option value="local">Local password</option>}
+                    . qq{<option value="ldap">LDAP</option></select></label>\n};
+                print qq{<label>LDAP server<br><select name="ldap_server">};
+                print qq{<option value="$_->{id}">} . esc($_->{name}) . qq{</option>} for @lsrv;
+                print qq{</select></label>\n};
+                print qq{<p class="muted">For <strong>LDAP</strong>, use a full UPN username (containing <code>\@</code>) }
+                    . qq{and leave the password blank &mdash; a random local password is generated.</p>\n};
+            }
+        }
         print qq{<p class="muted">The user is created with no special permissions; }
             . qq{you will be taken to its edit page to set them.</p>\n};
         print qq{<p><button type="submit" class="btn">Add user</button></p>\n};
@@ -19465,7 +20314,7 @@ sub show_user_edit {
         print page_foot();
         return;
     }
-    my $row = valid_id($target) ? db_get_user($dbh, $target) : undef;
+    my $row = valid_username($target) ? db_get_user($dbh, $target) : undef;
     unless ($row) {
         $dbh->disconnect;
         print page_head('Error', $user);
@@ -19481,6 +20330,8 @@ sub show_user_edit {
     my @ids = $is_protected ? (0) : @{ db_user_site_ids($dbh, $target) };
     my $unrestricted = ($is_protected || $row->{admin_function} || grep { $_ == 0 } @ids) ? 1 : 0;
     my %site_code; $site_code{$_->{id}} = $_->{code} for @{ db_all_sites($dbh) };
+    # Enabled LDAP servers (for the Authentication fieldset), fetched before close.
+    my @ldap_servers = $ENABLE_LDAP ? grep { $_->{enabled} } @{ ldap_servers_all($dbh) } : ();
     $dbh->disconnect;
 
     my $err = $cgi->param('err');
@@ -19544,6 +20395,43 @@ sub show_user_edit {
     }
     print qq{</fieldset>\n};
 
+    # --- Authentication (local password vs LDAP) ---
+    if ($ENABLE_LDAP) {
+        print qq{<fieldset class="ue-group"><legend>Authentication</legend>\n};
+        if ($is_protected) {
+            print qq{<p class="muted">The built-in <strong>} . esc($PROTECTED_USER)
+                . qq{</strong> account always uses a local password and cannot use LDAP.</p>\n};
+        } elsif (!@ldap_servers) {
+            print qq{<p class="muted">Local password. No enabled LDAP servers are configured }
+                . qq{(<a href="} . esc(script_url().'?action=ldap') . qq{">manage LDAP servers</a>).</p>\n};
+        } else {
+            my $has_at  = ($target =~ /\@/) ? 1 : 0;
+            my $ldap_on = $row->{ldap_auth} ? 1 : 0;
+            my $dis     = $has_at ? '' : ' disabled';
+            print qq{<p><label class="checkbox-label"><input type="radio" name="auth_method" value="local"}
+                . ($ldap_on ? '' : ' checked') . qq{> Local password</label></p>\n};
+            print qq{<p><label class="checkbox-label"><input type="radio" name="auth_method" value="ldap"}
+                . ($ldap_on ? ' checked' : '') . $dis . qq{> LDAP</label></p>\n};
+            print qq{<p class="ue-field"><label><span class="ue-label">LDAP server</span> <select name="ldap_server"$dis>};
+            for my $s (@ldap_servers) {
+                my $seld = (defined $row->{ldap_server} && "$row->{ldap_server}" eq "$s->{id}") ? ' selected' : '';
+                print qq{<option value="$s->{id}"$seld>} . esc($s->{name}) . qq{</option>};
+            }
+            print qq{</select></label></p>\n};
+            if (!$has_at) {
+                print qq{<p class="muted ue-hint">This is a short name. LDAP binds verbatim, so enable it only after }
+                    . qq{renaming the user to a full UPN (containing <code>\@</code>) &mdash; use <strong>Rename</strong> on the }
+                    . qq{<a href="} . esc(script_url().'?action=user_list') . qq{">Users</a> page.</p>\n};
+            }
+            print qq{<p class="muted ue-hint">LDAP users authenticate against the directory; the local }
+                . qq{password does not apply. <strong>Switching an account to LDAP replaces its local }
+                . qq{password with a random value</strong>, so a previously known password cannot be reused. }
+                . qq{If the account is later switched back to local, an administrator must set a new one with }
+                . qq{<strong>Reset password</strong>.</p>\n};
+        }
+        print qq{</fieldset>\n};
+    }
+
     # --- Site access (read-only summary + button to the separate editor) ---
     print qq{<fieldset class="ue-group"><legend>Site access</legend>\n};
     if ($is_admin_u) {
@@ -19568,9 +20456,17 @@ sub show_user_edit {
 
     # --- Password ---
     print qq{<fieldset class="ue-group"><legend>Password</legend>\n};
-    print qq{<p><a class="btn" href="}
-        . esc(script_url() . '?action=reset_password_form&username=' . CGI::escape($target))
-        . qq{">Reset password &rarr;</a></p>\n};
+    if ($row->{ldap_auth}) {
+        # LDAP user: the password lives in AD, so local reset is disabled.
+        print qq{<p><span class="btn" aria-disabled="true" style="opacity:0.45;pointer-events:none;cursor:default" }
+            . qq{title="Password is managed in AD/LDAP">Reset password &rarr;</span></p>\n};
+        print qq{<p class="muted ue-hint">This account authenticates against Active Directory; its password is }
+            . qq{managed there and cannot be reset here.</p>\n};
+    } else {
+        print qq{<p><a class="btn" href="}
+            . esc(script_url() . '?action=reset_password_form&username=' . CGI::escape($target))
+            . qq{">Reset password &rarr;</a></p>\n};
+    }
     print qq{</fieldset>\n};
 
     # --- Actions ---
@@ -19655,7 +20551,7 @@ sub do_user_save {
         redirect_to_user_page(action=>"user_list", err=>'Only an admin can edit users.');
         return;
     }
-    unless (valid_id($target)) {
+    unless (valid_username($target)) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"user_list", err=>'Invalid username.');
         return;
@@ -19677,6 +20573,37 @@ sub do_user_save {
         redirect_to_user_page(action=>"user_edit", username=>$target, err=>'Invalid email address.');
         return;
     }
+    if (my $clash = db_email_conflict($dbh, $email, $target)) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_edit", username=>$target,
+            err=>"That email address is already used by '$clash'.");
+        return;
+    }
+
+    # Authentication method (local vs LDAP). The protected admin is always local.
+    # LDAP requires ENABLE_LDAP, a UPN username (verbatim bind needs the '@'), and
+    # an enabled server. pass_hash is left untouched here -- the login path (and
+    # its sentinel handling) is wired in a later step.
+    my $want_ldap = (!$is_protected && $ENABLE_LDAP
+                     && (($cgi->param('auth_method') // '') eq 'ldap')) ? 1 : 0;
+    my $ldap_server_id = undef;
+    if ($want_ldap) {
+        if ($target !~ /\@/) {
+            $dbh->disconnect;
+            redirect_to_user_page(action=>"user_edit", username=>$target,
+                err=>q{LDAP can only be enabled for a full UPN username (one containing '@'). Rename the user first.});
+            return;
+        }
+        my $sid = $cgi->param('ldap_server');
+        my $srv = (defined $sid && $sid =~ /^\d+$/) ? ldap_server_by_id($dbh, $sid) : undef;
+        unless ($srv && $srv->{enabled}) {
+            $dbh->disconnect;
+            redirect_to_user_page(action=>"user_edit", username=>$target,
+                err=>'Choose an enabled LDAP server for LDAP authentication.');
+            return;
+        }
+        $ldap_server_id = $srv->{id};
+    }
 
     my %new = (
         email                => $email,
@@ -19685,16 +20612,19 @@ sub do_user_save {
         download_full_report => $is_protected ? 1 : ($cgi->param('full_report') ? 1 : 0),
         download_full_config => $is_protected ? 1 : ($cgi->param('full_config') ? 1 : 0),
         read_debug           => $is_protected ? 1 : ($cgi->param('read_debug')  ? 1 : 0),
+        ldap_auth            => $want_ldap,
+        ldap_server          => $ldap_server_id,
     );
 
     # Write all fields in one statement.
     my $ok = eval {
         $dbh->do('UPDATE users SET email = ?, admin_function = ?, edit_device_table = ?, '
-               . 'download_full_report = ?, download_full_config = ?, read_debug = ? '
+               . 'download_full_report = ?, download_full_config = ?, read_debug = ?, '
+               . 'ldap_auth = ?, ldap_server = ? '
                . 'WHERE username = ?',
                undef, $new{email}, $new{admin_function}, $new{edit_device_table},
                $new{download_full_report}, $new{download_full_config},
-               $new{read_debug}, $target);
+               $new{read_debug}, $new{ldap_auth}, $new{ldap_server}, $target);
         1;
     };
     unless ($ok) {
@@ -19703,6 +20633,22 @@ sub do_user_save {
         redirect_to_user_page(action=>"user_edit", username=>$target,
             err=>'Could not save: ' . ($derr // 'database error'));
         return;
+    }
+
+    # Security: switching an existing LOCAL account to LDAP scrubs its local
+    # password. Left in place, the old (possibly still-known) password would sit
+    # dormant under the LDAP flag and authenticate again the instant the account
+    # is switched back to local. We overwrite it with the same unguessable random
+    # throwaway a brand-new LDAP account gets, so the account can only be used via
+    # the directory. Only on the local->LDAP transition -- re-saving an account
+    # that is already LDAP does not churn the hash.
+    if ($want_ldap && !$old->{ldap_auth}) {
+        my $raw = eval { secure_random_bytes(16) };
+        $raw = pack('N', time()) . pack('N', $$) . pack('N', int(rand(2**32))) unless defined $raw;
+        my $rhash = password_hash(substr(unpack('H*', $raw), 0, 16));
+        eval { $dbh->do('UPDATE users SET pass_hash = ? WHERE username = ?', undef, $rhash, $target); 1; };
+        audit(action=>'reset_password', object_type=>'user', object_id=>$target,
+              detail=>'local password replaced with a random value (switched to LDAP)');
     }
 
     # One audit line per CHANGED field, reusing the historical action names.
@@ -19725,11 +20671,115 @@ sub do_user_save {
         $log->('download_full_report', 'set_download_full_report',  $old->{download_full_report}, $new{download_full_report}, $yn);
         $log->('download_full_config', 'set_download_full_config',  $old->{download_full_config}, $new{download_full_config}, $yn);
         $log->('read_debug',           'set_read_debug',            $old->{read_debug},           $new{read_debug},           $yn);
+        $log->('ldap_auth',            'set_ldap_auth',             $old->{ldap_auth},            $new{ldap_auth},            $yn);
     }
     $dbh->disconnect;
 
     my $summary = @changes ? ('Saved: ' . join(', ', @changes) . '.') : 'No changes.';
     redirect_to_user_page(action=>"user_edit", username=>$target, msg=>$summary);
+}
+
+################################################################################
+# show_user_rename_form -- form to rename a user (admin). Typically a short name
+# to a full LDAP UPN.
+################################################################################
+sub show_user_rename_form {
+    my ($user) = @_;
+    my $target = $cgi->param('username') // '';
+    print std_header(-type => 'text/html', -charset => 'UTF-8');
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) {
+        $dbh->disconnect if $dbh;
+        print page_head('Error', $user);
+        print qq{<p class="error">Renaming users is available to administrators only.</p>\n};
+        print page_foot(); return;
+    }
+    my $row = valid_username($target) ? db_get_user($dbh, $target) : undef;
+    $dbh->disconnect;
+    unless ($row) {
+        print page_head('Error', $user);
+        print qq{<p class="error">User not found.</p>\n};
+        print page_foot(); return;
+    }
+    if ($target eq $PROTECTED_USER) {
+        print page_head('Error', $user);
+        print qq{<p class="error">The built-in } . esc($PROTECTED_USER) . qq{ account cannot be renamed.</p>\n};
+        print page_foot(); return;
+    }
+    my $err = $cgi->param('err');
+    print page_head('Rename user', $user, 'full');
+    print qq{<p class="breadcrumb"><a class="btn btn-green" href="} . esc(script_url().'?action=user_list') . qq{">&larr; Users</a></p>\n};
+    print qq{<div class="tool-section"><h2 class="tool-section-title">Rename user</h2>\n};
+    print qq{<p class="error">} . esc($err) . qq{</p>\n} if defined $err && $err ne '';
+    print qq{<p class="muted">Rename <strong>} . esc($target) . qq{</strong> &mdash; e.g. a short name to a full LDAP UPN }
+        . qq{(<code>user\@domain</code>). Permissions and site access are preserved, and the audit history follows the }
+        . qq{new name. Any active session for this user ends (they log in again).</p>\n};
+    print $cgi->start_form(-method => 'POST', -action => script_url());
+    print qq{<input type="hidden" name="action" value="user_rename">};
+    print qq{<input type="hidden" name="username" value="} . esc($target) . qq{">};
+    print csrf_field();
+    print qq{<div class="ldap-field"><label>New username<br><input type="text" name="new_username" value="} . esc($target) . qq{" required></label></div>\n};
+    print qq{<p><button type="submit" class="btn btn-green">Rename</button> }
+        . qq{<a class="btn" href="} . esc(script_url().'?action=user_list') . qq{">Cancel</a></p>\n};
+    print $cgi->end_form;
+    print qq{</div>\n};
+    print page_foot();
+}
+
+################################################################################
+# do_user_rename -- rename a user (admin, POST+CSRF). Moves the row and repoints
+# every table carrying the username (user_sites, password_resets, audit_log,
+# login_attempts) in one transaction. users.username has an ON DELETE CASCADE
+# child (user_sites) but no ON UPDATE CASCADE, so: insert the new row, repoint
+# the children, then delete the old row (which then cascades nothing).
+################################################################################
+sub do_user_rename {
+    my ($user) = @_;
+    my $old = $cgi->param('username')     // '';
+    my $new = $cgi->param('new_username') // '';
+    $new =~ s/^\s+|\s+$//g;
+    my $dbh = db_connect();
+    unless ($dbh && user_is_admin($dbh, $user)) {
+        $dbh->disconnect if $dbh;
+        redirect_to_user_page(action=>"user_list", err=>'Only an admin can rename users.');
+        return;
+    }
+    my $back = sub {
+        $dbh->disconnect if $dbh;
+        redirect_to_user_page(action=>"user_rename_form", username=>$old, err=>$_[0]);
+    };
+    unless (valid_username($old) && db_user_exists($dbh, $old)) { return $back->('User not found.'); }
+    if ($old eq $PROTECTED_USER)   { return $back->("The built-in $PROTECTED_USER account cannot be renamed."); }
+    unless (valid_username($new))  { return $back->(q{Invalid username. Allowed: letters, digits, '.', '-', '_' and '@'.}); }
+    if ($new eq $old)              { return $back->('The new name is the same as the old one.'); }
+    if ($new eq $PROTECTED_USER)   { return $back->("'$new' is reserved."); }
+    if (db_user_exists($dbh, $new)){ return $back->("A user named '$new' already exists."); }
+
+    my $ok = eval {
+        $dbh->begin_work;
+        $dbh->do('INSERT INTO users (username, pass_hash, edit_device_table, admin_function, '
+               . 'download_full_report, download_full_config, read_debug, ldap_auth, ldap_server, email) '
+               . 'SELECT ?, pass_hash, edit_device_table, admin_function, download_full_report, '
+               . 'download_full_config, read_debug, ldap_auth, ldap_server, email FROM users WHERE username = ?',
+               undef, $new, $old) or die $dbh->errstr . "\n";
+        $dbh->do('UPDATE user_sites      SET username = ? WHERE username = ?', undef, $new, $old) or die $dbh->errstr . "\n";
+        $dbh->do('UPDATE password_resets SET username = ? WHERE username = ?', undef, $new, $old) or die $dbh->errstr . "\n";
+        $dbh->do('UPDATE audit_log       SET username = ? WHERE username = ?', undef, $new, $old) or die $dbh->errstr . "\n";
+        # login_attempts keyval for the per-account throttle (non-fatal if absent).
+        $dbh->do('UPDATE login_attempts  SET keyval = ? WHERE kind = ? AND keyval = ?', undef, $new, 'user', $old);
+        $dbh->do('DELETE FROM users WHERE username = ?', undef, $old) or die $dbh->errstr . "\n";
+        $dbh->commit;
+        1;
+    };
+    unless ($ok) {
+        my $e = $@ || $dbh->errstr || 'database error';
+        eval { $dbh->rollback };
+        return $back->('Rename failed: ' . $e);
+    }
+    $dbh->disconnect;
+    audit(action=>'rename_user', object_type=>'user', object_id=>$new,
+          old_value=>$old, new_value=>$new, detail=>"renamed user $old -> $new");
+    redirect_to_user_page(action=>"user_edit", username=>$new, msg=>"Renamed '$old' to '$new'.");
 }
 
 # Thin per-page handlers for the split User menu.
@@ -19762,6 +20812,13 @@ sub do_change_email {
     if (!defined $email) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"change_email_form", err => 'Invalid email address.');
+        return;
+    }
+    # Keep addresses unique, but do not reveal who owns it to a self-service user.
+    if (db_email_conflict($dbh, $email, $user)) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"change_email_form",
+            err => 'That email address is already in use by another account.');
         return;
     }
     db_set_email($dbh, $user, $email);
@@ -19893,6 +20950,42 @@ TXT
 <p style="margin:0 0 16px;font-size:13px;color:#57606a;">If the button does not work, copy this link into your browser:<br>
   <a href="$e_link" style="color:#1f4e79;word-break:break-all;">$e_link</a></p>
 <p style="margin:0 0 16px;color:#57606a;font-size:14px;">If you did not request this, you can ignore this email; your password will not change.</p>
+<p style="margin:0;">Kind regards,<br><strong>fetchconfig-web</strong></p>
+HTML
+    return ($text, email_html_shell($inner));
+}
+
+################################################################################
+# reset_email_ldap_bodies
+#
+# The reset email for an LDAP-authenticated account: NO reset link (the password
+# lives in Active Directory, not here). It tells the user to contact the help
+# desk. The browser still sees the same uniform "if an account matches..." note.
+################################################################################
+sub reset_email_ldap_bodies {
+    my ($user) = @_;
+    my $text = <<"TXT";
+Dear $user,
+
+A password reset was requested for your fetchconfig-web account.
+
+This account signs in with your Active Directory (LDAP) credentials, so its
+password is managed centrally and cannot be reset from fetchconfig-web.
+
+To have your AD password reset, please contact the user help desk.
+
+If you did not request this, you can ignore this email.
+
+Kind regards,
+fetchconfig-web
+TXT
+    my $e_user = esc($user);
+    my $inner = <<"HTML";
+<p style="margin:0 0 16px;">Dear <strong>$e_user</strong>,</p>
+<p style="margin:0 0 16px;">A password reset was requested for your fetchconfig-web account.</p>
+<p style="margin:0 0 16px;">This account signs in with your <strong>Active Directory (LDAP)</strong> credentials, so its password is managed centrally and cannot be reset from fetchconfig-web.</p>
+<p style="margin:0 0 16px;">To have your AD password reset, please <strong>contact the user help desk</strong>.</p>
+<p style="margin:0 0 16px;color:#57606a;font-size:14px;">If you did not request this, you can ignore this email.</p>
 <p style="margin:0;">Kind regards,<br><strong>fetchconfig-web</strong></p>
 HTML
     return ($text, email_html_shell($inner));
@@ -20109,6 +21202,12 @@ sub do_change_password {
         return;
     }
     my $u = db_get_user($dbh, $user);
+    if ($u && $u->{ldap_auth}) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"change_password_form",
+            err => 'This account signs in with Active Directory (LDAP); change your password on the AD/LDAP server, not here.');
+        return;
+    }
     unless ($u && verify_password($current, $u->{pass_hash})) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"change_password_form", err => 'Current password is incorrect.');
@@ -20185,7 +21284,7 @@ sub show_reset_password_form {
         redirect_to_user_page(action=>"user_list", err => "Only an admin can change other users' passwords.");
         return;
     }
-    unless (valid_id($target)) {
+    unless (valid_username($target)) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
@@ -20256,7 +21355,7 @@ sub do_reset_password {
         redirect_to_user_page(action=>"user_list", err => "Only an admin can change other users' passwords.");
         return;
     }
-    unless (valid_id($target)) {
+    unless (valid_username($target)) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
@@ -20341,20 +21440,47 @@ sub do_add_user {
         redirect_to_user_page(action=>"user_add", err => 'Only an admin can add users.');
         return;
     }
-    unless (valid_id($new_user)) {
+    unless (valid_username($new_user)) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"user_add", err => 'Invalid username (letters, numbers, dot, dash, underscore only).');
         return;
     }
-    if (my $perr = password_policy_error($password, $new_user)) {
-        $dbh->disconnect;
-        redirect_to_user_page(action=>"user_add", err => $perr);
-        return;
-    }
-    if ($password ne $confirm) {
-        $dbh->disconnect;
-        redirect_to_user_page(action=>"user_add", err => 'Password and confirmation do not match.');
-        return;
+    # Authentication: local (password entered) or LDAP. An LDAP user needs a UPN
+    # username and an enabled server; its local password is a random 16-char value
+    # (a valid, non-guessable hash) so the row is never usable for a local login --
+    # the real credential lives in AD. The plaintext is discarded.
+    my $want_ldap = ($ENABLE_LDAP && (($cgi->param('auth_method') // '') eq 'ldap')) ? 1 : 0;
+    my $ldap_server_id = undef;
+    my $hash;
+    if ($want_ldap) {
+        if ($new_user !~ /\@/) {
+            $dbh->disconnect;
+            redirect_to_user_page(action=>"user_add", err => q{An LDAP user needs a full UPN username (one containing '@').});
+            return;
+        }
+        my $sid = $cgi->param('ldap_server');
+        my $srv = (defined $sid && $sid =~ /^\d+$/) ? ldap_server_by_id($dbh, $sid) : undef;
+        unless ($srv && $srv->{enabled}) {
+            $dbh->disconnect;
+            redirect_to_user_page(action=>"user_add", err => 'Choose an enabled LDAP server for LDAP authentication.');
+            return;
+        }
+        $ldap_server_id = $srv->{id};
+        my $raw = eval { secure_random_bytes(16) };
+        $raw = pack('N', time()) . pack('N', $$) . pack('N', int(rand(2**32))) unless defined $raw;
+        $hash = password_hash(substr(unpack('H*', $raw), 0, 16));
+    } else {
+        if (my $perr = password_policy_error($password, $new_user)) {
+            $dbh->disconnect;
+            redirect_to_user_page(action=>"user_add", err => $perr);
+            return;
+        }
+        if ($password ne $confirm) {
+            $dbh->disconnect;
+            redirect_to_user_page(action=>"user_add", err => 'Password and confirmation do not match.');
+            return;
+        }
+        $hash = password_hash($password);
     }
     if (db_user_exists($dbh, $new_user)) {
         $dbh->disconnect;
@@ -20368,10 +21494,20 @@ sub do_add_user {
         redirect_to_user_page(action=>"user_add", err => 'Invalid email address.');
         return;
     }
+    if (my $clash = db_email_conflict($dbh, $email, undef)) {
+        $dbh->disconnect;
+        redirect_to_user_page(action=>"user_add",
+            err => "That email address is already used by '$clash'.");
+        return;
+    }
 
     # New users start with no special permissions; the admin sets them on the
     # edit page we redirect to below.
-    my ($ok, $err) = db_add_user($dbh, $new_user, password_hash($password), 0, 0);
+    my ($ok, $err) = db_add_user($dbh, $new_user, $hash, 0, 0);
+    if ($ok && $want_ldap) {
+        $dbh->do('UPDATE users SET ldap_auth = 1, ldap_server = ? WHERE username = ?',
+                 undef, $ldap_server_id, $new_user);
+    }
     if ($ok && $email ne '') { db_set_email($dbh, $new_user, $email); }
     $dbh->disconnect;
     if (!$ok) {
@@ -20414,7 +21550,7 @@ sub do_delete_user {
         redirect_to_user_page(action=>"user_list", err => 'Only an admin can delete users.');
         return;
     }
-    unless (valid_id($target)) {
+    unless (valid_username($target)) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
@@ -20464,7 +21600,7 @@ sub do_set_edit_right {
         redirect_to_user_page(action=>"user_list", err => 'Only an admin can change edit rights.');
         return;
     }
-    unless (valid_id($target)) {
+    unless (valid_username($target)) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
@@ -20519,7 +21655,7 @@ sub do_set_admin_right {
         redirect_to_user_page(action=>"user_list", err => 'Only an admin can change admin functions.');
         return;
     }
-    unless (valid_id($target)) {
+    unless (valid_username($target)) {
         $dbh->disconnect;
         redirect_to_user_page(action=>"user_list", err => 'Invalid username.');
         return;
@@ -26262,6 +27398,8 @@ sub validate_table_with_fetchconfig {
         }
     }
     unlink($tmp);
+    unlink("$tmp.lock");   # fetchconfig locks <devices>.lock next to the file; it
+                           # does not remove its own lock, so clear the sidecar too
     return $err;
 }
 
@@ -27943,6 +29081,7 @@ sub run_backup_now {
 
     my ($out, $status, $err, $aborted) = run_command_capture(@cmd);
     unlink($tmp);   # remove the cleartext-credential file immediately
+    unlink("$tmp.lock");   # and the engine's leftover <devices>.lock sidecar
     return ($out, $status, $err, $aborted);
 }
 
@@ -28124,9 +29263,13 @@ sub html_keepalive {
 # sweep_stale_backup_tables
 #
 # Remove Backup Now temp device tables (cleartext credentials) left behind by a
-# run that was killed before it could unlink its own (e.g. SIGKILL). Only our
-# own fcweb-dev-XXXXXXXX.tbl regular files, and only once they are older than
-# any run can be (BACKUP_TIMEOUT + 300 s; 24 h when BACKUP_TIMEOUT is 0).
+# run that was killed before it could unlink its own (e.g. SIGKILL), and the
+# fetchconfig engine's leftover "<devices>.lock" sidecars. The engine locks the
+# devices file it is handed and does not remove its own lock, so each run/save
+# left a zero-byte fcweb-{dev,save}-XXXXXXXX.tbl.lock behind; the handlers now
+# unlink theirs immediately, and this sweep clears any older strays (including
+# both prefixes and the pre-fix accumulation). Only once they are older than any
+# run can be (BACKUP_TIMEOUT + 300 s; 24 h when BACKUP_TIMEOUT is 0).
 # fetchconfig.pl reads the table at start-up, so this never affects a live run.
 #
 # Parameters: none
@@ -28136,7 +29279,7 @@ sub sweep_stale_backup_tables {
     opendir(my $dh, $BACKUP_TMP_DIR) or return;
     my $now = time();
     while (defined(my $f = readdir($dh))) {
-        next unless $f =~ /\Afcweb-dev-[A-Za-z0-9_]{8}\.tbl\z/;
+        next unless $f =~ /\Afcweb-(?:dev|save)-[A-Za-z0-9_]{8}\.tbl(?:\.lock)?\z/;
         my $path = "$BACKUP_TMP_DIR/$f";
         my @st = lstat($path) or next;
         next unless -f _;
@@ -28357,6 +29500,22 @@ sub valid_id {
 }
 
 ################################################################################
+# valid_username
+#
+# Validate a fetchconfig-web account name. Like valid_id but also permits '@', so
+# a user can be an Active Directory UPN (e.g. tammer@net.schuler.de) -- required
+# for LDAP's verbatim bind. The first character may not be a dash (defence in
+# depth). Usernames are never passed to fetchconfig.pl, so the extra '@' is safe.
+#
+# Parameters:
+#   $u
+################################################################################
+sub valid_username {
+    my ($u) = @_;
+    return defined $u && $u =~ /^[\w.@][\w.@\-]*\z/;
+}
+
+################################################################################
 # normalize_email
 #
 # Normalise a user-supplied email address. Returns '' for an empty/undef input
@@ -28481,9 +29640,89 @@ sub std_header {
 #   $user
 #   $main_class
 ################################################################################
+################################################################################
+# fontsize_px
+#
+# The base UI font size (px) for this request, from the per-device fcweb_fontsize
+# cookie. Three fixed levels only -- small 12 / normal 14 / large 16 -- so the
+# cookie value is mapped through a whitelist and ANY unknown/absent value falls
+# back to 16 (large). 16px is the default because it is the size that was good on
+# a large (1920x1200) display, so an existing install is unchanged; laptop users
+# drop to 14 or 12. The cookie is attacker-controllable, so the raw value is
+# never interpolated into the emitted CSS: only one of the three integers ever
+# reaches page_head's <style>. page_head sets html{font-size:<px>} from this, and
+# because the whole UI is em-relative it rescales from that one anchor. The level
+# is switched live (and the cookie written) by the titlebar control's JS below.
+################################################################################
+sub fontsize_px {
+    my %map = (small => 12, normal => 14, large => 16);
+    my %c   = eval { CGI::Cookie->fetch };   # list context (empty on any error)
+    my $obj = $c{'fcweb_fontsize'};
+    my $v   = (defined $obj) ? lc($obj->value // '') : '';
+    return $map{$v} // 16;   # unknown/absent -> 16 (large = the no-change default)
+}
+
+################################################################################
+# fontsize_control_html
+#
+# The titlebar text-size control: three A glyphs (small/normal/large) left of the
+# user name. The size is already applied server-side (page_head sets the root
+# font-size from the cookie), so this only switches it live: a click sets
+# document.documentElement.style.fontSize (inline style beats the stylesheet) and
+# rewrites the fcweb_fontsize cookie (Path=/, 1-year Max-Age, SameSite=Lax, and
+# Secure on an HTTPS connection). Values are whitelisted on both ends. aria-pressed
+# marks the active level for assistive tech.
+################################################################################
+sub fontsize_control_html {
+    return <<'FSHTML';
+<div class="fontsize-control" role="group" aria-label="Text size">
+<button type="button" class="fs-btn" data-fs="small" title="Small text (12px)" aria-label="Small text">A</button>
+<button type="button" class="fs-btn" data-fs="normal" title="Normal text (14px)" aria-label="Normal text">A</button>
+<button type="button" class="fs-btn" data-fs="large" title="Large text (16px)" aria-label="Large text">A</button>
+</div>
+<script>
+(function(){
+  var MAP={small:12,normal:14,large:16};
+  function cur(){
+    var m=document.cookie.match(/(?:^|;\s*)fcweb_fontsize=([^;]+)/);
+    var v=m?decodeURIComponent(m[1]):'large';
+    return MAP[v]?v:'large';
+  }
+  function apply(v){
+    document.documentElement.style.fontSize=MAP[v]+'px';
+    var b=document.querySelectorAll('.fontsize-control .fs-btn'),i,on;
+    for(i=0;i<b.length;i++){
+      on=b[i].getAttribute('data-fs')===v;
+      if(on){b[i].classList.add('active');}else{b[i].classList.remove('active');}
+      b[i].setAttribute('aria-pressed',on?'true':'false');
+    }
+  }
+  function set(v){
+    if(!MAP[v])return;
+    apply(v);
+    var sec=(location.protocol==='https:')?';Secure':'';
+    document.cookie='fcweb_fontsize='+v+';Path=/;Max-Age=31536000;SameSite=Lax'+sec;
+  }
+  document.addEventListener('DOMContentLoaded',function(){
+    apply(cur());
+    var c=document.querySelector('.fontsize-control');
+    if(!c)return;
+    c.addEventListener('click',function(e){
+      var t=e.target;
+      while(t&&t!==c&&!(t.className&&(''+t.className).indexOf('fs-btn')>=0)){t=t.parentNode;}
+      if(!t||t===c)return;
+      e.preventDefault();set(t.getAttribute('data-fs'));
+    });
+  });
+})();
+</script>
+FSHTML
+}
+
 sub page_head {
     my ($title, $user, $main_class) = @_;
     my $t = esc("$APP_TITLE - $title");
+    my $fs_px = fontsize_px();   # base UI font size (14/16/18) for first paint
     my $main_attr = (defined $main_class && $main_class ne '')
         ? qq{ class="} . esc($main_class) . qq{"} : '';
 
@@ -28606,6 +29845,7 @@ sub page_head {
         push @user_items, $su->('Change your password', '?action=change_password_form');
         push @user_items, $su->('Change your email',    '?action=change_email_form');
         push @user_items, $su->('Sites', '?action=sites') if $is_admin;
+        push @user_items, $su->('LDAP',  '?action=ldap')  if $is_admin;
         my $user_menu = $group->('User', @user_items);
 
         # Dashboard (only when ENABLE_DASHBOARD = 1), placed just before Help.
@@ -28682,6 +29922,7 @@ sub page_head {
               . $dashboard_menu
               . $help_menu
               . qq{</nav>}
+              . fontsize_control_html()
               . qq{<div class="user-info">$u &nbsp;|&nbsp; }
               . qq{<form method="POST" action="$action" class="logout-form">}
               . qq{<input type="hidden" name="action" value="logout">}
@@ -28840,7 +30081,7 @@ FONTCSS
 <meta charset="UTF-8">
 <title>$t</title>
 $font_faces<link rel="stylesheet" href="$css_href">
-<style>$backdrop_css</style>
+<style>html{font-size:${fs_px}px}$backdrop_css</style>
 </head>
 <body class="$body_class">
 <header class="app-titlebar">

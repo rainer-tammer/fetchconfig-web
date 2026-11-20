@@ -36,6 +36,19 @@ for my $model (sort keys %sample) {
     is(strip($hl), $plain, "highlight_template: strip(spans) == esc(original)");
 }
 
+# prompt_settle_ms and show_cmd are directives too: coloured teal (hl-tdir), the
+# same class as max_visits and capture_from respectively.
+{
+    my $src = "max_visits 3\nprompt_settle_ms 500\ncapture_from /^!/\nshow_cmd \"show run\"\n";
+    my $hl  = main::highlight_template($src);
+    like($hl, qr/<span class="hl-tdir">max_visits<\/span>/,       'max_visits is a directive (tdir)');
+    like($hl, qr/<span class="hl-tdir">prompt_settle_ms<\/span>/, 'prompt_settle_ms is tdir, like max_visits');
+    like($hl, qr/<span class="hl-tdir">capture_from<\/span>/,     'capture_from is a directive (tdir)');
+    like($hl, qr/<span class="hl-tdir">show_cmd<\/span>/,         'show_cmd is tdir, like capture_from');
+    my $plain = join("\n", map { main::esc($_) } split /\n/, $src, -1);
+    is(strip($hl), $plain, 'directive lines still obey the strip invariant');
+}
+
 # A model with no built-in highlighter now falls through to the template-backed
 # scheme resolution (GENERIC_SYNTAX, a config value). The three new scheme
 # highlighters (json, xml, generic) must all obey the strip invariant, and a

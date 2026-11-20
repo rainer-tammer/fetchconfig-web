@@ -83,13 +83,39 @@ def to_text(s):
 def _usage(msg):
     sys.stderr.write(
         "render-doc.py: %s\n"
-        "Usage:  python render-doc.py [input.md] [output.html]\n"
+        "Usage:  python render-doc.py [--version=V.R.M] [input.md] [output.html]\n"
         "  e.g.  python render-doc.py README.md   README.html\n"
         "        python render-doc.py INSTALL.md  INSTALL.html\n"
+        "        python render-doc.py --version=1.0.0 NOTES.md NOTES.html\n"
         "Note: the SCRIPT name (render-doc.py) comes first, then the Markdown\n"
         "input, then the HTML output. Do not run 'python INSTALL.md ...'.\n"
+        "With --version the shown version comes from the option and\n"
+        "fetchconfig-web.cgi is not read (for standalone Markdown files).\n"
         % msg)
     sys.exit(2)
+
+# --- optional --version=V.R.M ----------------------------------------------
+# When present, the version in the sidebar pill / hero stat is taken from this
+# option and fetchconfig-web.cgi is NOT opened -- so the renderer works on any
+# Markdown file in any directory, with no cgi present. Pass the bare number (the
+# pill prepends the 'v'). The flag may appear anywhere on the command line; it is
+# stripped here so the positional [input] [output] parsing below is unchanged.
+# Without the flag, behaviour is exactly as before (version read from the cgi).
+CLI_VERSION = None
+_rest = []
+_av = sys.argv[1:]
+_k = 0
+while _k < len(_av):
+    _a = _av[_k]
+    if _a.startswith('--version='):
+        CLI_VERSION = _a[len('--version='):]
+    elif _a == '--version':
+        _k += 1
+        CLI_VERSION = _av[_k] if _k < len(_av) else ''
+    else:
+        _rest.append(_a)
+    _k += 1
+sys.argv = [sys.argv[0]] + _rest
 
 README_IN = sys.argv[1] if len(sys.argv) > 1 else 'README.md'
 # Output HTML name: explicit 2nd arg wins; else derive from the input --
@@ -1162,8 +1188,15 @@ def cgi_constant(name):
         return '?'
     return m.group(1)
 
-app_version = html.escape(cgi_constant('APP_VERSION_INTERNAL'))
-min_fc_version = html.escape(cgi_constant('MIN_FETCHCONFIG_VERSION'))
+if CLI_VERSION is not None:
+    # Explicit --version: use it, and do NOT read fetchconfig-web.cgi. The
+    # minimum-fetchconfig value is only shown by the app docs (README/INSTALL,
+    # is_app_doc); a standalone document never shows it, so '?' is harmless.
+    app_version = html.escape(CLI_VERSION)
+    min_fc_version = '?'
+else:
+    app_version = html.escape(cgi_constant('APP_VERSION_INTERNAL'))
+    min_fc_version = html.escape(cgi_constant('MIN_FETCHCONFIG_VERSION'))
 
 # App-specific hero extras (warning callouts + stat tiles) are shown only for the
 # app documents (README/INSTALL); a generic doc gets a clean hero without them.
